@@ -1,0 +1,27 @@
+# Render service descriptor (template). Replace placeholders or set env vars in Render UI.
+services:
+  - type: web
+    name: upstox-bot-api
+    env: python
+    region: sg
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    envVars:
+      - key: UPSTOX_CLIENT_ID
+        value: ${UPSTOX_CLIENT_ID}
+      - key: UPSTOX_CLIENT_SECRET
+        value: ${UPSTOX_CLIENT_SECRET}
+      - key: UPSTOX_REDIRECT_URI
+        value: ${UPSTOX_REDIRECT_URI}
+      - key: EMAIL_PASSWORD
+        value: ${EMAIL_PASSWORD}
+      - key: TELEGRAM_BOT_TOKEN
+        value: ${TELEGRAM_BOT_TOKEN}
+      - key: TELEGRAM_CHAT_ID
+        value: ${TELEGRAM_CHAT_ID}
+      - key: FRONTEND_URL
+        value: ${FRONTEND_URL}
+      - key: SECRET_KEY
+        value: ${SECRET_KEY}
