@@ -33,7 +33,12 @@ class DatabaseManager:
                 check_same_thread=False,
             )
         else:
-            connection = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+            db_path = Path(self.db_path)
+            if not db_path.is_absolute():
+                db_path = Path.cwd() / db_path
+            if db_path.parent and not db_path.parent.exists():
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
