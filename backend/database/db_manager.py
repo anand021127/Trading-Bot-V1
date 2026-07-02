@@ -230,3 +230,22 @@ class DatabaseManager:
                 ),
             )
             connection.commit()
+
+    def list_performance_snapshots(self) -> List[PerformanceSnapshot]:
+        """Retrieve stored performance snapshots."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT date, net_pnl, trades_count, win_rate, equity, created_at FROM performance_snapshots ORDER BY date"
+            ).fetchall()
+
+        return [
+            PerformanceSnapshot(
+                date=row["date"],
+                net_pnl=row["net_pnl"],
+                trades_count=row["trades_count"],
+                win_rate=row["win_rate"],
+                equity=row["equity"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
