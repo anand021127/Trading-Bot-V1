@@ -42,7 +42,8 @@ export default function App() {
   const [socketMessage, setSocketMessage] = useState<unknown>(null)
   const [socketRetry, setSocketRetry] = useState(0)
   const reconnectTimer = useRef<number | null>(null)
-  const backendUrl = import.meta.env.VITE_BACKEND_URL || '/api'
+  const rawBackendUrl = import.meta.env.VITE_BACKEND_URL || '/api'
+  const backendUrl = rawBackendUrl.replace(/\/+$/, '').replace(/^(https?:\/\/[^/]+)$/, '$1/api')
 
   useEffect(() => {
     fetch(`${backendUrl}/overview`)

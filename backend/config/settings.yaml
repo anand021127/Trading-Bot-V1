@@ -94,4 +94,5 @@ api:
   port: 8000
   cors_origins:
     - "https://your-app.vercel.app"
+    - "https://trading-bot-v1-snowy.vercel.app"
     - "http://localhost:5173"
