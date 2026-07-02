@@ -6,7 +6,7 @@ services:
     region: sg
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
     disk:
       name: bot-data
@@ -36,7 +36,7 @@ services:
     region: sg
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python worker.py
+    startCommand: python -m backend.worker
     autoDeploy: true
     disk:
       name: bot-data
