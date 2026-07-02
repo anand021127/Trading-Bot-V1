@@ -6,6 +6,7 @@ later strategy and execution modules can persist their state without a full ORM.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,8 +37,32 @@ class DatabaseManager:
             db_path = Path(self.db_path)
             if not db_path.is_absolute():
                 db_path = Path.cwd() / db_path
-            if db_path.parent and not db_path.parent.exists():
-                db_path.parent.mkdir(parents=True, exist_ok=True)
+
+            parent_dir = db_path.parent
+            if parent_dir and not parent_dir.exists():
+                try:
+                    parent_dir.mkdir(parents=True, exist_ok=True)
+                except PermissionError:
+                    fallback_path = Path.cwd() / db_path.name
+                    print(
+                        f"WARNING: unable to create database directory {parent_dir}; "
+                        f"falling back to local path {fallback_path}"
+                    )
+                    db_path = fallback_path
+                    parent_dir = db_path.parent
+                    if not parent_dir.exists():
+                        parent_dir.mkdir(parents=True, exist_ok=True)
+            elif parent_dir and not os.access(parent_dir, os.W_OK):
+                fallback_path = Path.cwd() / db_path.name
+                print(
+                    f"WARNING: database directory {parent_dir} is not writable; "
+                    f"falling back to local path {fallback_path}"
+                )
+                db_path = fallback_path
+                parent_dir = db_path.parent
+                if not parent_dir.exists():
+                    parent_dir.mkdir(parents=True, exist_ok=True)
+
             connection = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
