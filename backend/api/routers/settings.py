@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.config.settings import load_settings
+from ...config.settings import load_settings
 
 router = APIRouter()
 settings = load_settings()

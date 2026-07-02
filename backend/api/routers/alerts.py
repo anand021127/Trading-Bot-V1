@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from backend.config.settings import load_settings
-from backend.notifications.email_alerts import EmailAlerts
-from backend.notifications.telegram_alerts import TelegramAlerts
+from ...config.settings import load_settings
+from ...notifications.email_alerts import EmailAlerts
+from ...notifications.telegram_alerts import TelegramAlerts
 
 router = APIRouter()
 settings = load_settings()

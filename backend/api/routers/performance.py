@@ -6,8 +6,8 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter
 
-from backend.database.db_manager import DatabaseManager
-from backend.config.settings import load_settings
+from ...database.db_manager import DatabaseManager
+from ...config.settings import load_settings
 
 router = APIRouter()
 settings = load_settings()
