@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from fastapi import APIRouter
 
-from ...config.settings import load_settings
+from backend.config.settings import load_settings
 
 router = APIRouter()
 settings = load_settings()

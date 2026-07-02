@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from ...config.settings import load_settings
+from backend.config.settings import load_settings
 
 router = APIRouter()
 settings = load_settings()

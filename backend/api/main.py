@@ -1,5 +1,9 @@
+import importlib.util
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
+from types import ModuleType
 from fastapi import FastAPI, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -7,6 +11,12 @@ from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+
+service_root = Path(__file__).resolve().parents[1]
+if importlib.util.find_spec("backend") is None:
+    backend_pkg = ModuleType("backend")
+    backend_pkg.__path__ = [str(service_root)]
+    sys.modules["backend"] = backend_pkg
 
 from .routers import (
     alerts_router,
@@ -19,8 +29,8 @@ from .routers import (
     websocket_router,
 )
 from .routers.websocket import broadcast_price_update
-from ..config.settings import load_settings
-from ..database.db_manager import DatabaseManager
+from backend.config.settings import load_settings
+from backend.database.db_manager import DatabaseManager
 
 
 @asynccontextmanager

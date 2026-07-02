@@ -8,14 +8,14 @@ from typing import Any, Dict, List, Optional, Union
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ...config.settings import load_settings
-from ...strategy.trading_engine import TradingEngine
-from ...database.models import Position, Trade
-from ...notifications.email_alerts import EmailAlerts
-from ...notifications.telegram_alerts import TelegramAlerts
-from ...risk.position_sizer import PositionSizer
-from ...risk.risk_manager import RiskManager
-from ...strategy.exit_manager import ExitManager
+from backend.config.settings import load_settings
+from backend.strategy.trading_engine import TradingEngine
+from backend.database.models import Position, Trade
+from backend.notifications.email_alerts import EmailAlerts
+from backend.notifications.telegram_alerts import TelegramAlerts
+from backend.risk.position_sizer import PositionSizer
+from backend.risk.risk_manager import RiskManager
+from backend.strategy.exit_manager import ExitManager
 
 
 class TradeExecutionRequest(BaseModel):
