@@ -12,26 +12,32 @@ import os
 from pathlib import Path
 from typing import Dict, Optional
 
+import yaml
+
 
 class ConfigLoader:
-    """Load configuration values from the environment and a .env file.
+    """Load configuration from YAML settings and environment variables.
 
-    Parameters
-    ----------
-    dotenv_path:
-        Optional path to the .env file. When omitted, the loader uses the
-        current working directory plus ".env".
+    This loader reads `settings.yaml` from the backend config directory and also
+    merges values from a `.env` file plus process environment variables.
     """
 
-    def __init__(self, dotenv_path: Optional[Path] = None) -> None:
+    def __init__(self, settings_path: Optional[Path] = None, dotenv_path: Optional[Path] = None) -> None:
+        config_dir = Path(__file__).resolve().parent
+        self.settings_path = settings_path or config_dir / "settings.yaml"
         self.dotenv_path = dotenv_path or Path.cwd() / ".env"
+        self.dotenv_path_explicit = dotenv_path is not None
 
     def _parse_dotenv(self, path: Path) -> Dict[str, str]:
-        """Parse a simple .env file into a dictionary of keys and values."""
-        values: Dict[str, str] = {}
-        if not path.exists():
-            return values
+        if path is None:
+            return {}
 
+        if not path.exists():
+            if self.dotenv_path_explicit:
+                raise FileNotFoundError(f"Dotenv file not found: {path}")
+            return {}
+
+        values: Dict[str, str] = {}
         for raw_line in path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -42,23 +48,24 @@ class ConfigLoader:
 
         return values
 
-    def load(self) -> Dict[str, str]:
-        """Load configuration values from the environment and the .env file.
+    def _load_yaml(self, path: Path) -> Dict[str, object]:
+        if not path.exists():
+            raise FileNotFoundError(f"Settings file not found: {path}")
 
-        Environment variables always take precedence over values declared in the
-        .env file.
-        """
-        if not self.dotenv_path.exists():
-            raise FileNotFoundError(f"Config file not found: {self.dotenv_path}")
+        with path.open("r", encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
 
-        config: Dict[str, str] = {}
-        config.update(self._parse_dotenv(self.dotenv_path))
-        for key, value in os.environ.items():
-            config[key] = value
+    def load(self) -> Dict[str, object]:
+        config: Dict[str, object] = {}
+        config.update(self._load_yaml(self.settings_path))
 
+        env_values = self._parse_dotenv(self.dotenv_path)
+        env_values.update(os.environ)
+
+        config.update(env_values)
+        config["env"] = env_values
         return config
 
 
-def load_config(dotenv_path: Optional[Path] = None) -> Dict[str, str]:
-    """Convenience helper that instantiates and runs the config loader."""
-    return ConfigLoader(dotenv_path=dotenv_path).load()
+def load_config(settings_path: Optional[Path] = None, dotenv_path: Optional[Path] = None) -> Dict[str, object]:
+    return ConfigLoader(settings_path=settings_path, dotenv_path=dotenv_path).load()

@@ -1,0 +1,97 @@
+mode: paper
+
+broker:
+  base_url: "https://api.upstox.com/v2"
+  websocket_url: "wss://api.upstox.com/v2/feed/market-data-feed"
+
+capital:
+  total: 500000
+  max_allocation_per_trade: 0.20
+  cash_buffer: 0.40
+
+risk:
+  max_risk_per_trade_pct: 0.01
+  max_daily_loss_pct: 0.02
+  max_trades_per_day: 4
+  max_concurrent_positions: 2
+  max_consecutive_losses: 3
+  pause_after_losses_minutes: 30
+
+strategy:
+  name: "ORB_TREND_FOLLOWING"
+  timeframe_entry: "5minute"
+  timeframe_trend: "15minute"
+  orb_window_start: "09:15"
+  orb_window_end: "09:30"
+  entry_window_start: "09:30"
+  entry_window_end: "12:30"
+  exit_all_by: "14:45"
+  no_new_trades_after: "14:30"
+
+indicators:
+  ema_fast: 20
+  ema_slow: 50
+  ema_trend: 200
+  rsi_period: 14
+  rsi_min: 55
+  rsi_max: 75
+  atr_period: 14
+  choppiness_period: 14
+  choppiness_max: 61.8
+  volume_lookback: 20
+  volume_multiplier: 1.5
+
+filters:
+  orb_min_width_atr_multiplier: 0.30
+  orb_max_width_atr_multiplier: 2.50
+  max_gap_up_pct: 0.02
+  avoid_round_numbers_pct: 0.005
+  min_body_pct_of_range: 0.60
+  adx_min: 20
+
+stop_loss:
+  atr_multiplier: 1.5
+
+trailing_stop:
+  stage2_trigger_r: 1.0
+  stage3_trigger_r: 2.0
+  stage3_atr_multiplier: 1.5
+  stage4_trigger_r: 3.0
+  stage4_atr_multiplier: 1.0
+
+universe:
+  index: "NIFTY50"
+  min_avg_daily_volume: 1000000
+  min_adr_pct: 0.008
+  max_stocks_in_watchlist: 10
+
+logging:
+  level: "INFO"
+  log_dir: "logs/"
+  max_file_size_mb: 50
+  backup_count: 10
+
+database:
+  path: "/data/trading_bot.db"
+
+notifications:
+  email_enabled: true
+  telegram_enabled: true
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 587
+  sender_email: ""
+  recipient_email: ""
+
+backtest:
+  start_date: "2024-01-01"
+  end_date: "2024-12-31"
+  commission_pct: 0.0003
+  slippage_pct: 0.0001
+  stt_pct: 0.001
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins:
+    - "https://your-app.vercel.app"
+    - "http://localhost:5173"
