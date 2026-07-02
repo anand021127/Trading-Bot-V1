@@ -8,7 +8,7 @@ from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from backend.api.routers import (
+from .routers import (
     alerts_router,
     backtest_router,
     diagnostics_router,
@@ -18,9 +18,9 @@ from backend.api.routers import (
     trading_router,
     websocket_router,
 )
-from backend.api.routers.websocket import broadcast_price_update
-from backend.config.settings import load_settings
-from backend.database.db_manager import DatabaseManager
+from .routers.websocket import broadcast_price_update
+from ..config.settings import load_settings
+from ..database.db_manager import DatabaseManager
 
 
 @asynccontextmanager

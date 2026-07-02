@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, WebSocket
 
-from backend.api.websocket import manager, build_initial_state, build_price_update
+from ..websocket import manager, build_initial_state, build_price_update
 
 router = APIRouter()
 

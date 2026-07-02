@@ -3,9 +3,9 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter
 
-from backend.api.websocket import manager as websocket_manager
-from backend.config.settings import load_settings
-from backend.database.db_manager import DatabaseManager
+from ..websocket import manager as websocket_manager
+from ...config.settings import load_settings
+from ...database.db_manager import DatabaseManager
 
 router = APIRouter()
 settings = load_settings()
