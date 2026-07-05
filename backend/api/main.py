@@ -1,17 +1,20 @@
+"""FastAPI application entry point."""
 import importlib.util
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
-from fastapi import FastAPI, Request, Form
+from typing import Optional
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+# Ensure 'backend' package is importable when run as uvicorn backend.api.main:app
 service_root = Path(__file__).resolve().parents[1]
 if importlib.util.find_spec("backend") is None:
     backend_pkg = ModuleType("backend")
@@ -35,9 +38,9 @@ from backend.database.db_manager import DatabaseManager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings = load_settings()
-    db_manager = DatabaseManager(db_path=settings.database.path)
-    db_manager.init_db()
+    s = load_settings()
+    db = DatabaseManager(db_path=s.database.path)
+    db.init_db()
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -47,38 +50,62 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     app.state.scheduler = scheduler
-
     yield
-
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="Upstox Trading Bot API", lifespan=lifespan)
+app = FastAPI(
+    title="Upstox Trading Bot API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 settings = load_settings()
 
+# CORS — allow Vercel frontend + localhost dev
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.api.cors_origins,
     allow_origin_regex=r"https?://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
+# ── Routers ──────────────────────────────────────────────────────────────────
+# /api/overview
 app.include_router(overview_router, prefix="/api")
-app.include_router(trading_router, prefix="/api/trading")
+
+# /api/trades, /api/positions, /api/prices, /api/paper
+app.include_router(trading_router, prefix="/api")
+
+# /api/ws (WebSocket)
 app.include_router(websocket_router, prefix="/api")
+
+# /api/settings
 app.include_router(settings_router, prefix="/api/settings")
+
+# /api/diagnostics
 app.include_router(diagnostics_router, prefix="/api/diagnostics")
+
+# /api/alerts
 app.include_router(alerts_router, prefix="/api/alerts")
+
+# /api/backtest
 app.include_router(backtest_router, prefix="/api/backtest")
+
+# /api/performance
 app.include_router(performance_router, prefix="/api/performance")
 
 
+# ── Core endpoints ────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "mode": settings.mode, "timestamp": datetime.now().isoformat()}
+    return {
+        "status": "ok",
+        "mode": settings.mode,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 @app.get("/api/health")
@@ -88,12 +115,16 @@ async def api_health():
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Upstox trading bot backend"}
+    return {
+        "status": "ok",
+        "message": "Upstox Trading Bot Backend",
+        "docs": "/docs",
+        "health": "/health",
+    }
 
 
-@app.post("/api/settings/token-callback")
-async def token_callback(code: Optional[str] = Form(None)):
-    # Minimal stub: in the real app this would exchange the code for tokens
-    if not code:
-        return JSONResponse({"detail": "missing code"}, status_code=400)
-    return {"status": "received", "code": code}
+# OAuth callback (GET — Upstox redirects here with ?code=...)
+@app.get("/api/settings/token-callback")
+async def token_callback_root(code: Optional[str] = None):
+    from .routers.settings import token_callback_get
+    return await token_callback_get(code)

@@ -1,11 +1,11 @@
-# Render service descriptor (template). Replace placeholders or set env vars in Render UI.
 services:
   - type: web
     name: upstox-bot-api
     env: python
-    region: sg
+    region: singapore
     plan: free
-    buildCommand: pip install -r requirements.txt
+    rootDir: .
+    buildCommand: pip install -r backend/requirements.txt
     startCommand: uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
     disk:
@@ -14,28 +14,31 @@ services:
       sizeGB: 1
     envVars:
       - key: UPSTOX_CLIENT_ID
-        value: ${UPSTOX_CLIENT_ID}
+        sync: false
       - key: UPSTOX_CLIENT_SECRET
-        value: ${UPSTOX_CLIENT_SECRET}
+        sync: false
       - key: UPSTOX_REDIRECT_URI
-        value: ${UPSTOX_REDIRECT_URI}
+        sync: false
+      - key: UPSTOX_ACCESS_TOKEN
+        sync: false
       - key: EMAIL_PASSWORD
-        value: ${EMAIL_PASSWORD}
+        sync: false
       - key: TELEGRAM_BOT_TOKEN
-        value: ${TELEGRAM_BOT_TOKEN}
+        sync: false
       - key: TELEGRAM_CHAT_ID
-        value: ${TELEGRAM_CHAT_ID}
+        sync: false
       - key: FRONTEND_URL
-        value: ${FRONTEND_URL}
+        sync: false
       - key: SECRET_KEY
-        value: ${SECRET_KEY}
+        sync: false
 
   - type: worker
     name: upstox-bot-worker
     env: python
-    region: sg
+    region: singapore
     plan: free
-    buildCommand: pip install -r requirements.txt
+    rootDir: .
+    buildCommand: pip install -r backend/requirements.txt
     startCommand: python -m backend.worker
     autoDeploy: true
     disk:
@@ -44,18 +47,20 @@ services:
       sizeGB: 1
     envVars:
       - key: UPSTOX_CLIENT_ID
-        value: ${UPSTOX_CLIENT_ID}
+        sync: false
       - key: UPSTOX_CLIENT_SECRET
-        value: ${UPSTOX_CLIENT_SECRET}
+        sync: false
       - key: UPSTOX_REDIRECT_URI
-        value: ${UPSTOX_REDIRECT_URI}
+        sync: false
+      - key: UPSTOX_ACCESS_TOKEN
+        sync: false
       - key: EMAIL_PASSWORD
-        value: ${EMAIL_PASSWORD}
+        sync: false
       - key: TELEGRAM_BOT_TOKEN
-        value: ${TELEGRAM_BOT_TOKEN}
+        sync: false
       - key: TELEGRAM_CHAT_ID
-        value: ${TELEGRAM_CHAT_ID}
+        sync: false
       - key: FRONTEND_URL
-        value: ${FRONTEND_URL}
+        sync: false
       - key: SECRET_KEY
-        value: ${SECRET_KEY}
+        sync: false
