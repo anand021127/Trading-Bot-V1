@@ -15,8 +15,13 @@ export default {
         warning: '#f59e0b',
         border: '#1e2d45',
       },
-      boxShadow: {
-        glow: '0 0 0 1px rgba(255, 255, 255, 0.04), 0 18px 60px rgba(0, 0, 0, 0.25)',
+      animation: {
+        'flash-green': 'flashGreen 0.6s ease-out',
+        'flash-red': 'flashRed 0.6s ease-out',
+      },
+      keyframes: {
+        flashGreen: { '0%': { backgroundColor: 'rgba(16,185,129,0.3)' }, '100%': { backgroundColor: 'transparent' } },
+        flashRed: { '0%': { backgroundColor: 'rgba(239,68,68,0.3)' }, '100%': { backgroundColor: 'transparent' } },
       },
     },
   },

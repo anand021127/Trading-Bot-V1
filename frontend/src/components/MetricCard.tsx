@@ -1,19 +1,24 @@
 interface MetricCardProps {
-  label: string
+  title: string
   value: string
-  delta?: string
-  description?: string
+  sub?: string
+  valueColor?: string
+  icon?: React.ReactNode
+  badge?: { label: string; cls: string }
 }
 
-export default function MetricCard({ label, value, delta, description }: MetricCardProps) {
+export default function MetricCard({ title, value, sub, valueColor = 'text-white', icon, badge }: MetricCardProps) {
   return (
-    <div className="rounded-3xl border border-white/10 bg-card p-6 shadow-glow transition hover:border-white/20 hover:bg-card-hover">
-      <div className="text-sm uppercase tracking-[0.24em] text-white/60">{label}</div>
-      <div className="mt-4 flex items-baseline gap-2">
-        <span className="text-3xl font-semibold text-white">{value}</span>
-        {delta ? <span className="rounded-full bg-white/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-white/80">{delta}</span> : null}
+    <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-4 hover:border-[#243044] transition-colors">
+      <div className="flex items-start justify-between mb-2">
+        <span className="text-[10px] text-slate-500 uppercase tracking-widest font-medium">{title}</span>
+        {icon && <span className="text-slate-600">{icon}</span>}
+        {badge && (
+          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${badge.cls}`}>{badge.label}</span>
+        )}
       </div>
-      {description ? <p className="mt-3 text-sm text-white/60">{description}</p> : null}
+      <div className={`text-xl font-bold ${valueColor} mb-0.5`}>{value}</div>
+      {sub && <div className="text-xs text-slate-500 mt-0.5">{sub}</div>}
     </div>
   )
 }

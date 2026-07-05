@@ -1,24 +1,27 @@
 import axios from 'axios'
 
-const rawBackendUrl = import.meta.env.VITE_BACKEND_URL || '/api'
-const backendBaseUrl = rawBackendUrl.replace(/\/+$|^(https?:\/\/[^/]+)$/, (match) => {
-  if (match.startsWith('http')) {
-    return match.replace(/\/+$/, '')
-  }
-  return match
+// In Vite, import.meta.env is available. The TS errors are due to missing vite/client types.
+// We cast to any to work around the tsconfig issue.
+const meta = import.meta as unknown as { env: Record<string, string> }
+const rawUrl = (meta.env.VITE_BACKEND_URL ?? '').replace(/\/+$/, '')
+const BASE_URL = rawUrl || ''
+
+export const api = axios.create({
+  baseURL: BASE_URL,
+  timeout: 30000,
+  headers: { 'Content-Type': 'application/json' },
 })
 
-const baseURL = backendBaseUrl.startsWith('http')
-  ? backendBaseUrl.replace(/\/+$/, '')
-  : backendBaseUrl
-
-const apiClient = axios.create({
-  baseURL,
-  headers: {
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
+api.interceptors.response.use(
+  (r) => r,
+  (err: unknown) => {
+    const message =
+      typeof err === 'object' && err !== null && 'message' in err
+        ? (err as { message: string }).message
+        : 'Unknown error'
+    console.error('API Error:', message)
+    throw err
   },
-  withCredentials: true,
-})
+)
 
-export default apiClient
+export default api

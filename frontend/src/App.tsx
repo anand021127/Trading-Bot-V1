@@ -13,9 +13,9 @@ import Settings from './pages/Settings'
 export default function App() {
   return (
     <BrowserRouter>
-      <Layout>
-        <Routes>
-          <Route path="/" element={<Overview />} />
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<Overview />} />
           <Route path="/trade-history" element={<TradeHistory />} />
           <Route path="/live-premiums" element={<LivePremiums />} />
           <Route path="/paper-trading" element={<PaperTrading />} />
@@ -24,8 +24,8 @@ export default function App() {
           <Route path="/api-test" element={<ApiTest />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </Layout>
+        </Route>
+      </Routes>
     </BrowserRouter>
   )
 }

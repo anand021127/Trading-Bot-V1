@@ -1,66 +1,64 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 type WebSocketStatus = 'connecting' | 'connected' | 'error' | 'closed'
 
-const rawBackendUrl = import.meta.env.VITE_BACKEND_URL?.trim() || ''
-const backendUrl = rawBackendUrl
-  ? rawBackendUrl.replace(/\/+$|^(https?:\/\/[^/]+)$/, (match) => {
-      if (/^https?:\/\//.test(match)) {
-        return match.replace(/\/+$/, '')
-      }
-      return match.replace(/\/+$/, '')
-    })
-  : '/api'
-const normalizedBackendUrl = rawBackendUrl
-  ? rawBackendUrl.replace(/\/+$/, '').replace(/^(https?:\/\/[^/]+)$/, '$1/api')
-  : '/api'
+const meta = import.meta as unknown as { env: Record<string, string> }
+const backendUrl = (meta.env.VITE_BACKEND_URL ?? '').replace(/\/+$/, '').replace(/\/api$/, '')
+const wsBase = backendUrl
+  ? backendUrl.replace(/^http/, 'ws')
+  : `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://${typeof window !== 'undefined' ? window.location.host : 'localhost:8000'}`
 
-const websocketUrl = normalizedBackendUrl.startsWith('http')
-  ? `${normalizedBackendUrl.replace(/^http/, 'ws')}/ws`
-  : `${window.location.origin}${normalizedBackendUrl}/ws`
+const WS_URL = `${wsBase}/api/ws`
 
 export function useWebSocket() {
   const [status, setStatus] = useState<WebSocketStatus>('closed')
   const [message, setMessage] = useState<unknown>(null)
-  const retryRef = useRef(0)
-  const reconnectTimer = useRef<number | null>(null)
+  const [prices, setPrices] = useState<Record<string, { ltp: number; change_pct: number; volume: number }>>({})
+  const socketRef = useRef<WebSocket | null>(null)
+  const retryTimer = useRef<ReturnType<typeof setTimeout>>()
 
-  useEffect(() => {
-    let socket: WebSocket | null = null
-
-    const connect = () => {
+  const connect = useCallback(() => {
+    try {
       setStatus('connecting')
-      socket = new WebSocket(websocketUrl)
+      const ws = new WebSocket(WS_URL)
+      socketRef.current = ws
 
-      socket.onopen = () => setStatus('connected')
-      socket.onmessage = (event) => {
+      ws.onopen = () => setStatus('connected')
+
+      ws.onmessage = (ev: MessageEvent) => {
         try {
-          setMessage(JSON.parse(event.data))
+          const data = JSON.parse(ev.data as string) as {
+            type?: string
+            payload?: { prices?: Record<string, { ltp: number; change_pct: number; volume: number }> }
+          }
+          setMessage(data)
+          if (data?.type === 'price_update' && data?.payload?.prices) {
+            setPrices((prev) => ({ ...prev, ...data.payload!.prices }))
+          }
         } catch {
-          setMessage(event.data)
+          setMessage(ev.data)
         }
       }
-      socket.onerror = () => setStatus('error')
-      socket.onclose = () => {
+
+      ws.onerror = () => setStatus('error')
+
+      ws.onclose = () => {
         setStatus('closed')
-        reconnectTimer.current = window.setTimeout(() => {
-          retryRef.current += 1
-          connect()
-        }, 3000)
+        retryTimer.current = setTimeout(connect, 4000)
       }
-    }
-
-    connect()
-
-    return () => {
-      if (reconnectTimer.current) {
-        window.clearTimeout(reconnectTimer.current)
-      }
-      if (socket) {
-        socket.close()
-      }
+    } catch {
+      setStatus('error')
+      retryTimer.current = setTimeout(connect, 5000)
     }
   }, [])
 
-  return { status, message, websocketUrl, backendUrl }
+  useEffect(() => {
+    connect()
+    return () => {
+      clearTimeout(retryTimer.current)
+      socketRef.current?.close()
+    }
+  }, [connect])
+
+  return { status, message, prices, websocketUrl: WS_URL }
 }
