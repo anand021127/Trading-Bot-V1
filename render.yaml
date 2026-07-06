@@ -1,0 +1,66 @@
+services:
+  - type: web
+    name: upstox-bot-api
+    env: python
+    region: singapore
+    plan: free
+    rootDir: .
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    disk:
+      name: bot-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: UPSTOX_CLIENT_ID
+        sync: false
+      - key: UPSTOX_CLIENT_SECRET
+        sync: false
+      - key: UPSTOX_REDIRECT_URI
+        sync: false
+      - key: UPSTOX_ACCESS_TOKEN
+        sync: false
+      - key: EMAIL_PASSWORD
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+
+  - type: worker
+    name: upstox-bot-worker
+    env: python
+    region: singapore
+    plan: free
+    rootDir: .
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: python -m backend.worker
+    autoDeploy: true
+    disk:
+      name: bot-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: UPSTOX_CLIENT_ID
+        sync: false
+      - key: UPSTOX_CLIENT_SECRET
+        sync: false
+      - key: UPSTOX_REDIRECT_URI
+        sync: false
+      - key: UPSTOX_ACCESS_TOKEN
+        sync: false
+      - key: EMAIL_PASSWORD
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: SECRET_KEY
+        sync: false
