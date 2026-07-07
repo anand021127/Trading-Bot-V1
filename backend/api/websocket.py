@@ -1,16 +1,23 @@
-"""WebSocket connection manager and update helpers."""
-
+"""WebSocket connection manager — pushes live prices and bot state to frontend."""
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
-from typing import Any, Dict, Set
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Set
+from zoneinfo import ZoneInfo
 
 from fastapi import WebSocket
 
+from backend.config.settings import load_settings
+
+logger = logging.getLogger(__name__)
+settings = load_settings()
+IST = ZoneInfo("Asia/Kolkata")
+
 
 class ConnectionManager:
-    """Manage active WebSocket connections for live updates."""
+    """Thread-safe WebSocket connection manager."""
 
     def __init__(self) -> None:
         self.active_connections: Set[WebSocket] = set()
@@ -18,51 +25,111 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self.active_connections.add(websocket)
+        logger.debug("WS client connected. Total: %d", len(self.active_connections))
 
     def disconnect(self, websocket: WebSocket) -> None:
         self.active_connections.discard(websocket)
+        logger.debug("WS client disconnected. Total: %d", len(self.active_connections))
 
     async def send_to(self, websocket: WebSocket, data: Dict[str, Any]) -> None:
-        await websocket.send_json(data)
+        try:
+            await websocket.send_json(data)
+        except Exception:
+            self.disconnect(websocket)
 
     async def broadcast(self, data: Dict[str, Any]) -> None:
         if not self.active_connections:
             return
-
-        tasks = [self.send_to(connection, data) for connection in list(self.active_connections)]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for websocket, result in zip(list(self.active_connections), results):
-            if isinstance(result, Exception):
-                self.disconnect(websocket)
+        dead = set()
+        for ws in list(self.active_connections):
+            try:
+                await ws.send_json(data)
+            except Exception:
+                dead.add(ws)
+        for ws in dead:
+            self.disconnect(ws)
 
 
 manager = ConnectionManager()
 
+# Price cache populated by the broadcast task
+_price_cache: Dict[str, Any] = {}
+
+
+def update_price_cache(prices: Dict[str, Any]) -> None:
+    """Called by broker WebSocket when new prices arrive."""
+    _price_cache.update(prices)
+
+
+def _is_market_open() -> bool:
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    open_t  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
+    close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return open_t <= now <= close_t
+
+
+def _get_bot_state() -> Dict[str, Any]:
+    try:
+        from backend.strategy.trading_engine import BotState
+        return BotState.status()
+    except Exception:
+        return {"running": False, "kill_switch_active": False}
+
+
+def _get_positions() -> list:
+    try:
+        from backend.database.db_manager import DatabaseManager
+        db = DatabaseManager(db_path=settings.database.path)
+        rows = db.list_positions()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
 
 def build_price_update() -> Dict[str, Any]:
+    bot_state = _get_bot_state()
     return {
         "type": "price_update",
-        "timestamp": datetime.now().astimezone().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "payload": {
-            "market_open": False,
-            "mode": "paper",
+            "market_open": _is_market_open(),
+            "mode": settings.mode,
             "websocket_connected": len(manager.active_connections) > 0,
             "active_connections": len(manager.active_connections),
-            "positions": [],
+            "positions": _get_positions(),
+            "prices": _price_cache,
+            "bot_running": bot_state.get("running", False),
+            "kill_switch_active": bot_state.get("kill_switch_active", False),
         },
     }
 
 
 def build_initial_state() -> Dict[str, Any]:
+    bot_state = _get_bot_state()
     return {
-        "type": "state",
-        "timestamp": datetime.now().astimezone().isoformat(),
+        "type": "initial_state",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "payload": {
-            "mode": "paper",
-            "market_open": False,
-            "websocket_connected": len(manager.active_connections) > 0,
+            "mode": settings.mode,
+            "market_open": _is_market_open(),
+            "websocket_connected": True,
             "active_connections": len(manager.active_connections),
-            "positions": [],
+            "positions": _get_positions(),
+            "prices": _price_cache,
+            "bot_running": bot_state.get("running", False),
+            "kill_switch_active": bot_state.get("kill_switch_active", False),
         },
     }
+
+
+async def broadcast_price_update() -> None:
+    """Called by APScheduler every 5 seconds to push state to all clients."""
+    if not manager.active_connections:
+        return
+    try:
+        data = build_price_update()
+        await manager.broadcast(data)
+    except Exception as e:
+        logger.debug("Broadcast error: %s", e)

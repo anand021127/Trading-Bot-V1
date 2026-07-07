@@ -1,78 +1,65 @@
-"""Background worker entry point for Render worker service."""
+"""Background worker entry point for Render.
 
+Runs the trading engine loop independently of the API server.
+"""
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+import logging
 import os
+import sys
+from pathlib import Path
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+# Ensure backend package is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from backend.config.settings import load_settings
-from backend.database.db_manager import DatabaseManager
-from backend.notifications.email_alerts import EmailAlerts
-from backend.notifications.telegram_alerts import TelegramAlerts
-from backend.orders.order_manager import OrderManager
-from backend.risk.position_sizer import PositionSizer
-from backend.risk.risk_manager import RiskManager
-from backend.strategy.exit_manager import ExitManager
-from backend.strategy.trading_engine import TradingEngine
-
-
-async def run_worker_loop(engine: TradingEngine) -> None:
-    while True:
-        positions = engine.list_positions()
-        if positions:
-            print(f"[{datetime.utcnow().isoformat()}] Worker heartbeat: {len(positions)} open positions")
-        else:
-            print(f"[{datetime.utcnow().isoformat()}] Worker heartbeat: no open positions")
-        await asyncio.sleep(60)
-
-
-def build_engine(settings) -> TradingEngine:
-    telegram_alerts = TelegramAlerts() if settings.notifications.telegram_enabled else None
-    email_alerts = EmailAlerts() if settings.notifications.email_enabled else None
-
-    return TradingEngine(
-        order_manager=OrderManager(),
-        db_manager=DatabaseManager(db_path=settings.database.path),
-        risk_manager=RiskManager(capital=settings.capital.total),
-        position_sizer=PositionSizer(capital=settings.capital.total),
-        exit_manager=ExitManager(stop_loss_pct=settings.risk.max_risk_per_trade_pct),
-        telegram_alerts=telegram_alerts,
-        email_alerts=email_alerts,
-        strategy_name=settings.strategy.name,
-    )
-
-
-def start_scheduler(engine: TradingEngine) -> AsyncIOScheduler:
-    scheduler = AsyncIOScheduler()
-
-    async def heartbeat() -> None:
-        open_positions = engine.list_positions()
-        print(
-            f"[{datetime.utcnow().isoformat()}] Worker scheduler heartbeat: {len(open_positions)} positions"
-        )
-
-    scheduler.add_job(heartbeat, IntervalTrigger(minutes=1), id="worker_heartbeat")
-    scheduler.start()
-    return scheduler
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
+    from backend.config.settings import load_settings
+    from backend.database.db_manager import DatabaseManager
+
     settings = load_settings()
-    db_manager = DatabaseManager(db_path=settings.database.path)
-    db_manager.init_db()
+    db = DatabaseManager(db_path=settings.database.path)
+    db.init_db()
+    logger.info("Database initialised at %s", settings.database.path)
 
-    engine = build_engine(settings)
-    scheduler = start_scheduler(engine)
-
-    print("Worker started in mode:", settings.mode)
     try:
-        await run_worker_loop(engine)
-    finally:
-        scheduler.shutdown(wait=False)
+        from backend.strategy.trading_engine import TradingEngine, BotState
+        from backend.notifications.telegram_alerts import TelegramAlerts
+        from backend.notifications.email_alerts import EmailAlerts
+
+        engine = TradingEngine(
+            telegram_alerts=TelegramAlerts() if settings.notifications.telegram_enabled else None,
+            email_alerts=EmailAlerts()    if settings.notifications.email_enabled    else None,
+        )
+
+        # Auto-start in the mode configured
+        logger.info("Worker starting in mode: %s", settings.mode)
+        engine.start()
+
+        if settings.mode in ("paper", "live"):
+            await engine.run_trading_session()
+        else:
+            # Backtest mode — just keep process alive for API
+            logger.info("Backtest mode — worker idle (API server handles requests)")
+            while True:
+                await asyncio.sleep(60)
+
+    except ImportError as e:
+        logger.error("Import error in worker: %s — running heartbeat only", e)
+        while True:
+            logger.info("Worker heartbeat (trading engine unavailable)")
+            await asyncio.sleep(60)
+    except Exception as e:
+        logger.exception("Worker fatal error: %s", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

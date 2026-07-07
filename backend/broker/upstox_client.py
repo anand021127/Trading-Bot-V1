@@ -1,4 +1,4 @@
-"""Upstox REST API client — production-grade with retry, rate-limit, and timeout handling."""
+"""Upstox REST API v2 client — production grade with retry and error handling."""
 from __future__ import annotations
 
 import logging
@@ -15,8 +15,24 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.upstox.com/v2"
 
-# Upstox instrument key format: NSE_EQ|{ISIN} or NSE_EQ|{symbol}
-# For market quotes the API uses instrument_key
+# Upstox v2 valid historical candle intervals
+# Reference: https://upstox.com/developer/api-documentation/get-historical-candle-data
+VALID_INTERVALS = {
+    "1minute":  "1minute",
+    "1min":     "1minute",
+    "30minute": "30minute",
+    "30min":    "30minute",
+    "day":      "day",
+    "1day":     "day",
+    "week":     "week",
+    "month":    "month",
+    # Map common wrong values to correct ones
+    "5minute":  "30minute",   # Upstox v2 does NOT support 5min — use 30min
+    "15minute": "30minute",   # Upstox v2 does NOT support 15min — use 30min
+    "60minute": "day",
+}
+
+# Instrument key map for NIFTY50 stocks (NSE_EQ|ISIN format)
 SYMBOL_TO_KEY: Dict[str, str] = {
     "RELIANCE":   "NSE_EQ|INE002A01018",
     "TCS":        "NSE_EQ|INE467B01029",
@@ -38,40 +54,60 @@ SYMBOL_TO_KEY: Dict[str, str] = {
     "TITAN":      "NSE_EQ|INE280A01028",
     "ULTRACEMCO": "NSE_EQ|INE481G01011",
     "BAJFINANCE": "NSE_EQ|INE296A01024",
+    "NESTLEIND":  "NSE_EQ|INE239N01024",
+    "TECHM":      "NSE_EQ|INE669C01036",
     "NTPC":       "NSE_EQ|INE733E01010",
     "POWERGRID":  "NSE_EQ|INE752E01010",
     "ONGC":       "NSE_EQ|INE213A01029",
+    "JSWSTEEL":   "NSE_EQ|INE019A01038",
     "TATASTEEL":  "NSE_EQ|INE081A01020",
+    "HINDALCO":   "NSE_EQ|INE038A01020",
     "TATAMOTORS": "NSE_EQ|INE155A01022",
+    "M&M":        "NSE_EQ|INE101A01026",
+    "BAJAJFINSV": "NSE_EQ|INE918I01026",
+    "DRREDDY":    "NSE_EQ|INE089A01031",
+    "CIPLA":      "NSE_EQ|INE059A01026",
+    "DIVISLAB":   "NSE_EQ|INE361B01024",
+    "APOLLOHOSP": "NSE_EQ|INE437A01024",
+    "ADANIENT":   "NSE_EQ|INE423A01024",
+    "ADANIPORTS": "NSE_EQ|INE742F01042",
+    "COALINDIA":  "NSE_EQ|INE522F01014",
+    "BPCL":       "NSE_EQ|INE029A01011",
+    "EICHERMOT":  "NSE_EQ|INE066A01021",
+    "HEROMOTOCO": "NSE_EQ|INE158A01026",
+    "INDUSINDBK": "NSE_EQ|INE095A01012",
+    "SBILIFE":    "NSE_EQ|INE123W01016",
+    "HDFCLIFE":   "NSE_EQ|INE795G01014",
+    "GRASIM":     "NSE_EQ|INE047A01021",
+    "TATACONSUM": "NSE_EQ|INE192A01025",
+    "UPL":        "NSE_EQ|INE628A01036",
+    "BRITANNIA":  "NSE_EQ|INE216A01030",
+    "SHREECEM":   "NSE_EQ|INE070A01015",
+    "BAJAJ-AUTO": "NSE_EQ|INE917I01010",
 }
 
 
-def _build_session(retries: int = 3, backoff: float = 0.5) -> requests.Session:
-    """Create a requests Session with retry and backoff."""
+def _build_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
-        total=retries,
-        read=retries,
-        connect=retries,
-        backoff_factor=backoff,
+        total=3, read=3, connect=3,
+        backoff_factor=0.5,
         status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=["GET", "POST", "PUT", "DELETE"],
+        allowed_methods=["GET", "POST", "DELETE"],
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
-    session.mount("http://", adapter)
     return session
 
 
 class UpstoxAPIError(Exception):
-    """Raised when the Upstox API returns an error response."""
     def __init__(self, status_code: int, message: str) -> None:
         self.status_code = status_code
-        super().__init__(f"Upstox API error {status_code}: {message}")
+        super().__init__(f"Upstox API {status_code}: {message}")
 
 
 class UpstoxClient:
-    """Production-grade Upstox REST client with retry, rate-limit, and timeout handling."""
+    """Production Upstox REST API v2 client."""
 
     def __init__(
         self,
@@ -85,45 +121,46 @@ class UpstoxClient:
         self._session = _build_session()
 
     def _headers(self) -> Dict[str, str]:
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+        h = {"Accept": "application/json", "Content-Type": "application/json"}
         if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
-        return headers
+            h["Authorization"] = f"Bearer {self.access_token}"
+        return h
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
         try:
-            resp = self._session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
-        except requests.exceptions.Timeout:
-            raise UpstoxAPIError(408, f"Request timed out for {path}")
-        except requests.exceptions.ConnectionError as e:
+            r = self._session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
+        except requests.Timeout:
+            raise UpstoxAPIError(408, f"Timeout for {path}")
+        except requests.ConnectionError as e:
             raise UpstoxAPIError(503, f"Connection error: {e}")
 
-        if resp.status_code == 401:
-            raise UpstoxAPIError(401, "Access token invalid or expired. Regenerate token.")
-        if resp.status_code == 429:
-            raise UpstoxAPIError(429, "Rate limit hit. Slow down requests.")
-        if resp.status_code == 403:
-            raise UpstoxAPIError(403, "Access forbidden. Check API permissions.")
+        if r.status_code == 401:
+            raise UpstoxAPIError(401, "Token invalid or expired — go to Settings and generate a new token.")
+        if r.status_code == 410:
+            raise UpstoxAPIError(410, "This API endpoint is deprecated. Update to Upstox API v2.")
+        if r.status_code == 429:
+            raise UpstoxAPIError(429, "Rate limit hit.")
+        if r.status_code == 403:
+            raise UpstoxAPIError(403, "Access forbidden — check API permissions in Upstox developer portal.")
 
         try:
-            data = resp.json()
+            data = r.json()
         except ValueError:
-            raise UpstoxAPIError(resp.status_code, f"Invalid JSON response: {resp.text[:200]}")
+            raise UpstoxAPIError(r.status_code, f"Invalid JSON: {r.text[:200]}")
 
-        if resp.status_code >= 400:
-            msg = data.get("message") or data.get("errors") or str(data)
-            raise UpstoxAPIError(resp.status_code, str(msg))
+        if r.status_code >= 400:
+            # Extract Upstox error message
+            err = data.get("message") or data.get("errors") or str(data)
+            if isinstance(err, list):
+                err = "; ".join(str(e) for e in err)
+            raise UpstoxAPIError(r.status_code, str(err))
 
         return data
 
-    # ─── Token validation ─────────────────────────────────────────────────────
+    # ─── Auth ─────────────────────────────────────────────────────────────────
 
     def is_token_valid(self) -> bool:
-        """Check if the access token is set and valid by calling /user/profile."""
         if not self.access_token or len(self.access_token) < 20:
             return False
         try:
@@ -133,76 +170,74 @@ class UpstoxClient:
             return False
 
     def get_profile(self) -> Dict[str, Any]:
-        """Get authenticated user profile."""
         return self._get("/user/profile")
 
     # ─── Market data ──────────────────────────────────────────────────────────
 
     def get_live_quote(self, symbol: str) -> Dict[str, Any]:
-        """Get live market quote (LTP, OHLC, volume) for a symbol."""
-        instrument_key = SYMBOL_TO_KEY.get(symbol, f"NSE_EQ|{symbol}")
+        """Get live market quote. Returns ltp=0 when market is closed (expected)."""
+        instrument_key = SYMBOL_TO_KEY.get(symbol.upper(), f"NSE_EQ|{symbol}")
         try:
             data = self._get(
                 "/market-quote/quotes",
                 params={"instrument_key": instrument_key},
             )
-            # Upstox v2 response: data.data[instrument_key]
             raw = data.get("data", {})
-            quote_data = raw.get(instrument_key, raw)
-            if not quote_data:
+            # Upstox response key can be the instrument key or symbol
+            quote = raw.get(instrument_key) or (list(raw.values())[0] if raw else {})
+            if not quote:
                 return self._empty_quote(symbol)
 
-            ohlc = quote_data.get("ohlc", {})
-            ltp = quote_data.get("last_price", 0.0)
-            prev_close = ohlc.get("close", ltp) or ltp
-            change = ltp - prev_close
-            change_pct = (change / prev_close * 100) if prev_close else 0.0
+            ohlc  = quote.get("ohlc", {})
+            ltp   = float(quote.get("last_price", 0) or 0)
+            prev  = float(ohlc.get("close", ltp) or ltp)
+            chg   = ltp - prev
+            chg_p = (chg / prev * 100) if prev else 0.0
 
             return {
                 "symbol": symbol,
-                "ltp": float(ltp),
-                "open": float(ohlc.get("open", 0)),
-                "high": float(ohlc.get("high", 0)),
-                "low": float(ohlc.get("low", 0)),
-                "close": float(ohlc.get("close", 0)),
-                "volume": int(quote_data.get("volume", 0)),
-                "change": round(change, 2),
-                "change_pct": round(change_pct, 3),
+                "ltp": ltp,
+                "open":   float(ohlc.get("open",  0) or 0),
+                "high":   float(ohlc.get("high",  0) or 0),
+                "low":    float(ohlc.get("low",   0) or 0),
+                "close":  float(ohlc.get("close", 0) or 0),
+                "volume": int(quote.get("volume", 0) or 0),
+                "change":     round(chg,   2),
+                "change_pct": round(chg_p, 3),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         except UpstoxAPIError:
             raise
         except Exception as e:
-            logger.warning("get_live_quote %s error: %s", symbol, e)
+            logger.warning("get_live_quote %s: %s", symbol, e)
             return self._empty_quote(symbol)
 
     def get_multiple_quotes(self, symbols: List[str]) -> Dict[str, Any]:
-        """Batch fetch live quotes for multiple symbols in a single API call."""
+        """Batch fetch quotes for multiple symbols in one API call."""
         if not symbols:
             return {}
-        keys = ",".join(SYMBOL_TO_KEY.get(s, f"NSE_EQ|{s}") for s in symbols)
+        keys = ",".join(SYMBOL_TO_KEY.get(s.upper(), f"NSE_EQ|{s}") for s in symbols)
         try:
             data = self._get("/market-quote/quotes", params={"instrument_key": keys})
             raw = data.get("data", {})
-            result = {}
+            result: Dict[str, Any] = {}
             for sym in symbols:
-                key = SYMBOL_TO_KEY.get(sym, f"NSE_EQ|{sym}")
+                key = SYMBOL_TO_KEY.get(sym.upper(), f"NSE_EQ|{sym}")
                 q = raw.get(key, {})
                 if q:
                     ohlc = q.get("ohlc", {})
-                    ltp = float(q.get("last_price", 0))
+                    ltp  = float(q.get("last_price", 0) or 0)
                     prev = float(ohlc.get("close", ltp) or ltp)
-                    change = ltp - prev
+                    chg  = ltp - prev
                     result[sym] = {
-                        "symbol": sym,
-                        "ltp": ltp,
-                        "open": float(ohlc.get("open", 0)),
-                        "high": float(ohlc.get("high", 0)),
-                        "low": float(ohlc.get("low", 0)),
-                        "close": float(ohlc.get("close", 0)),
-                        "volume": int(q.get("volume", 0)),
-                        "change": round(change, 2),
-                        "change_pct": round((change / prev * 100) if prev else 0, 3),
+                        "symbol": sym, "ltp": ltp,
+                        "open":   float(ohlc.get("open",  0) or 0),
+                        "high":   float(ohlc.get("high",  0) or 0),
+                        "low":    float(ohlc.get("low",   0) or 0),
+                        "close":  float(ohlc.get("close", 0) or 0),
+                        "volume": int(q.get("volume", 0) or 0),
+                        "change":     round(chg, 2),
+                        "change_pct": round((chg / prev * 100) if prev else 0, 3),
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 else:
@@ -210,72 +245,77 @@ class UpstoxClient:
             return result
         except Exception as e:
             logger.warning("get_multiple_quotes error: %s", e)
-            return {sym: self._empty_quote(sym) for sym in symbols}
+            return {s: self._empty_quote(s) for s in symbols}
 
     def get_historical_candles(
         self,
         symbol: str,
-        interval: str = "15minute",
+        interval: str = "day",
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
         """
-        Fetch historical OHLCV candles from Upstox.
+        Fetch OHLCV candles from Upstox v2 historical candle API.
 
-        interval: 1minute | 3minute | 5minute | 10minute | 15minute | 30minute |
-                  60minute | day | week | month
+        Upstox v2 supported intervals: 1minute, 30minute, day, week, month
+        Note: 5minute and 15minute are NOT supported in v2.
+        Use 30minute as the intraday interval.
+
+        Endpoint: GET /historical-candle/{instrument_key}/{interval}/{to_date}/{from_date}
         """
-        instrument_key = SYMBOL_TO_KEY.get(symbol, f"NSE_EQ|{symbol}")
+        instrument_key = SYMBOL_TO_KEY.get(symbol.upper(), f"NSE_EQ|{symbol}")
+
+        # Map interval to valid Upstox v2 value
+        mapped_interval = VALID_INTERVALS.get(interval.lower(), "day")
 
         if not to_date:
             to_date = date.today().strftime("%Y-%m-%d")
         if not from_date:
-            days_back = max(limit // 60, 5)
+            # Go back far enough to get enough candles
+            days_back = 30 if mapped_interval in ("1minute", "30minute") else 365
             from_date = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
-        # Upstox v2 historical candles endpoint
-        path = f"/historical-candle/{instrument_key}/{interval}/{to_date}/{from_date}"
+        # Upstox v2 historical candle endpoint format
+        path = f"/historical-candle/{instrument_key}/{mapped_interval}/{to_date}/{from_date}"
         try:
             data = self._get(path)
-            candles_raw = data.get("data", {}).get("candles", [])
+            raw_candles = data.get("data", {}).get("candles", [])
             result = []
-            for c in candles_raw:
-                # Format: [timestamp, open, high, low, close, volume, oi]
+            for c in raw_candles:
+                # Upstox format: [timestamp, open, high, low, close, volume, oi]
                 if len(c) < 6:
                     continue
                 result.append({
-                    "timestamp": c[0],
-                    "open": float(c[1]),
-                    "high": float(c[2]),
-                    "low": float(c[3]),
-                    "close": float(c[4]),
+                    "timestamp": str(c[0]),
+                    "open":   float(c[1]),
+                    "high":   float(c[2]),
+                    "low":    float(c[3]),
+                    "close":  float(c[4]),
                     "volume": int(c[5]),
                 })
-            # Most recent last
+            # Upstox returns newest first — reverse to oldest-first
             result.reverse()
             return result[-limit:]
         except UpstoxAPIError as e:
-            logger.error("Historical candles failed for %s: %s", symbol, e)
+            logger.error("Historical candles failed for %s (%s): %s", symbol, mapped_interval, e)
             raise
         except Exception as e:
-            logger.error("Historical candles error for %s: %s", symbol, e)
             raise UpstoxAPIError(500, str(e))
 
-    # ─── Order management ─────────────────────────────────────────────────────
+    # ─── Orders ───────────────────────────────────────────────────────────────
 
     def place_order(
         self,
         symbol: str,
-        transaction_type: str,  # BUY | SELL
+        transaction_type: str,
         quantity: int,
-        order_type: str = "MARKET",  # MARKET | LIMIT | SL | SL-M
+        order_type: str = "MARKET",
         price: float = 0.0,
         trigger_price: float = 0.0,
-        product: str = "D",  # D=delivery, I=intraday
+        product: str = "D",
     ) -> Dict[str, Any]:
-        """Place an order on Upstox."""
-        instrument_key = SYMBOL_TO_KEY.get(symbol, f"NSE_EQ|{symbol}")
+        instrument_key = SYMBOL_TO_KEY.get(symbol.upper(), f"NSE_EQ|{symbol}")
         payload = {
             "quantity": quantity,
             "product": product,
@@ -283,62 +323,48 @@ class UpstoxClient:
             "price": price,
             "tag": "upstox-bot",
             "instrument_token": instrument_key,
-            "order_type": order_type,
+            "order_type": order_type.upper(),
             "transaction_type": transaction_type.upper(),
             "disclosed_quantity": 0,
             "trigger_price": trigger_price,
             "is_amo": False,
         }
         url = f"{self.base_url}/order/place"
-        try:
-            resp = self._session.post(url, json=payload, headers=self._headers(), timeout=self.timeout)
-            data = resp.json()
-            if resp.status_code == 200 and data.get("status") == "success":
-                return {"success": True, "order_id": data.get("data", {}).get("order_id"), "raw": data}
-            raise UpstoxAPIError(resp.status_code, data.get("message", str(data)))
-        except UpstoxAPIError:
-            raise
-        except Exception as e:
-            raise UpstoxAPIError(500, f"Order placement error: {e}")
+        r = self._session.post(url, json=payload, headers=self._headers(), timeout=self.timeout)
+        data = r.json()
+        if r.status_code == 200 and data.get("status") == "success":
+            return {"success": True, "order_id": data.get("data", {}).get("order_id"), "raw": data}
+        raise UpstoxAPIError(r.status_code, data.get("message", str(data)))
 
     def get_order_details(self, order_id: str) -> Dict[str, Any]:
-        """Get order status from Upstox."""
-        data = self._get(f"/order/details", params={"order_id": order_id})
+        data = self._get("/order/details", params={"order_id": order_id})
         return data.get("data", {})
 
     def cancel_order(self, order_id: str) -> bool:
-        """Cancel an open order."""
         try:
-            url = f"{self.base_url}/order/cancel"
-            resp = self._session.delete(
-                url,
+            r = self._session.delete(
+                f"{self.base_url}/order/cancel",
                 params={"order_id": order_id},
-                headers=self._headers(),
-                timeout=self.timeout,
+                headers=self._headers(), timeout=self.timeout,
             )
-            data = resp.json()
-            return data.get("status") == "success"
+            return r.json().get("status") == "success"
         except Exception:
             return False
 
     def get_positions(self) -> List[Dict[str, Any]]:
-        """Get all open positions."""
         try:
-            data = self._get("/portfolio/short-term-positions")
-            return data.get("data", [])
+            return self._get("/portfolio/short-term-positions").get("data", [])
         except Exception:
             return []
 
     def get_funds(self) -> Dict[str, Any]:
-        """Get available funds/margin."""
         try:
             data = self._get("/user/get-funds-and-margin", params={"segment": "SEC"})
-            raw = data.get("data", {})
-            equity = raw.get("equity", raw)
+            eq = data.get("data", {}).get("equity", {})
             return {
-                "available_margin": float(equity.get("available_margin", 0)),
-                "used_margin": float(equity.get("used_margin", 0)),
-                "total": float(equity.get("net", 0)),
+                "available_margin": float(eq.get("available_margin", 0) or 0),
+                "used_margin": float(eq.get("used_margin", 0) or 0),
+                "total": float(eq.get("net", 0) or 0),
             }
         except Exception:
             return {"available_margin": 0.0, "used_margin": 0.0, "total": 0.0}
@@ -353,8 +379,6 @@ class UpstoxClient:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-    # ─── Backwards-compat (used by old code) ─────────────────────────────────
-
-    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Legacy GET method — preserved for backward compatibility."""
+    # Backward compat
+    def get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         return self._get(path, params)

@@ -1,4 +1,4 @@
-"""Router for application settings, env status, and token management."""
+"""Settings router — configuration management and token handling."""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 
 import yaml
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 
 from backend.config.settings import load_settings
 
@@ -19,48 +18,54 @@ SETTINGS_PATH = Path(__file__).resolve().parents[3] / "backend" / "config" / "se
 
 @router.get("/")
 async def get_settings() -> Dict[str, Any]:
-    """Return all settings (without secrets)."""
+    """Return all settings (never expose secrets)."""
+    notif = settings.notifications
     return {
         "mode": settings.mode,
-        "api_host": settings.api.host,
-        "api_port": settings.api.port,
-        "broker_base_url": settings.broker.base_url,
-        "websocket_url": settings.broker.websocket_url,
         "capital": {
             "total": settings.capital.total,
             "max_allocation_per_trade": settings.capital.max_allocation_per_trade,
             "cash_buffer": settings.capital.cash_buffer,
         },
         "risk": {
-            "max_risk_per_trade_pct": settings.risk.max_risk_per_trade_pct,
-            "max_daily_loss_pct": settings.risk.max_daily_loss_pct,
-            "max_trades_per_day": settings.risk.max_trades_per_day,
-            "max_concurrent_positions": settings.risk.max_concurrent_positions,
-            "max_consecutive_losses": settings.risk.max_consecutive_losses,
+            "max_risk_per_trade_pct":    settings.risk.max_risk_per_trade_pct,
+            "max_daily_loss_pct":        settings.risk.max_daily_loss_pct,
+            "max_trades_per_day":        settings.risk.max_trades_per_day,
+            "max_concurrent_positions":  settings.risk.max_concurrent_positions,
+            "max_consecutive_losses":    settings.risk.max_consecutive_losses,
         },
         "strategy": {
-            "orb_window_start": settings.strategy.orb_window_start,
-            "orb_window_end": settings.strategy.orb_window_end,
-            "entry_window_start": settings.strategy.entry_window_start,
-            "entry_window_end": settings.strategy.entry_window_end,
-            "exit_all_by": settings.strategy.exit_all_by,
+            "orb_window_start":   getattr(settings.strategy, "orb_window_start",  "09:15"),
+            "orb_window_end":     getattr(settings.strategy, "orb_window_end",    "09:30"),
+            "entry_window_start": getattr(settings.strategy, "entry_window_start","09:30"),
+            "entry_window_end":   getattr(settings.strategy, "entry_window_end",  "12:30"),
+            "exit_all_by":        getattr(settings.strategy, "exit_all_by",       "14:45"),
         },
         "indicators": {
-            "ema_fast": settings.indicators.ema_fast,
-            "ema_slow": settings.indicators.ema_slow,
-            "ema_trend": settings.indicators.ema_trend,
-            "rsi_period": settings.indicators.rsi_period,
-            "rsi_min": settings.indicators.rsi_min,
-            "rsi_max": settings.indicators.rsi_max,
-            "atr_period": settings.indicators.atr_period,
-            "choppiness_max": settings.indicators.choppiness_max,
-            "volume_multiplier": settings.indicators.volume_multiplier,
+            "ema_fast":          getattr(settings.indicators, "ema_fast",          20),
+            "ema_slow":          getattr(settings.indicators, "ema_slow",          50),
+            "ema_trend":         getattr(settings.indicators, "ema_trend",         200),
+            "rsi_period":        getattr(settings.indicators, "rsi_period",        14),
+            "rsi_min":           getattr(settings.indicators, "rsi_min",           55),
+            "rsi_max":           getattr(settings.indicators, "rsi_max",           75),
+            "atr_period":        getattr(settings.indicators, "atr_period",        14),
+            "choppiness_max":    getattr(settings.indicators, "choppiness_max",    61.8),
+            "volume_multiplier": getattr(settings.indicators, "volume_multiplier", 1.5),
         },
         "notifications": {
-            "email_enabled": settings.notifications.email_enabled,
-            "telegram_enabled": settings.notifications.telegram_enabled,
-            "sender_email": settings.notifications.sender_email,
-            "recipient_email": settings.notifications.recipient_email,
+            "email_enabled":    getattr(notif, "email_enabled",    False),
+            "telegram_enabled": getattr(notif, "telegram_enabled", False),
+            # Show whether email addresses are configured (from env or yaml)
+            "sender_email":    bool(
+                os.getenv("SENDER_EMAIL") or
+                os.getenv("NOTIFICATION_EMAIL") or
+                getattr(notif, "sender_email", "")
+            ),
+            "recipient_email": bool(
+                os.getenv("RECIPIENT_EMAIL") or
+                os.getenv("NOTIFICATION_EMAIL") or
+                getattr(notif, "recipient_email", "")
+            ),
         },
     }
 
@@ -75,7 +80,6 @@ async def update_settings(body: Dict[str, Any]) -> Dict[str, Any]:
         else:
             current = {}
 
-        # Deep-merge only known top-level keys
         for key in ("mode", "capital", "risk", "strategy", "indicators", "notifications"):
             if key in body:
                 if isinstance(body[key], dict) and isinstance(current.get(key), dict):
@@ -94,41 +98,41 @@ async def update_settings(body: Dict[str, Any]) -> Dict[str, Any]:
 @router.get("/env-status")
 async def get_env_status() -> Dict[str, bool]:
     """Return which environment variables are set (never their values)."""
-    keys = [
-        "UPSTOX_CLIENT_ID",
-        "UPSTOX_CLIENT_SECRET",
-        "UPSTOX_ACCESS_TOKEN",
-        "EMAIL_PASSWORD",
-        "TELEGRAM_BOT_TOKEN",
-        "TELEGRAM_CHAT_ID",
-    ]
-    return {k: bool(os.getenv(k)) for k in keys}
+    return {
+        "UPSTOX_CLIENT_ID":     bool(os.getenv("UPSTOX_CLIENT_ID")),
+        "UPSTOX_CLIENT_SECRET": bool(os.getenv("UPSTOX_CLIENT_SECRET")),
+        "UPSTOX_ACCESS_TOKEN":  bool(os.getenv("UPSTOX_ACCESS_TOKEN")),
+        "EMAIL_PASSWORD":       bool(os.getenv("EMAIL_PASSWORD")),
+        "SENDER_EMAIL":         bool(os.getenv("SENDER_EMAIL") or os.getenv("NOTIFICATION_EMAIL")),
+        "RECIPIENT_EMAIL":      bool(os.getenv("RECIPIENT_EMAIL") or os.getenv("NOTIFICATION_EMAIL")),
+        "TELEGRAM_BOT_TOKEN":   bool(os.getenv("TELEGRAM_BOT_TOKEN")),
+        "TELEGRAM_CHAT_ID":     bool(os.getenv("TELEGRAM_CHAT_ID")),
+    }
 
 
 @router.post("/regenerate-token")
 async def regenerate_token() -> Dict[str, str]:
-    """Return the Upstox OAuth authorization URL for the user to open."""
-    client_id = os.getenv("UPSTOX_CLIENT_ID", "")
+    """Return Upstox OAuth authorization URL."""
+    client_id    = os.getenv("UPSTOX_CLIENT_ID", "")
     redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "http://localhost:8080/callback")
     if not client_id:
-        raise HTTPException(status_code=400, detail="UPSTOX_CLIENT_ID not set")
+        raise HTTPException(status_code=400, detail="UPSTOX_CLIENT_ID not set in environment variables.")
     auth_url = (
-        f"https://api.upstox.com/v2/login/authorization/dialog"
+        "https://api.upstox.com/v2/login/authorization/dialog"
         f"?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}"
     )
     return {"auth_url": auth_url}
 
 
-@router.get("/token-callback")
 async def token_callback_get(code: Optional[str] = None) -> Dict[str, Any]:
     """Handle OAuth redirect — exchange code for access token."""
     if not code:
-        return {"status": "error", "detail": "No code provided"}
+        return {"status": "error", "detail": "No code in redirect. Try generating token again."}
     try:
         import httpx
-        client_id = os.getenv("UPSTOX_CLIENT_ID", "")
+        client_id     = os.getenv("UPSTOX_CLIENT_ID", "")
         client_secret = os.getenv("UPSTOX_CLIENT_SECRET", "")
-        redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "http://localhost:8080/callback")
+        redirect_uri  = os.getenv("UPSTOX_REDIRECT_URI", "http://localhost:8080/callback")
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
                 "https://api.upstox.com/v2/login/authorization/token",
@@ -144,7 +148,6 @@ async def token_callback_get(code: Optional[str] = None) -> Dict[str, Any]:
         data = r.json()
         token = data.get("access_token", "")
         if token:
-            # In production on Render, this sets the env var for the current process
             os.environ["UPSTOX_ACCESS_TOKEN"] = token
             return {"status": "success", "message": "Token saved. Bot is ready to trade."}
         return {"status": "error", "detail": data.get("message", "Token exchange failed")}
