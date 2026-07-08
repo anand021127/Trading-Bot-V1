@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
@@ -12,9 +14,10 @@ from backend.config.settings import load_settings
 from backend.database.db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router  = APIRouter()
 settings = load_settings()
 db = DatabaseManager(db_path=settings.database.path)
+IST = ZoneInfo("Asia/Kolkata")
 
 NIFTY50_SYMBOLS = [
     "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","KOTAKBANK",
@@ -25,6 +28,15 @@ NIFTY50_SYMBOLS = [
     "ADANIPORTS","COALINDIA","BPCL","EICHERMOT","HEROMOTOCO","INDUSINDBK",
     "SBILIFE","HDFCLIFE","GRASIM","TATACONSUM","UPL","BRITANNIA","SHREECEM","BAJAJ-AUTO",
 ]
+
+
+def _is_market_open() -> bool:
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    open_t  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
+    close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return open_t <= now <= close_t
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:
@@ -41,7 +53,40 @@ def _empty_quote(symbol: str) -> Dict[str, Any]:
         "symbol": symbol, "ltp": 0.0, "open": 0.0, "high": 0.0,
         "low": 0.0, "close": 0.0, "volume": 0, "change": 0.0, "change_pct": 0.0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "market_closed": True,
     }
+
+
+def _get_token() -> str:
+    """Get token from env first, then DB fallback."""
+    token = os.getenv("UPSTOX_ACCESS_TOKEN", "")
+    if not token:
+        try:
+            token = db.load_token()
+            if token:
+                os.environ["UPSTOX_ACCESS_TOKEN"] = token
+        except Exception:
+            pass
+    return token
+
+
+def _fetch_prices(symbols: List[str]) -> Dict[str, Any]:
+    """Fetch prices from Upstox. Returns empty quotes on failure."""
+    token = _get_token()
+    if not token:
+        return {s: _empty_quote(s) for s in symbols}
+    try:
+        from backend.broker.upstox_client import UpstoxClient
+        client = UpstoxClient(access_token=token)
+        result = client.get_multiple_quotes(symbols)
+        # Tag closed-market quotes
+        market_open = _is_market_open()
+        for sym in result:
+            result[sym]["market_closed"] = not market_open
+        return result
+    except Exception as e:
+        logger.debug("Price fetch error: %s", e)
+        return {s: _empty_quote(s) for s in symbols}
 
 
 # ─── Trades ──────────────────────────────────────────────────────────────────
@@ -65,27 +110,25 @@ async def get_trades(
         logger.error("list_trades error: %s", e)
         rows = []
 
-    total = len(rows)
-    start = (page - 1) * page_size
-    page_rows = rows[start: start + page_size]
-    trades = [_row_to_dict(r) for r in page_rows]
+    total     = len(rows)
+    page_rows = rows[(page - 1) * page_size: page * page_size]
+    trades    = [_row_to_dict(r) for r in page_rows]
 
-    net_pnls  = [float(_row_to_dict(r).get("net_pnl") or _row_to_dict(r).get("pnl") or 0) for r in rows]
+    all_dicts = [_row_to_dict(r) for r in rows]
+    net_pnls  = [float(d.get("net_pnl") or d.get("pnl") or 0) for d in all_dicts]
     wins      = [p for p in net_pnls if p > 0]
     losses    = [p for p in net_pnls if p < 0]
-    gross_w   = sum(wins)
-    gross_l   = abs(sum(losses))
 
     return {
         "trades": trades,
         "total_count": total,
         "summary": {
-            "total_trades": total,
+            "total_trades":  total,
             "total_net_pnl": round(sum(net_pnls), 2),
-            "win_rate": round(len(wins) / total * 100, 2) if total else 0.0,
-            "profit_factor": round(gross_w / gross_l, 2) if gross_l else 0.0,
-            "avg_win": round(gross_w / len(wins), 2) if wins else 0.0,
-            "avg_loss": round(gross_l / len(losses), 2) if losses else 0.0,
+            "win_rate":      round(len(wins) / total * 100, 2) if total else 0.0,
+            "profit_factor": round(sum(wins) / abs(sum(losses)), 2) if losses else 0.0,
+            "avg_win":       round(sum(wins) / len(wins), 2) if wins else 0.0,
+            "avg_loss":      round(abs(sum(losses)) / len(losses), 2) if losses else 0.0,
         },
     }
 
@@ -117,8 +160,7 @@ async def export_trades_csv(
             yield ",".join(str(d.get(c, "")) for c in cols) + "\n"
 
     return StreamingResponse(
-        generate(),
-        media_type="text/csv",
+        generate(), media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=trades.csv"},
     )
 
@@ -127,9 +169,7 @@ async def export_trades_csv(
 async def get_trade(trade_id: str) -> Dict[str, Any]:
     try:
         row = db.get_trade(trade_id)
-        if row is None:
-            return {"error": "not found"}
-        return _row_to_dict(row)
+        return _row_to_dict(row) if row else {"error": "not found"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -139,8 +179,7 @@ async def get_trade(trade_id: str) -> Dict[str, Any]:
 @router.get("/positions")
 async def get_positions() -> List[Dict[str, Any]]:
     try:
-        rows = db.list_positions()
-        return [_row_to_dict(r) for r in rows]
+        return [_row_to_dict(r) for r in db.list_positions()]
     except Exception:
         return []
 
@@ -152,29 +191,27 @@ async def manual_exit_position(symbol: str) -> Dict[str, Any]:
 
 # ─── Prices ──────────────────────────────────────────────────────────────────
 
-def _fetch_prices(symbols: List[str]) -> Dict[str, Any]:
-    """Try real Upstox data; fall back to empty quotes on any error."""
-    try:
-        from backend.broker.upstox_client import UpstoxClient
-        client = UpstoxClient()
-        if not client.access_token:
-            return {s: _empty_quote(s) for s in symbols}
-        # Use batch API call for efficiency
-        return client.get_multiple_quotes(symbols)
-    except Exception as e:
-        logger.debug("Price fetch error: %s", e)
-        return {s: _empty_quote(s) for s in symbols}
-
-
 @router.get("/prices/live")
 async def get_live_prices() -> Dict[str, Any]:
     watchlist = NIFTY50_SYMBOLS[:settings.universe.max_stocks_in_watchlist]
-    return _fetch_prices(watchlist)
+    prices = _fetch_prices(watchlist)
+    return {
+        "prices": prices,
+        "market_open": _is_market_open(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "token_present": bool(_get_token()),
+    }
 
 
 @router.get("/prices/nifty50")
 async def get_nifty50_prices() -> Dict[str, Any]:
-    return _fetch_prices(NIFTY50_SYMBOLS)
+    prices = _fetch_prices(NIFTY50_SYMBOLS)
+    return {
+        "prices": prices,
+        "market_open": _is_market_open(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "token_present": bool(_get_token()),
+    }
 
 
 # ─── Paper trading status ─────────────────────────────────────────────────────
@@ -182,61 +219,60 @@ async def get_nifty50_prices() -> Dict[str, Any]:
 @router.get("/paper/status")
 async def get_paper_status() -> Dict[str, Any]:
     try:
-        trades = db.list_trades(mode="paper")
+        trades      = db.list_trades(mode="paper")
         trade_dates = set()
         wins = losses = 0
         net_pnls: List[float] = []
         daily: Dict[str, Any] = {}
 
         for t in trades:
-            d = _row_to_dict(t)
+            d   = _row_to_dict(t)
             pnl = float(d.get("net_pnl") or d.get("pnl") or 0)
             et  = d.get("entry_time") or d.get("timestamp")
-            date_str = str(et)[:10] if et else None
-            if date_str:
-                trade_dates.add(date_str)
+            ds  = str(et)[:10] if et else None
+            if ds:
+                trade_dates.add(ds)
                 net_pnls.append(pnl)
                 if pnl > 0: wins += 1
-                else: losses += 1
-                if date_str not in daily:
-                    daily[date_str] = {"date": date_str, "trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "drawdown": 0.0, "trend_bias": "NEUTRAL"}
-                daily[date_str]["trades"]  += 1
-                daily[date_str]["net_pnl"] += pnl
-                if pnl > 0: daily[date_str]["wins"]   += 1
-                else:       daily[date_str]["losses"] += 1
+                else:       losses += 1
+                if ds not in daily:
+                    daily[ds] = {"date": ds, "trades": 0, "wins": 0,
+                                 "losses": 0, "net_pnl": 0.0,
+                                 "drawdown": 0.0, "trend_bias": "NEUTRAL"}
+                daily[ds]["trades"]  += 1
+                daily[ds]["net_pnl"] += pnl
+                if pnl > 0: daily[ds]["wins"]   += 1
+                else:       daily[ds]["losses"] += 1
 
-        total      = len(net_pnls)
-        win_rate   = wins / total * 100 if total else 0.0
-        gross_wins = sum(p for p in net_pnls if p > 0)
-        gross_loss = abs(sum(p for p in net_pnls if p < 0))
-        pf         = gross_wins / gross_loss if gross_loss else 0.0
+        total    = len(net_pnls)
+        win_rate = wins / total * 100 if total else 0.0
+        gross_w  = sum(p for p in net_pnls if p > 0)
+        gross_l  = abs(sum(p for p in net_pnls if p < 0))
+        pf       = gross_w / gross_l if gross_l else 0.0
 
-        running, peak, max_dd = 0.0, 0.0, 0.0
+        running = peak = max_dd = 0.0
         for p in net_pnls:
             running += p
             if running > peak: peak = running
             dd = (peak - running) / peak * 100 if peak > 0 else 0
             if dd > max_dd: max_dd = dd
 
+        days_active = len(trade_dates)
         checklist = {
-            "win_rate_ok":          {"value": round(win_rate, 1), "target": 40, "pass": win_rate >= 40},
+            "win_rate_ok":          {"value": round(win_rate, 1), "target": 40,  "pass": win_rate >= 40},
             "profit_factor_ok":     {"value": round(pf, 2),       "target": 1.5, "pass": pf >= 1.5},
-            "max_drawdown_ok":      {"value": round(max_dd, 2),   "target": 5.0,  "pass": max_dd < 5.0},
+            "max_drawdown_ok":      {"value": round(max_dd, 2),   "target": 5.0, "pass": max_dd < 5.0},
             "logs_complete":        {"value": True, "pass": True},
             "orb_filter_ok":        {"value": True, "pass": True},
             "choppiness_filter_ok": {"value": True, "pass": True},
             "time_window_ok":       {"value": True, "pass": True},
         }
-        days_active = len(trade_dates)
-        is_ready    = days_active >= 20 and all(v["pass"] for v in checklist.values())
-
         return {
             "days_active": days_active, "days_required": 20,
-            "is_ready": is_ready, "checklist": checklist,
+            "is_ready": days_active >= 20 and all(v["pass"] for v in checklist.values()),
+            "checklist": checklist,
             "daily_history": sorted(daily.values(), key=lambda x: x["date"]),
         }
     except Exception as e:
-        return {
-            "days_active": 0, "days_required": 20, "is_ready": False,
-            "checklist": {}, "daily_history": [], "error": str(e),
-        }
+        return {"days_active": 0, "days_required": 20, "is_ready": False,
+                "checklist": {}, "daily_history": [], "error": str(e)}

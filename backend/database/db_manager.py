@@ -243,3 +243,66 @@ class DatabaseManager:
             return conn.execute(
                 "SELECT * FROM performance_snapshots ORDER BY date"
             ).fetchall()
+
+    # ─── App settings (persistent across restarts) ────────────────────────────
+
+    def save_setting(self, key: str, value: str) -> None:
+        """Persist a key-value setting to SQLite."""
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                """INSERT INTO app_settings (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                       value=excluded.value, updated_at=excluded.updated_at""",
+                (key, value, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        """Read a persisted setting value."""
+        try:
+            with self._connect() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS app_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+                row = conn.execute(
+                    "SELECT value FROM app_settings WHERE key = ?", (key,)
+                ).fetchone()
+                return row[0] if row else default
+        except Exception:
+            return default
+
+    def save_settings_blob(self, settings_dict: dict) -> None:
+        """Save entire settings dict as JSON blob."""
+        import json
+        self.save_setting("__settings_blob__", json.dumps(settings_dict))
+
+    def load_settings_blob(self) -> Optional[dict]:
+        """Load settings dict from DB. Returns None if not saved yet."""
+        import json
+        raw = self.get_setting("__settings_blob__", "")
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    def save_token(self, token: str) -> None:
+        """Persist access token to DB (survives process restart)."""
+        self.save_setting("upstox_access_token", token)
+
+    def load_token(self) -> str:
+        """Load access token from DB."""
+        return self.get_setting("upstox_access_token", "")
