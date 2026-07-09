@@ -382,3 +382,24 @@ class UpstoxClient:
     # Backward compat
     def get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         return self._get(path, params)
+
+# ── Market Indices (NSE) ──────────────────────────────────────────────────────
+INDEX_TO_KEY: Dict[str, str] = {
+    "NIFTY50":   "NSE_INDEX|Nifty 50",
+    "NIFTY 50":  "NSE_INDEX|Nifty 50",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+    "NIFTY BANK":"NSE_INDEX|Nifty Bank",
+    "FINNIFTY":  "NSE_INDEX|Nifty Fin Service",
+    "MIDCPNIFTY":"NSE_INDEX|NIFTY MID SELECT",
+    "SENSEX":    "BSE_INDEX|SENSEX",
+}
+
+# Combined lookup: check indices first, then stocks
+ALL_INSTRUMENTS: Dict[str, str] = {**INDEX_TO_KEY, **SYMBOL_TO_KEY}
+
+# Instrument categories for UI
+INSTRUMENT_CATEGORIES = {
+    "indices": list(INDEX_TO_KEY.keys())[:5],
+    "nifty50": list(SYMBOL_TO_KEY.keys()),
+}
+

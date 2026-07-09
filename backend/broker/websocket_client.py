@@ -1,8 +1,4 @@
-"""Upstox WebSocket client for live market data streaming.
-
-Connects to wss://api.upstox.com/v2/feed/market-data-feed with
-Authorization Bearer token header.
-"""
+"""Upstox WebSocket client — uses authorized URI from Upstox v2 authorize endpoint."""
 from __future__ import annotations
 
 import asyncio
@@ -13,19 +9,47 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
+import requests
+
 logger = logging.getLogger(__name__)
 
-UPSTOX_WS_URL = "wss://api.upstox.com/v2/feed/market-data-feed"
+AUTHORIZE_URL = "https://api.upstox.com/v2/feed/market-data-feed/authorize"
+
+
+def get_authorized_ws_uri(token: str) -> Optional[str]:
+    """
+    Step 1 of Upstox v2 WebSocket flow:
+    Call the authorize endpoint to get the real WebSocket URI.
+    Returns the authorizedRedirectUri or None on failure.
+    """
+    try:
+        r = requests.get(
+            AUTHORIZE_URL,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            uri = (data.get("data", {}).get("authorizedRedirectUri")
+                   or data.get("authorizedRedirectUri"))
+            return uri
+        logger.warning("WS authorize failed: HTTP %d — %s", r.status_code, r.text[:200])
+        return None
+    except Exception as e:
+        logger.error("WS authorize error: %s", e)
+        return None
 
 
 class UpstoxWebSocketClient:
     """
-    Production WebSocket client for Upstox live data feed.
+    Production WebSocket client using the Upstox v2 authorized URI flow.
 
-    - Authenticates via Bearer token in headers
-    - Auto-reconnects with exponential backoff
-    - Heartbeat monitoring (detects stale connections)
-    - Thread-safe price cache
+    Flow:
+      1. GET /feed/market-data-feed/authorize → authorizedRedirectUri
+      2. Connect to that URI (auth embedded in URI)
+      3. Send subscription JSON
+      4. Process incoming market data ticks
+      5. Auto-reconnect with exponential backoff
     """
 
     def __init__(
@@ -39,17 +63,16 @@ class UpstoxWebSocketClient:
         self._prices_lock = threading.Lock()
         self._subscribed_keys: Set[str] = set()
         self.is_connected = False
+        self.connection_status = "disconnected"  # disconnected | connecting | connected | reconnecting
         self._reconnect_delay = 2.0
         self._last_message_time: float = 0.0
         self._should_run = False
         self._ws_thread: Optional[threading.Thread] = None
 
     def subscribe(self, instrument_keys: List[str]) -> None:
-        """Add instrument keys to subscription."""
         self._subscribed_keys.update(instrument_keys)
 
     def get_latest_prices(self) -> Dict[str, Any]:
-        """Thread-safe read of latest prices."""
         with self._prices_lock:
             return dict(self._prices)
 
@@ -58,15 +81,13 @@ class UpstoxWebSocketClient:
             return self._prices.get(symbol)
 
     def is_data_stale(self, max_age_seconds: float = 30.0) -> bool:
-        """Return True if no data received in max_age_seconds."""
         if self._last_message_time == 0:
             return True
         return time.monotonic() - self._last_message_time > max_age_seconds
 
     def start(self) -> None:
-        """Start WebSocket in background thread."""
         if not self.access_token:
-            logger.warning("No access token — WebSocket will not connect")
+            logger.warning("No access token — WebSocket will not start")
             return
         self._should_run = True
         self._ws_thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -75,15 +96,17 @@ class UpstoxWebSocketClient:
     def stop(self) -> None:
         self._should_run = False
         self.is_connected = False
+        self.connection_status = "disconnected"
 
     def _run_loop(self) -> None:
-        """Reconnect loop with exponential backoff."""
         while self._should_run:
             try:
+                self.connection_status = "connecting"
                 asyncio.run(self._connect())
             except Exception as e:
-                logger.warning("WebSocket error: %s. Reconnecting in %.1fs", e, self._reconnect_delay)
+                logger.warning("WS error: %s. Reconnecting in %.1fs", e, self._reconnect_delay)
                 self.is_connected = False
+                self.connection_status = "reconnecting"
                 time.sleep(self._reconnect_delay)
                 self._reconnect_delay = min(self._reconnect_delay * 2, 60.0)
 
@@ -94,19 +117,26 @@ class UpstoxWebSocketClient:
             logger.error("websockets package not installed")
             return
 
-        headers = {"Authorization": f"Bearer {self.access_token}"}
+        # Step 1: Get authorized WebSocket URI
+        ws_uri = get_authorized_ws_uri(self.access_token)
+        if not ws_uri:
+            logger.error("Could not get authorized WebSocket URI — token may be expired")
+            self.connection_status = "disconnected"
+            raise RuntimeError("Failed to get authorized WebSocket URI")
+
+        # Step 2: Connect (no extra headers needed — auth is embedded in URI)
         try:
             async with websockets.connect(
-                UPSTOX_WS_URL,
-                additional_headers=headers,
+                ws_uri,
                 ping_interval=20,
                 ping_timeout=10,
             ) as ws:
                 self.is_connected = True
-                self._reconnect_delay = 2.0  # reset on success
-                logger.info("WebSocket connected to Upstox")
+                self.connection_status = "connected"
+                self._reconnect_delay = 2.0
+                logger.info("WebSocket connected via authorized URI")
 
-                # Subscribe to instruments
+                # Step 3: Subscribe to instruments
                 if self._subscribed_keys:
                     sub_msg = json.dumps({
                         "guid": "upstox-bot",
@@ -118,6 +148,7 @@ class UpstoxWebSocketClient:
                     })
                     await ws.send(sub_msg)
 
+                # Step 4: Process messages
                 async for message in ws:
                     if not self._should_run:
                         break
@@ -126,28 +157,28 @@ class UpstoxWebSocketClient:
 
         except Exception:
             self.is_connected = False
+            self.connection_status = "reconnecting"
             raise
 
     def _handle_message(self, raw: Any) -> None:
-        """Parse and cache incoming market data."""
+        """Parse Upstox market data feed messages."""
         try:
             if isinstance(raw, bytes):
-                import struct
-                # Upstox sends protobuf or JSON depending on mode
-                # For ltpc/full mode with JSON API
                 try:
                     data = json.loads(raw.decode("utf-8"))
                 except Exception:
-                    return  # protobuf — skip for now
+                    return  # binary/protobuf frame — skip
             else:
                 data = json.loads(str(raw))
 
             feeds = data.get("feeds", {})
             for instrument_key, feed in feeds.items():
-                ltpc = feed.get("ff", {}).get("marketFF", {}).get("ltpc", {})
+                ltpc = (feed.get("ff", {})
+                            .get("marketFF", {})
+                            .get("ltpc", {}))
                 if ltpc:
                     ltp = float(ltpc.get("ltp", 0))
-                    cp = float(ltpc.get("cp", ltp) or ltp)
+                    cp  = float(ltpc.get("cp", ltp) or ltp)
                     change = ltp - cp
                     with self._prices_lock:
                         self._prices[instrument_key] = {
@@ -155,7 +186,8 @@ class UpstoxWebSocketClient:
                             "close": cp,
                             "change": round(change, 2),
                             "change_pct": round((change / cp * 100) if cp else 0, 3),
-                            "volume": int(feed.get("ff", {}).get("marketFF", {}).get("marketOHLC", {}).get("ohlc", [{}])[-1].get("vol", 0) if feed else 0),
+                            "volume": 0,
+                            "last_tick": time.monotonic(),
                         }
                     if self._on_price_update:
                         self._on_price_update({"symbol": instrument_key, "ltp": ltp})
@@ -163,11 +195,8 @@ class UpstoxWebSocketClient:
             logger.debug("WS message parse error: %s", e)
 
 
-# ── Simple stub for backward compatibility ────────────────────────────────────
-
+# Legacy stub for backward compat
 class WebSocketClient:
-    """Legacy stub — preserved for backward compatibility with existing tests."""
-
     def __init__(self, socket=None) -> None:
         self._socket = socket
         self.is_connected = False

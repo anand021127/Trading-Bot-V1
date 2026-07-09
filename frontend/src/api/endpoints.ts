@@ -1,4 +1,5 @@
 import api from './client'
+import { cachedFetch, TTL } from './cache'
 import type {
   OverviewData, Trade, Position, LiveQuote,
   PerformanceResponse, DiagnosticResult, Settings,
@@ -8,35 +9,37 @@ import type {
 
 // Health
 export const fetchHealth = () =>
-  api.get<HealthStatus>('/health').then(r => r.data)
+  cachedFetch('health', () => api.get<HealthStatus>('/health').then(r => r.data), TTL.OVERVIEW)
 
-// Overview
+// Overview — cached 10s, stale-while-revalidate
 export const fetchOverview = () =>
-  api.get<OverviewData>('/api/overview').then(r => r.data)
+  cachedFetch('overview', () => api.get<OverviewData>('/api/overview').then(r => r.data), TTL.OVERVIEW)
 
 // Bot control
 export const fetchBotStatus = () =>
   api.get('/api/bot/status').then(r => r.data)
-
 export const startBot = () =>
   api.post('/api/bot/start').then(r => r.data)
-
 export const stopBot = () =>
   api.post('/api/bot/stop').then(r => r.data)
-
 export const killBot = () =>
   api.post('/api/bot/kill').then(r => r.data)
-
 export const resetKillSwitch = () =>
   api.post('/api/bot/reset-kill').then(r => r.data)
 
-// Trades
+// Trades — cached 30s
 export const fetchTrades = (params?: {
   date_from?: string; date_to?: string; symbol?: string
   mode?: string; exit_reason?: string; page?: number; page_size?: number
-}) => api.get<{ trades: Trade[]; total_count: number; summary: Record<string, number> }>(
-  '/api/trades', { params }
-).then(r => r.data)
+}) => {
+  const key = `trades:${JSON.stringify(params ?? {})}`
+  return cachedFetch(key,
+    () => api.get<{ trades: Trade[]; total_count: number; summary: Record<string, number> }>(
+      '/api/trades', { params }
+    ).then(r => r.data),
+    TTL.TRADES,
+  )
+}
 
 export const fetchTradeById = (id: string) =>
   api.get<Trade>(`/api/trades/${id}`).then(r => r.data)
@@ -46,27 +49,41 @@ export const exportTradesCsv = (params?: Record<string, string>) =>
 
 // Positions
 export const fetchPositions = () =>
-  api.get<Position[]>('/api/positions').then(r => r.data)
+  cachedFetch('positions', () => api.get<Position[]>('/api/positions').then(r => r.data), TTL.OVERVIEW)
 
 export const exitPosition = (symbol: string) =>
   api.post(`/api/positions/${symbol}/exit`, { reason: 'MANUAL_EXIT' }).then(r => r.data)
 
-// Prices
+// Prices — short cache, stale-while-revalidate keeps UI responsive
 export const fetchLivePrices = () =>
-  api.get<Record<string, LiveQuote>>('/api/prices/live').then(r => r.data)
+  cachedFetch('prices:live',
+    () => api.get('/api/prices/live').then(r => r.data),
+    TTL.PRICES,
+  )
 
 export const fetchNifty50Prices = () =>
-  api.get<Record<string, LiveQuote>>('/api/prices/nifty50').then(r => r.data)
+  cachedFetch('prices:nifty50',
+    () => api.get('/api/prices/nifty50').then(r => r.data),
+    TTL.PRICES,
+  )
 
-// Performance
-export const fetchPerformance = (params?: { date_from?: string; date_to?: string }) =>
-  api.get<PerformanceResponse>('/api/performance', { params }).then(r => r.data)
+// Performance — cached 1m
+export const fetchPerformance = (params?: { date_from?: string; date_to?: string }) => {
+  const key = `performance:${JSON.stringify(params ?? {})}`
+  return cachedFetch(key,
+    () => api.get<PerformanceResponse>('/api/performance', { params }).then(r => r.data),
+    TTL.PERFORMANCE,
+  )
+}
 
 // Paper trading
 export const fetchPaperStatus = () =>
-  api.get<PaperStatus>('/api/paper/status').then(r => r.data)
+  cachedFetch('paper:status',
+    () => api.get<PaperStatus>('/api/paper/status').then(r => r.data),
+    TTL.PAPER,
+  )
 
-// Backtest
+// Backtest — no cache (user-triggered)
 export const runBacktest = (params: BacktestRequest) =>
   api.post<BacktestResponse>('/api/backtest/run', params).then(r => r.data)
 
@@ -76,7 +93,7 @@ export const getBacktestStatus = (taskId: string) =>
 export const getBacktestResult = (taskId: string) =>
   api.get<BacktestResponse>(`/api/backtest/result/${taskId}`).then(r => r.data)
 
-// Diagnostics
+// Diagnostics — no cache (user-triggered)
 export const fetchDiagnostics = () =>
   api.get<DiagnosticsResponse>('/api/diagnostics').then(r => r.data)
 
@@ -91,9 +108,12 @@ export const runSingleTest = (testName: string) =>
 export const getTestHistory = () =>
   api.get('/api/diagnostics/history').then(r => r.data)
 
-// Settings
+// Settings — cached 5m
 export const fetchSettings = () =>
-  api.get<Settings>('/api/settings').then(r => r.data)
+  cachedFetch('settings',
+    () => api.get<Settings>('/api/settings').then(r => r.data),
+    TTL.SETTINGS,
+  )
 
 export const updateSettings = (data: Partial<Settings>) =>
   api.put<{ saved: boolean; restart_required: boolean }>('/api/settings', data).then(r => r.data)

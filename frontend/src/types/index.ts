@@ -68,6 +68,7 @@ export interface LiveQuote {
   change: number
   change_pct: number
   timestamp: string
+  market_closed?: boolean
 }
 
 export interface RiskStatus {
@@ -103,7 +104,7 @@ export interface SystemStatus {
 export interface OverviewData {
   daily_pnl: { amount: number; pct: number }
   capital: { total: number; available: number; used: number; buffer: number }
-  today_stats: { total_trades: number; wins: number; losses: number; win_rate: number }
+  today_stats: { total_trades: number; wins: number; losses: number; win_rate: number; net_pnl?: number }
   risk_status: RiskStatus
   trend_bias?: string
   open_positions?: Position[]
@@ -150,6 +151,13 @@ export interface DiagnosticResult {
   error?: string | null
 }
 
+export interface DiagnosticsResponse {
+  results?: DiagnosticResult[]
+  passed?: number
+  failed?: number
+  available_tests?: string[]
+}
+
 export interface PaperChecklistItem {
   value: number | boolean
   target?: number
@@ -189,8 +197,8 @@ export interface Settings {
   notifications?: {
     email_enabled?: boolean
     telegram_enabled?: boolean
-    sender_email?: string
-    recipient_email?: string
+    sender_email?: boolean | string
+    recipient_email?: boolean | string
   }
   capital?: { total: number; max_allocation_per_trade: number; cash_buffer: number }
   risk?: {
@@ -220,30 +228,56 @@ export interface Settings {
   }
 }
 
-// Legacy aliases
 export type AppSettingsResponse = Settings
 export type HealthStatus = { status: string; mode?: string; timestamp?: string }
-export type DiagnosticsResponse = { results?: DiagnosticResult[]; passed?: number; failed?: number }
 
 export interface BacktestRequest {
-  start_date: string
-  end_date: string
+  start_date?: string
+  end_date?: string
   commission_pct?: number
   slippage_pct?: number
   symbols?: string[]
   capital?: number
+  strategy?: string
+}
+
+export interface BacktestTrade {
+  symbol: string
+  strategy?: string
+  entry_time?: string
+  exit_time?: string
+  entry_price: number
+  exit_price: number
+  quantity: number
+  exit_reason?: string
+  gross_pnl?: number
+  net_pnl?: number
+  pnl_r?: number
+  charges?: number
+  stage_at_exit?: number
+  duration_bars?: number
 }
 
 export interface BacktestResponse {
   total_trades?: number
+  winning_trades?: number
+  losing_trades?: number
   win_rate?: number
   profit_factor?: number
   net_profit?: number
+  net_profit_pct?: number
   max_drawdown_pct?: number
   sharpe_ratio?: number
   avg_win_r?: number
   avg_loss_r?: number
-  trade_log?: Trade[]
+  total_charges?: number
+  slippage_impact?: number
+  best_trade?: { symbol: string; net_pnl: number; pnl_r: number; exit_date: string }
+  worst_trade?: { symbol: string; net_pnl: number; pnl_r: number; exit_date: string }
+  trade_log?: BacktestTrade[]
   equity_curve?: Array<{ date: string; value: number }>
   monthly_returns?: Record<string, number>
+  data_source?: string
+  strategy_used?: string
+  message?: string
 }
