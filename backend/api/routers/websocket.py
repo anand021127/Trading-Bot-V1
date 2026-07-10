@@ -1,24 +1,26 @@
-"""WebSocket router for live frontend updates."""
-
-from fastapi import APIRouter, WebSocket
-
-from ..websocket import manager, build_initial_state, build_price_update
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import json
+import asyncio
 
 router = APIRouter()
 
+active_connections = []
 
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket) -> None:
-    await manager.connect(websocket)
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    active_connections.append(websocket)
     try:
-        await manager.send_to(websocket, build_initial_state())
         while True:
-            await websocket.receive_text()
+            # Keep alive + handle client messages
+            data = await websocket.receive_text()
+            # Echo or process
+            await websocket.send_text(json.dumps({
+                "type": "price_update", 
+                "payload": {"prices": {}}  # Mock - replace with real data later
+            }))
+    except WebSocketDisconnect:
+        active_connections.remove(websocket)
     except Exception:
-        pass
-    finally:
-        manager.disconnect(websocket)
-
-
-async def broadcast_price_update() -> None:
-    await manager.broadcast(build_price_update())
+        if websocket in active_connections:
+            active_connections.remove(websocket)
