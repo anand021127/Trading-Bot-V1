@@ -13,7 +13,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-AUTHORIZE_URL = "https://api.upstox.com/v2/feed/market-data-feed/authorize"
+AUTHORIZE_URL = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
 
 
 def get_authorized_ws_uri(token: str) -> Optional[str]:
