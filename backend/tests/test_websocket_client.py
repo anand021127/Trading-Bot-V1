@@ -132,4 +132,31 @@ def test_status_report_shape() -> None:
     report = client.status_report()
     assert report["subscribed_instruments"] == 2
     assert report["feed_endpoint"] == "wss://api.upstox.com/v3/feed/market-data-feed"
+    assert report["feed_version"] == "v3"
     assert "connection_status" in report
+    # last_tick_time is None until the first tick, then a wall-clock ISO string.
+    assert report["last_tick_time"] is None
+    assert report["total_ticks"] == 0
+
+
+def test_on_message_sets_trend_and_tick_time() -> None:
+    client = UpstoxWebSocketClient(access_token="fake-token-for-unit-test-only")
+    client._on_message(None, {
+        "type": "live_feed",
+        "feeds": {"NSE_EQ|INE002A01018": _sample_stock_feed(ltp=2530.0, cp=2500.0, vtt=200000)},
+    })
+    price = client.get_price("NSE_EQ|INE002A01018")
+    assert price["trend"] == "up"          # ltp > prev_close
+    assert price["tick_time"] is not None  # wall-clock ISO stamped on every tick
+
+    # A down tick flips trend to "down".
+    client._on_message(None, {
+        "type": "live_feed",
+        "feeds": {"NSE_EQ|INE002A01018": _sample_stock_feed(ltp=2470.0, cp=2500.0, vtt=210000)},
+    })
+    assert client.get_price("NSE_EQ|INE002A01018")["trend"] == "down"
+
+    # status_report now reflects a real last_tick_time + tick count.
+    report = client.status_report()
+    assert report["last_tick_time"] is not None
+    assert report["total_ticks"] == 2
