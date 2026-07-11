@@ -32,7 +32,7 @@ def test_connection_manager_connect_and_broadcast() -> None:
 
 def test_build_initial_state_contains_type() -> None:
     state = build_initial_state()
-    assert state["type"] == "state"
+    assert state["type"] == "initial_state"
     assert "timestamp" in state
 
 

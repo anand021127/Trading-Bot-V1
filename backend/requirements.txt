@@ -8,8 +8,15 @@ python-multipart>=0.0.9
 requests>=2.31.0
 httpx>=0.27.0
 
-# WebSocket
+# WebSocket (frontend-facing push channel)
 websockets>=12.0
+
+# Upstox v3 Market Data Feed — official SDK bundles the compiled
+# protobuf schema (MarketDataFeedV3_pb2) so we never hand-roll .proto
+# decoding, and it uses a battle-tested websocket-client transport.
+upstox-python-sdk>=2.28.0
+websocket-client>=1.7.0
+protobuf>=4.25.0
 
 # Config & env
 python-dotenv>=1.0.0

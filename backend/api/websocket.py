@@ -52,13 +52,55 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# Price cache populated by the broadcast task
+# Price cache populated by the broker's Upstox v3 WebSocket client.
+# Keyed by instrument_key (e.g. "NSE_EQ|INE002A01018", "NSE_INDEX|Nifty 50").
 _price_cache: Dict[str, Any] = {}
+
+# instrument_key -> friendly symbol (e.g. "RELIANCE", "NIFTY50"), populated
+# lazily from backend.broker.upstox_client.ALL_INSTRUMENTS so the cache below
+# can also be looked up/broadcast by symbol for the frontend.
+_key_to_symbol: Dict[str, str] = {}
+
+
+def _ensure_symbol_map() -> None:
+    if _key_to_symbol:
+        return
+    try:
+        from backend.broker.upstox_client import ALL_INSTRUMENTS
+        for symbol, key in ALL_INSTRUMENTS.items():
+            _key_to_symbol[key] = symbol
+    except Exception:
+        pass
 
 
 def update_price_cache(prices: Dict[str, Any]) -> None:
-    """Called by broker WebSocket when new prices arrive."""
+    """Called by the broker's Upstox v3 WebSocket client on every tick batch.
+    `prices` is keyed by instrument_key; we mirror it into a by-symbol view
+    too so REST/WS consumers can look either up."""
+    _ensure_symbol_map()
     _price_cache.update(prices)
+
+
+def get_prices_by_symbol() -> Dict[str, Any]:
+    _ensure_symbol_map()
+    return {
+        _key_to_symbol.get(k, k): v
+        for k, v in _price_cache.items()
+    }
+
+
+def get_broker_ws_status() -> Dict[str, Any]:
+    """Real connection status of the Upstox v3 feed (not the frontend push
+    channel). Populated via the app-level ws_client if available."""
+    try:
+        import backend.api.main as main_mod  # avoid circular import at module load
+        client = getattr(getattr(main_mod, "app", None), "state", None)
+        client = getattr(client, "ws_client", None)
+        if client is not None:
+            return client.status_report()
+    except Exception:
+        pass
+    return {"connection_status": "unknown", "is_connected": False}
 
 
 def _is_market_open() -> bool:
@@ -90,16 +132,20 @@ def _get_positions() -> list:
 
 def build_price_update() -> Dict[str, Any]:
     bot_state = _get_bot_state()
+    broker_status = get_broker_ws_status()
     return {
         "type": "price_update",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "payload": {
             "market_open": _is_market_open(),
             "mode": settings.mode,
-            "websocket_connected": len(manager.active_connections) > 0,
-            "active_connections": len(manager.active_connections),
+            # Real Upstox v3 feed status — NOT the frontend push channel.
+            "websocket_connected": broker_status.get("is_connected", False),
+            "websocket_status": broker_status.get("connection_status", "unknown"),
+            "last_tick_age_seconds": broker_status.get("last_tick_age_seconds"),
+            "active_frontend_connections": len(manager.active_connections),
             "positions": _get_positions(),
-            "prices": _price_cache,
+            "prices": get_prices_by_symbol(),
             "bot_running": bot_state.get("running", False),
             "kill_switch_active": bot_state.get("kill_switch_active", False),
         },
@@ -108,16 +154,19 @@ def build_price_update() -> Dict[str, Any]:
 
 def build_initial_state() -> Dict[str, Any]:
     bot_state = _get_bot_state()
+    broker_status = get_broker_ws_status()
     return {
         "type": "initial_state",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "payload": {
             "mode": settings.mode,
             "market_open": _is_market_open(),
-            "websocket_connected": True,
-            "active_connections": len(manager.active_connections),
+            "websocket_connected": broker_status.get("is_connected", False),
+            "websocket_status": broker_status.get("connection_status", "unknown"),
+            "last_tick_age_seconds": broker_status.get("last_tick_age_seconds"),
+            "active_frontend_connections": len(manager.active_connections),
             "positions": _get_positions(),
-            "prices": _price_cache,
+            "prices": get_prices_by_symbol(),
             "bot_running": bot_state.get("running", False),
             "kill_switch_active": bot_state.get("kill_switch_active", False),
         },

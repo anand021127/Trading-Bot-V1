@@ -213,16 +213,17 @@ class UpstoxClient:
             return self._empty_quote(symbol)
 
     def get_multiple_quotes(self, symbols: List[str]) -> Dict[str, Any]:
-        """Batch fetch quotes for multiple symbols in one API call."""
+        """Batch fetch quotes for multiple symbols (stocks or indices) in
+        one API call."""
         if not symbols:
             return {}
-        keys = ",".join(SYMBOL_TO_KEY.get(s.upper(), f"NSE_EQ|{s}") for s in symbols)
+        keys = ",".join(ALL_INSTRUMENTS.get(s.upper(), f"NSE_EQ|{s}") for s in symbols)
         try:
             data = self._get("/market-quote/quotes", params={"instrument_key": keys})
             raw = data.get("data", {})
             result: Dict[str, Any] = {}
             for sym in symbols:
-                key = SYMBOL_TO_KEY.get(sym.upper(), f"NSE_EQ|{sym}")
+                key = ALL_INSTRUMENTS.get(sym.upper(), f"NSE_EQ|{sym}")
                 q = raw.get(key, {})
                 if q:
                     ohlc = q.get("ohlc", {})
