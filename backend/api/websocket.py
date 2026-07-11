@@ -120,6 +120,16 @@ def _get_bot_state() -> Dict[str, Any]:
         return {"running": False, "kill_switch_active": False}
 
 
+def _get_scanner_state() -> Dict[str, Any]:
+    """Live scanner snapshot (currently-analyzing + per-symbol decisions).
+    Returns an empty snapshot until the scanner has run at least once."""
+    try:
+        from backend.strategy.scanner_state import scanner_state
+        return scanner_state.snapshot()
+    except Exception:
+        return {"currently_scanning": None, "last_scan_time": None, "symbols": {}}
+
+
 def _get_positions() -> list:
     try:
         from backend.database.db_manager import DatabaseManager
@@ -130,46 +140,44 @@ def _get_positions() -> list:
         return []
 
 
-def build_price_update() -> Dict[str, Any]:
+def _common_payload() -> Dict[str, Any]:
+    """Shared payload for both initial_state and price_update messages, so the
+    two stay in lock-step. `feed_status` is the REAL Upstox v3 feed status (the
+    broker socket), distinct from the frontend push channel."""
     bot_state = _get_bot_state()
     broker_status = get_broker_ws_status()
+    scanner = _get_scanner_state()
+    return {
+        "mode": settings.mode,
+        "market_open": _is_market_open(),
+        # Real Upstox v3 feed status — NOT the frontend push channel.
+        "websocket_connected": broker_status.get("is_connected", False),
+        "websocket_status": broker_status.get("connection_status", "unknown"),
+        "last_tick_age_seconds": broker_status.get("last_tick_age_seconds"),
+        "last_tick_time": broker_status.get("last_tick_time"),
+        "feed_status": broker_status,
+        "active_frontend_connections": len(manager.active_connections),
+        "positions": _get_positions(),
+        "prices": get_prices_by_symbol(),
+        "scanner": scanner,
+        "bot_running": bot_state.get("running", False),
+        "kill_switch_active": bot_state.get("kill_switch_active", False),
+    }
+
+
+def build_price_update() -> Dict[str, Any]:
     return {
         "type": "price_update",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "payload": {
-            "market_open": _is_market_open(),
-            "mode": settings.mode,
-            # Real Upstox v3 feed status — NOT the frontend push channel.
-            "websocket_connected": broker_status.get("is_connected", False),
-            "websocket_status": broker_status.get("connection_status", "unknown"),
-            "last_tick_age_seconds": broker_status.get("last_tick_age_seconds"),
-            "active_frontend_connections": len(manager.active_connections),
-            "positions": _get_positions(),
-            "prices": get_prices_by_symbol(),
-            "bot_running": bot_state.get("running", False),
-            "kill_switch_active": bot_state.get("kill_switch_active", False),
-        },
+        "payload": _common_payload(),
     }
 
 
 def build_initial_state() -> Dict[str, Any]:
-    bot_state = _get_bot_state()
-    broker_status = get_broker_ws_status()
     return {
         "type": "initial_state",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "payload": {
-            "mode": settings.mode,
-            "market_open": _is_market_open(),
-            "websocket_connected": broker_status.get("is_connected", False),
-            "websocket_status": broker_status.get("connection_status", "unknown"),
-            "last_tick_age_seconds": broker_status.get("last_tick_age_seconds"),
-            "active_frontend_connections": len(manager.active_connections),
-            "positions": _get_positions(),
-            "prices": get_prices_by_symbol(),
-            "bot_running": bot_state.get("running", False),
-            "kill_switch_active": bot_state.get("kill_switch_active", False),
-        },
+        "payload": _common_payload(),
     }
 
 

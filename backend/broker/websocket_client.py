@@ -28,6 +28,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,9 @@ class UpstoxWebSocketClient:
         self.connection_status = "disconnected"
         self.is_connected = False
         self._last_message_time: float = 0.0
+        self._last_message_wall: Optional[datetime] = None
+        self._connected_since: Optional[datetime] = None
+        self._total_ticks = 0
         self._last_error: Optional[str] = None
         self._reconnect_attempts = 0
 
@@ -140,10 +144,20 @@ class UpstoxWebSocketClient:
                 round(time.monotonic() - self._last_message_time, 1)
                 if self._last_message_time else None
             ),
+            # Wall-clock ISO of the most recent tick (what the dashboard shows as
+            # "last websocket tick time"). None until the first tick arrives.
+            "last_tick_time": (
+                self._last_message_wall.isoformat() if self._last_message_wall else None
+            ),
+            "connected_since": (
+                self._connected_since.isoformat() if self._connected_since else None
+            ),
+            "total_ticks": self._total_ticks,
             "is_stale": self.is_data_stale(),
             "last_error": self._last_error,
             "reconnect_attempts": self._reconnect_attempts,
             "feed_endpoint": V3_FEED_URL,
+            "feed_version": "v3",
         }
 
     def start(self) -> None:
@@ -216,18 +230,31 @@ class UpstoxWebSocketClient:
     def _on_open(self, *_args: Any) -> None:
         self.is_connected = True
         self.connection_status = "connected"
+        self._connected_since = datetime.now(timezone.utc)
         self._reconnect_attempts = 0
         self._last_error = None
         logger.info(
-            "Upstox v3 WebSocket CONNECTED (%s) — %d instruments subscribed",
-            V3_FEED_URL, len(self._instrument_keys),
+            "Upstox v3 WebSocket CONNECTED (%s) — %d instruments subscribed, mode=%s",
+            V3_FEED_URL, len(self._instrument_keys), self.mode,
         )
+        # Re-assert the subscription on (re)connect. The SDK subscribes the
+        # constructor keys itself, but doing it again is idempotent and covers
+        # the reconnect case where the server dropped our subscription.
+        if self._streamer is not None and self._instrument_keys:
+            try:
+                self._streamer.subscribe(list(self._instrument_keys), self.mode)
+                logger.info("WS (re)subscribed %d instruments on open",
+                            len(self._instrument_keys))
+            except Exception as e:
+                logger.debug("WS subscribe-on-open skipped: %s", e)
 
     def _on_message(self, _ws: Any, data: Dict[str, Any]) -> None:
         """`data` is the already protobuf-decoded FeedResponse as a dict:
         {"type": "...", "feeds": {instrument_key: {...}}, "currentTs": "..."}
         """
         self._last_message_time = time.monotonic()
+        self._last_message_wall = datetime.now(timezone.utc)
+        self._total_ticks += 1
         msg_type = data.get("type")
         if msg_type == "market_info":
             logger.debug("WS market_info tick: %s", data.get("marketInfo"))
@@ -250,16 +277,19 @@ class UpstoxWebSocketClient:
                     continue
                 change = ltp - cp if cp else 0.0
                 change_pct = (change / cp * 100.0) if cp else 0.0
+                trend = "up" if change > 0 else "down" if change < 0 else "flat"
                 self._prices[instrument_key] = {
                     "instrument_key": instrument_key,
                     "ltp": ltp,
                     "prev_close": cp,
                     "change": round(change, 2),
                     "change_pct": round(change_pct, 3),
+                    "trend": trend,
                     "volume": _extract_volume(feed),
                     "last_trade_time": ltpc.get("ltt"),
                     "last_trade_qty": ltpc.get("ltq"),
                     "last_tick_monotonic": self._last_message_time,
+                    "tick_time": self._last_message_wall.isoformat(),
                 }
                 updated.append(instrument_key)
 

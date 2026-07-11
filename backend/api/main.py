@@ -82,8 +82,36 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[WARN] Could not start Upstox v3 WebSocket client: {e}")
 
+    # Push live state to all connected frontend WebSocket clients on a fixed
+    # cadence. Without this scheduler the frontend socket only ever receives
+    # the one-shot initial_state and never streams live ticks.
+    app.state.scheduler = None
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        from backend.api.websocket import broadcast_price_update
+
+        scheduler = AsyncIOScheduler(timezone="UTC")
+        scheduler.add_job(
+            broadcast_price_update,
+            trigger="interval",
+            seconds=2,
+            id="broadcast_price_update",
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.start()
+        app.state.scheduler = scheduler
+        print("[INFO] Frontend price-broadcast scheduler started (2s interval)")
+    except Exception as e:
+        print(f"[WARN] Could not start broadcast scheduler: {e}")
+
     yield
     # Graceful shutdown
+    if getattr(app.state, "scheduler", None) is not None:
+        try:
+            app.state.scheduler.shutdown(wait=False)
+        except Exception:
+            pass
     if getattr(app.state, "ws_client", None) is not None:
         try:
             app.state.ws_client.stop()
