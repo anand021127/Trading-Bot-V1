@@ -5,6 +5,7 @@ import Layout from './components/Layout'
 
 // Lazy load all pages — instant nav, only load when needed
 const Overview     = lazy(() => import('./pages/Overview'))
+const Scanner      = lazy(() => import('./pages/Scanner'))
 const TradeHistory = lazy(() => import('./pages/TradeHistory'))
 const LivePremiums = lazy(() => import('./pages/LivePremiums'))
 const PaperTrading = lazy(() => import('./pages/PaperTrading'))
@@ -35,6 +36,9 @@ export default function App() {
         <Route element={<Layout />}>
           <Route index element={
             <Suspense fallback={<PageSkeleton />}><Overview /></Suspense>
+          } />
+          <Route path="/scanner" element={
+            <Suspense fallback={<PageSkeleton />}><Scanner /></Suspense>
           } />
           <Route path="/trade-history" element={
             <Suspense fallback={<PageSkeleton />}><TradeHistory /></Suspense>

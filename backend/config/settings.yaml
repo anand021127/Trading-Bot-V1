@@ -1,10 +1,8 @@
 mode: paper
 
 broker:
-  # REST APIs remain on v2 (current). The market-data FEED is v3 — the v2 feed
-  # (/v2/feed/market-data-feed) was discontinued by Upstox (HTTP 410).
   base_url: "https://api.upstox.com/v2"
-  websocket_url: "wss://api.upstox.com/v3/feed/market-data-feed"
+  websocket_url: "wss://api.upstox.com/v2/feed/market-data-feed"
 
 capital:
   total: 500000

@@ -54,6 +54,7 @@ def _empty_quote(symbol: str) -> Dict[str, Any]:
         "low": 0.0, "close": 0.0, "volume": 0, "change": 0.0, "change_pct": 0.0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "market_closed": True,
+        "has_data": False,  # explicit: this is a placeholder, not a real ₹0.00 price
     }
 
 
@@ -216,6 +217,22 @@ async def get_positions() -> List[Dict[str, Any]]:
 @router.post("/positions/{symbol}/exit")
 async def manual_exit_position(symbol: str) -> Dict[str, Any]:
     return {"status": "exit_queued", "symbol": symbol, "reason": "MANUAL_EXIT"}
+
+
+@router.get("/positions/live")
+async def get_live_positions_detail() -> Dict[str, Any]:
+    """Item #7 — for every open position: symbol, entry price, target,
+    stop-loss, live-updated trailing SL, current P&L, strategy used."""
+    import backend.api.routers.bot_control as bot_control_module
+    engine = bot_control_module._engine_ref
+    if engine is None:
+        return {"positions": [], "mode": settings.mode,
+                "note": "Trading engine not initialized (no Upstox token configured?)"}
+    try:
+        return {"positions": engine.get_open_positions_detail(), "mode": settings.mode}
+    except Exception as e:
+        logger.exception("Failed to build live positions detail")
+        return {"positions": [], "mode": settings.mode, "error": str(e)}
 
 
 # ─── Prices ──────────────────────────────────────────────────────────────────

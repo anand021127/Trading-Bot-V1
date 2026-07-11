@@ -190,10 +190,10 @@ export default function Overview() {
       {/* Connection status bar */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         {[
-          { label: 'Bot Engine',   ok: isRunning && !isKilled,  val: isKilled ? 'KILLED' : isRunning ? 'Running' : 'Stopped' },
-          { label: 'WebSocket',    ok: wsStatus === 'connected', val: wsStatus === 'connected' ? 'Connected' : 'Offline' },
-          { label: 'Market',       ok: sys?.market_open ?? false, val: sys?.market_open ? 'Open' : 'Closed' },
-          { label: 'Risk Status',  ok: risk?.status === 'ACTIVE', val: risk?.status ?? 'UNKNOWN' },
+          { label: 'Bot Engine',    ok: isRunning && !isKilled,  val: isKilled ? 'KILLED' : isRunning ? 'Running' : 'Stopped' },
+          { label: 'Live Updates',  ok: wsStatus === 'connected', val: wsStatus === 'connected' ? 'Connected' : 'Offline' },
+          { label: 'Market',        ok: sys?.market_open ?? false, val: sys?.market_open ? 'Open' : 'Closed' },
+          { label: 'Risk Status',   ok: risk?.status === 'ACTIVE', val: risk?.status ?? 'UNKNOWN' },
         ].map(item => (
           <div key={item.label} className="bg-[#141b2d] border border-[#1e2d45] rounded-lg px-3 py-2 flex items-center gap-2">
             <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${item.ok ? 'bg-emerald-400' : 'bg-red-400'}`} />
@@ -204,6 +204,50 @@ export default function Overview() {
           </div>
         ))}
       </div>
+
+      {/* System health — real Upstox v3 feed status, universe, scanner (item #8) */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        {[
+          {
+            label: 'Market Data Feed', ok: sys?.websocket_connected ?? false,
+            val: sys?.websocket_status ?? 'unknown',
+          },
+          {
+            label: 'API Health', ok: sys?.api_health === 'ok',
+            val: sys?.api_health ?? 'unknown',
+          },
+          {
+            label: 'Watching', ok: (data?.universe?.watching_count ?? 0) > 0,
+            val: `${data?.universe?.watching_count ?? 0} symbols (${data?.universe?.mode ?? 'STOCKS'})`,
+          },
+          {
+            label: 'Scanner', ok: data?.scanner?.is_running ?? false,
+            val: data?.scanner?.currently_analyzing ? `Analyzing ${data.scanner.currently_analyzing}` : (data?.scanner?.is_running ? 'Idle' : 'Stopped'),
+          },
+        ].map(item => (
+          <div key={item.label} className="bg-[#141b2d] border border-[#1e2d45] rounded-lg px-3 py-2 flex items-center gap-2">
+            <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${item.ok ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+            <div className="min-w-0">
+              <div className="text-[10px] text-slate-500">{item.label}</div>
+              <div className={`text-xs font-medium truncate ${item.ok ? 'text-emerald-400' : 'text-amber-400'}`}>{item.val}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {data?.scanner?.last_signal && (
+        <div className="bg-[#141b2d] border border-[#1e2d45] rounded-lg px-4 py-2.5 flex items-center gap-3">
+          <Zap size={14} className="text-blue-400 flex-shrink-0" />
+          <div className="text-xs text-slate-300">
+            <span className="font-medium text-white">Last signal:</span>{' '}
+            {data.scanner.last_signal.symbol} — {data.scanner.last_signal.strategy_name}{' '}
+            <span className={data.scanner.last_signal.signal === 'BUY' ? 'text-emerald-400' : 'text-slate-400'}>
+              {data.scanner.last_signal.signal}
+            </span>{' '}
+            ({data.scanner.last_signal.confidence.toFixed(0)}% confidence)
+          </div>
+        </div>
+      )}
 
       {/* Metrics */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

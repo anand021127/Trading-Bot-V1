@@ -23,12 +23,18 @@ from .routers import (
     bot_control_router,
     diagnostics_router,
     overview_router,
+    paper_router,
     performance_router,
+    scanner_router,
     settings_router,
+    strategy_router,
     trading_router,
+    universe_router,
     websocket_router,
 )
 from .routers.bot_control import set_engine
+from .routers.scanner import set_scanner
+from .routers.strategy import set_engine as set_strategy_engine
 from backend.config.settings import load_settings
 from backend.database.db_manager import DatabaseManager
 
@@ -50,6 +56,7 @@ async def lifespan(app: FastAPI):
             email_alerts=EmailAlerts() if s.notifications.email_enabled else None,
         )
         set_engine(engine)
+        set_strategy_engine(engine)
         app.state.engine = engine
     except Exception as e:
         print(f"[WARN] Could not build trading engine: {e}")
@@ -82,34 +89,36 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[WARN] Could not start Upstox v3 WebSocket client: {e}")
 
-    # Push live state to all connected frontend WebSocket clients on a fixed
-    # cadence. Without this scheduler the frontend socket only ever receives
-    # the one-shot initial_state and never streams live ticks.
-    app.state.scheduler = None
+    # Live scanner — runs continuously regardless of BotState (order
+    # execution), so the dashboard always shows what's being analyzed.
+    app.state.scanner = None
     try:
-        from apscheduler.schedulers.asyncio import AsyncIOScheduler
-        from backend.api.websocket import broadcast_price_update
+        from backend.scanner.live_scanner import LiveScanner
+        from backend.config.universe_config import load_universe_config
 
-        scheduler = AsyncIOScheduler(timezone="UTC")
-        scheduler.add_job(
-            broadcast_price_update,
-            trigger="interval",
-            seconds=2,
-            id="broadcast_price_update",
-            max_instances=1,
-            coalesce=True,
-        )
-        scheduler.start()
-        app.state.scheduler = scheduler
-        print("[INFO] Frontend price-broadcast scheduler started (2s interval)")
+        def _resolve_universe() -> list:
+            try:
+                return load_universe_config(db).resolve_symbols()
+            except Exception:
+                return []
+
+        if app.state.engine is not None:
+            scanner = LiveScanner(
+                trading_engine=app.state.engine,
+                universe_resolver=_resolve_universe,
+                seconds_between_symbols=3.0,
+            )
+            scanner.start()
+            set_scanner(scanner)
+            app.state.scanner = scanner
     except Exception as e:
-        print(f"[WARN] Could not start broadcast scheduler: {e}")
+        print(f"[WARN] Could not start live scanner: {e}")
 
     yield
     # Graceful shutdown
-    if getattr(app.state, "scheduler", None) is not None:
+    if getattr(app.state, "scanner", None) is not None:
         try:
-            app.state.scheduler.shutdown(wait=False)
+            app.state.scanner.stop()
         except Exception:
             pass
     if getattr(app.state, "ws_client", None) is not None:
@@ -157,7 +166,11 @@ app.include_router(diagnostics_router, prefix="/api/diagnostics")
 app.include_router(alerts_router,      prefix="/api/alerts")
 app.include_router(backtest_router,    prefix="/api/backtest")
 app.include_router(performance_router, prefix="/api/performance")
+app.include_router(paper_router,       prefix="/api/paper")
 app.include_router(bot_control_router, prefix="/api/bot")
+app.include_router(strategy_router,    prefix="/api/strategy")
+app.include_router(universe_router,    prefix="/api/universe")
+app.include_router(scanner_router,     prefix="/api/scanner")
 
 
 # ─── Core endpoints ────────────────────────────────────────────────────────────

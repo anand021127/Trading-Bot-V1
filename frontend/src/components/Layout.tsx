@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, ClipboardList, TrendingUp, FileText,
-  BarChart2, PieChart, Wrench, Settings, Menu, X, Wifi, WifiOff,
+  BarChart2, PieChart, Wrench, Settings, Menu, X, Wifi, WifiOff, Radar,
 } from 'lucide-react'
 import { useState } from 'react'
 import { Toaster } from 'react-hot-toast'
@@ -9,6 +9,7 @@ import { useWebSocket } from '../hooks/useWebSocket'
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Overview' },
+  { to: '/scanner', icon: Radar, label: 'Live Scanner' },
   { to: '/trade-history', icon: ClipboardList, label: 'Trade History' },
   { to: '/live-premiums', icon: TrendingUp, label: 'Live Premiums' },
   { to: '/paper-trading', icon: FileText, label: 'Paper Trading' },

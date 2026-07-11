@@ -24,7 +24,8 @@ from backend.orders.order_manager import OrderManager, OrderError
 from backend.orders.order_models import OrderRequest
 from backend.risk.position_sizer import PositionSizer
 from backend.risk.risk_manager import RiskManager
-from backend.strategy.exit_manager import ExitManager
+from backend.strategy.exit_manager import ExitManager, TrailingStopManager
+from backend.strategy.strategy_engine import MultiStrategyEngine
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -143,6 +144,11 @@ class TradingEngine:
         self.telegram_alerts = telegram_alerts
         self.email_alerts = email_alerts
         self.strategy_name = strategy_name
+        # Pluggable multi-strategy engine (EMA Trend / ORB / Option Premium).
+        # This runs alongside the legacy inline ORB evaluate_signal() below —
+        # see evaluate_all_strategies() for the new, unified path.
+        self.strategy_engine = MultiStrategyEngine()
+        self.trailing_stop_manager = TrailingStopManager()
         self._orb_levels: Dict[str, Dict[str, float]] = {}
         self._open_positions: Dict[str, Dict[str, Any]] = {}
 
@@ -342,6 +348,88 @@ class TradingEngine:
 
         return result
 
+    # ─── Multi-strategy evaluation (EMA Trend / ORB / Option Premium) ────────
+
+    def evaluate_all_strategies(
+        self, symbol: str, index_trend: Optional[str] = None,
+    ) -> List[Any]:
+        """Run every enabled strategy (EMA_TREND, ORB, OPTION_PREMIUM) against
+        `symbol` and return one StrategySignal per strategy — including
+        rejected ones with their reasons. This is the path the live scanner
+        and dashboard use; it never hides a rejection.
+
+        `index_trend` — optional "BULLISH"/"BEARISH"/"NEUTRAL" for the
+        broader index, used by ORB's index-trend-confirmation condition.
+        Option Premium strategy is skipped here (it needs an option chain +
+        underlying trend context that only makes sense for index/F&O
+        symbols) unless the caller supplies that separately.
+        """
+        try:
+            candles = self.client.get_historical_candles(symbol, "5minute", limit=100)
+        except Exception as e:
+            TradeLogger.log_error("TradingEngine.evaluate_all_strategies", e, {"symbol": symbol})
+            candles = []
+
+        context: Dict[str, Any] = {}
+        if index_trend:
+            context["index_trend"] = index_trend
+
+        strategy_names = ["EMA_TREND", "ORB"]
+        return self.strategy_engine.evaluate(symbol, candles, context, strategy_names)
+
+    def evaluate_option_premium(
+        self, underlying_symbol: str, expiry_date: str, underlying_trend: str,
+    ) -> Any:
+        """Run just the Option Premium strategy for `underlying_symbol`
+        (e.g. 'NIFTY50', 'BANKNIFTY'). Fetches the real option chain, picks
+        the ATM contract, fetches that contract's own candles, then scores
+        momentum + VWAP. Returns a single StrategySignal (possibly NONE)."""
+        from backend.strategy.strategies.option_premium import OptionPremiumStrategy
+
+        try:
+            chain = self.client.get_option_chain(underlying_symbol, expiry_date)
+        except Exception as e:
+            TradeLogger.log_error("TradingEngine.evaluate_option_premium", e,
+                                   {"symbol": underlying_symbol})
+            chain = []
+
+        spot = None
+        try:
+            spot_quotes = self.client.get_multiple_quotes([underlying_symbol])
+            spot = spot_quotes.get(underlying_symbol, {}).get("ltp")
+        except Exception:
+            pass
+
+        strat = next(
+            (s for s in self.strategy_engine.strategies if s.name == "OPTION_PREMIUM"), None
+        )
+        if strat is None:
+            strat = OptionPremiumStrategy()
+
+        context = {
+            "spot_price": spot,
+            "underlying_trend": underlying_trend,
+            "option_chain": chain,
+        }
+        contract = strat.select_contract(context)
+        if contract is None or not contract.get("instrument_key"):
+            from backend.strategy.signal import StrategySignal
+            sig = StrategySignal(strategy_name="OPTION_PREMIUM", symbol=underlying_symbol)
+            sig.rejected_reasons = ["Could not resolve ATM contract from live option chain/spot"]
+            sig.entry_reason = "NO TRADE — " + sig.rejected_reasons[0]
+            return sig
+
+        try:
+            premium_candles = self.client.get_historical_candles(
+                contract["instrument_key"], "5minute", limit=30,
+            )
+        except Exception as e:
+            TradeLogger.log_error("TradingEngine.evaluate_option_premium", e,
+                                   {"symbol": contract["instrument_key"]})
+            premium_candles = []
+
+        return strat.evaluate(underlying_symbol, premium_candles, context)
+
     # ─── Order execution ──────────────────────────────────────────────────────
 
     def execute_signal(self, signal: SignalResult) -> Optional[str]:
@@ -397,8 +485,13 @@ class TradingEngine:
                 "trade_id": trade_id,
                 "entry_price": order.price or signal.entry_price,
                 "stop_loss": signal.stop_loss,
+                "target": getattr(signal, "target", 0.0),
+                "trailing_stop": signal.stop_loss,  # starts at the initial stop; ratchets up
+                "strategy_name": getattr(signal, "strategy_name", self.strategy_name),
                 "quantity": qty,
                 "atr": signal.atr,
+                "side": "long",
+                "entry_time": datetime.now(timezone.utc).isoformat(),
             }
             self.db_manager.upsert_position(Position(
                 symbol=signal.symbol,
@@ -528,6 +621,59 @@ class TradingEngine:
 
     def list_positions(self):
         return self.db_manager.list_positions()
+
+    def get_open_positions_detail(self) -> List[Dict[str, Any]]:
+        """Everything item #7 asks for, per open position: symbol, entry
+        price, target, stop-loss, live-updated trailing SL, current P&L,
+        and which strategy opened it. Current price comes from the real
+        Upstox v3 WebSocket cache when available; if there's no live tick
+        yet, current_price is null and pnl is null — never fabricated."""
+        try:
+            from backend.api.websocket import get_prices_by_symbol
+            live_prices = get_prices_by_symbol()
+        except Exception:
+            live_prices = {}
+
+        details: List[Dict[str, Any]] = []
+        for symbol, pos in self._open_positions.items():
+            tick = live_prices.get(symbol)
+            current_price = tick.get("ltp") if tick else None
+
+            trailing_stop = pos.get("trailing_stop", pos["stop_loss"])
+            if current_price:
+                trail = self.trailing_stop_manager.compute(
+                    entry_price=pos["entry_price"],
+                    initial_stop=pos["stop_loss"],
+                    current_price=current_price,
+                    current_stop=trailing_stop,
+                )
+                trailing_stop = trail["stop"]
+                pos["trailing_stop"] = trailing_stop  # persist the ratchet
+
+            current_pnl = (
+                round((current_price - pos["entry_price"]) * pos["quantity"], 2)
+                if current_price else None
+            )
+            current_pnl_pct = (
+                round((current_price - pos["entry_price"]) / pos["entry_price"] * 100, 2)
+                if current_price else None
+            )
+
+            details.append({
+                "symbol": symbol,
+                "strategy_used": pos.get("strategy_name", self.strategy_name),
+                "entry_price": pos["entry_price"],
+                "target": pos.get("target", 0.0),
+                "stop_loss": pos["stop_loss"],
+                "trailing_stop": trailing_stop,
+                "quantity": pos["quantity"],
+                "current_price": current_price,
+                "current_pnl": current_pnl,
+                "current_pnl_pct": current_pnl_pct,
+                "mode": settings.mode,
+                "entry_time": pos.get("entry_time"),
+            })
+        return details
 
     def should_exit(self, position: dict, current_price: float) -> bool:
         return self.exit_manager.should_exit(position, current_price)

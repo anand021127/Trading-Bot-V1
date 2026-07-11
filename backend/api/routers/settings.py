@@ -228,17 +228,9 @@ async def get_broker_status() -> Dict[str, Any]:
         "token_valid": False,
         "api_reachable": False,
         "websocket_url": settings.broker.websocket_url,
-        "feed_version": "v3",
         "overall": "DISCONNECTED",
         "reason": "",
     }
-
-    # Attach the real Upstox v3 market-data feed socket status if available.
-    try:
-        from backend.api.websocket import get_broker_ws_status
-        status["feed"] = get_broker_ws_status()
-    except Exception:
-        status["feed"] = {"connection_status": "unknown", "is_connected": False}
 
     if not token:
         status["reason"] = "No access token. Go to Settings → Generate Token."

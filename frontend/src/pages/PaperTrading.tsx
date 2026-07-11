@@ -1,9 +1,9 @@
 import { useState, useCallback } from 'react'
 import { CheckCircle, XCircle, Clock, TrendingUp, AlertTriangle } from 'lucide-react'
-import { fetchPaperStatus } from '../api/endpoints'
+import { fetchPaperStatus, fetchLivePositions } from '../api/endpoints'
 import { usePolling } from '../hooks/usePolling'
 import { formatCurrency, pnlColor } from '../utils/formatters'
-import type { PaperStatus } from '../types'
+import type { PaperStatus, LivePositionDetail } from '../types'
 
 interface ChecklistItemProps {
   label: string
@@ -33,13 +33,18 @@ function ChecklistItem({ label, currentValue, target, pass }: ChecklistItemProps
 
 export default function PaperTrading() {
   const [data, setData] = useState<PaperStatus | null>(null)
+  const [positions, setPositions] = useState<LivePositionDetail[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
-      const d = await fetchPaperStatus()
+      const [d, p] = await Promise.all([
+        fetchPaperStatus(),
+        fetchLivePositions().catch(() => ({ positions: [] })),
+      ])
       setData(d)
+      setPositions(p.positions ?? [])
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load paper trading status')
@@ -98,6 +103,44 @@ export default function PaperTrading() {
             style={{ width: `${progress}%` }}
           />
         </div>
+      </div>
+
+      {/* Open Positions — item #7 */}
+      <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-[#1e2d45]">
+          <h2 className="text-sm font-semibold text-white">Open Positions ({positions.length})</h2>
+        </div>
+        {positions.length === 0 ? (
+          <div className="text-xs text-slate-600 text-center py-6">No open positions right now</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-slate-500 border-b border-[#1e2d45] bg-[#0f1628]/50">
+                  {['Symbol','Strategy','Entry','Target','Stop Loss','Trailing SL','Current Price','Current P&L'].map(h => (
+                    <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {positions.map(p => (
+                  <tr key={p.symbol} className="border-b border-[#1e2d45] last:border-0 hover:bg-[#1a2235]">
+                    <td className="px-3 py-2.5 text-white font-medium">{p.symbol}</td>
+                    <td className="px-3 py-2.5 text-slate-400">{p.strategy_used}</td>
+                    <td className="px-3 py-2.5 text-slate-300">{formatCurrency(p.entry_price)}</td>
+                    <td className="px-3 py-2.5 text-emerald-400">{p.target ? formatCurrency(p.target) : '—'}</td>
+                    <td className="px-3 py-2.5 text-red-400">{formatCurrency(p.stop_loss)}</td>
+                    <td className="px-3 py-2.5 text-amber-400">{formatCurrency(p.trailing_stop)}</td>
+                    <td className="px-3 py-2.5 text-slate-300">{p.current_price != null ? formatCurrency(p.current_price) : <span className="text-slate-600">no live tick</span>}</td>
+                    <td className={`px-3 py-2.5 font-semibold ${p.current_pnl != null ? pnlColor(p.current_pnl) : 'text-slate-600'}`}>
+                      {p.current_pnl != null ? `${formatCurrency(p.current_pnl)} (${p.current_pnl_pct?.toFixed(2)}%)` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {loading ? (

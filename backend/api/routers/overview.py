@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
@@ -91,6 +91,42 @@ async def get_overview() -> Dict[str, Any]:
     available_capital = max(0.0, settings.capital.total - used_capital)
     daily_pnl_pct = (today_stats["net_pnl"] / settings.capital.total * 100) if settings.capital.total else 0.0
 
+    # Real Upstox v3 feed status (not the frontend push channel).
+    try:
+        from backend.api.websocket import get_broker_ws_status
+        broker_ws = get_broker_ws_status()
+    except Exception:
+        broker_ws = {"connection_status": "unknown", "is_connected": False}
+
+    # Universe — what's actually being watched right now.
+    watching_count = 0
+    universe_mode = "STOCKS"
+    try:
+        from backend.config.universe_config import load_universe_config
+        from backend.database.db_manager import DatabaseManager as _DB
+        uconfig = load_universe_config(db_manager)
+        watching_count = len(uconfig.resolve_symbols())
+        universe_mode = uconfig.mode
+    except Exception:
+        pass
+
+    # Live scanner — what it's analyzing right now + its most recent signal.
+    currently_analyzing = None
+    last_signal: Optional[Dict[str, Any]] = None
+    scanner_running = False
+    try:
+        import backend.api.routers.scanner as scanner_module
+        scanner = scanner_module._scanner_ref
+        if scanner is not None:
+            report = scanner.status_report()
+            scanner_running = report.get("is_running", False)
+            currently_analyzing = report.get("currently_scanning")
+            actionable = [r for r in report.get("results", []) if r.get("signal") != "NONE"]
+            if actionable:
+                last_signal = max(actionable, key=lambda r: r.get("confidence", 0))
+    except Exception:
+        pass
+
     return {
         "status": "ok",
         "daily_pnl": {
@@ -108,11 +144,22 @@ async def get_overview() -> Dict[str, Any]:
         "trend_bias": "NEUTRAL",
         "open_positions": positions,
         "watchlist": [],
+        "universe": {
+            "mode": universe_mode,
+            "watching_count": watching_count,
+        },
+        "scanner": {
+            "is_running": scanner_running,
+            "currently_analyzing": currently_analyzing,
+            "last_signal": last_signal,
+        },
         "system": {
-            "last_candle_seconds_ago": 0,
-            "websocket_connected": len(websocket_manager.active_connections) > 0,
-            "active_connections": len(websocket_manager.active_connections),
+            "last_candle_seconds_ago": broker_ws.get("last_tick_age_seconds"),
+            "websocket_connected": broker_ws.get("is_connected", False),
+            "websocket_status": broker_ws.get("connection_status", "unknown"),
+            "active_frontend_connections": len(websocket_manager.active_connections),
             "last_api_call": datetime.now(timezone.utc).isoformat(),
+            "api_health": "ok" if broker_ws.get("connection_status") not in ("auth_failed",) else "degraded",
             "mode": settings.mode,
             "market_open": _is_market_open(),
         },

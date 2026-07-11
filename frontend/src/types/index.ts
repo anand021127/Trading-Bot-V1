@@ -94,11 +94,31 @@ export interface WatchlistItem {
 }
 
 export interface SystemStatus {
-  last_candle_seconds_ago?: number
+  last_candle_seconds_ago?: number | null
   websocket_connected?: boolean
+  websocket_status?: string
+  active_frontend_connections?: number
+  api_health?: string
   last_api_call?: string
   mode?: string
   market_open?: boolean
+}
+
+export interface UniverseSummary {
+  mode: string
+  watching_count: number
+}
+
+export interface ScannerSummary {
+  is_running: boolean
+  currently_analyzing?: string | null
+  last_signal?: {
+    symbol: string
+    strategy_name: string
+    signal: string
+    confidence: number
+    entry_reason: string
+  } | null
 }
 
 export interface OverviewData {
@@ -110,6 +130,8 @@ export interface OverviewData {
   open_positions?: Position[]
   watchlist?: WatchlistItem[]
   system?: SystemStatus
+  universe?: UniverseSummary
+  scanner?: ScannerSummary
 }
 
 export interface PerformanceMetrics {
@@ -280,4 +302,74 @@ export interface BacktestResponse {
   data_source?: string
   strategy_used?: string
   message?: string
+}
+
+// ── Live Scanner (item #3) ──────────────────────────────────────────────
+
+export interface ScannerStrategyBreakdown {
+  strategy_name: string
+  symbol: string
+  signal: string
+  confidence: number
+  entry_reason: string
+  conditions: Record<string, boolean>
+  conditions_passed: number
+  conditions_total: number
+  rejected_reasons: string[]
+  indicators: Record<string, unknown>
+}
+
+export interface ScannerEntry {
+  symbol: string
+  ltp: number | null
+  scanned_at: string
+  ema_status: string
+  rsi_value: number | null
+  rsi_status: string
+  atr: number | null
+  volume_status: string
+  trend: string
+  decision: string
+  signal: string
+  confidence: number
+  rejected_reasons: string[]
+  strategy_breakdown: ScannerStrategyBreakdown[]
+  error: string | null
+}
+
+export interface ScannerStatus {
+  is_running: boolean
+  currently_scanning: string | null
+  last_full_pass_completed_at: string | null
+  watching_count: number
+  results: ScannerEntry[]
+}
+
+// ── Trading Universe (item #4) ──────────────────────────────────────────
+
+export interface UniverseConfigResponse {
+  mode: string
+  index: string
+  custom_symbols: string[]
+  max_symbols: number
+  resolved_symbols: string[]
+  valid_modes: string[]
+  nifty50_constituents: string[]
+}
+
+// ── Live Positions detail (item #7) ─────────────────────────────────────
+
+export interface LivePositionDetail {
+  symbol: string
+  strategy_used: string
+  entry_price: number
+  target: number
+  stop_loss: number
+  trailing_stop: number
+  quantity: number
+  current_price: number | null
+  current_pnl: number | null
+  current_pnl_pct: number | null
+  mode: string
+  entry_time: string | null
 }

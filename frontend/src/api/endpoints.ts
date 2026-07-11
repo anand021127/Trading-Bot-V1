@@ -5,6 +5,7 @@ import type {
   PerformanceResponse, DiagnosticResult, Settings,
   PaperStatus, BacktestRequest, BacktestResponse,
   HealthStatus, DiagnosticsResponse,
+  ScannerStatus, UniverseConfigResponse, LivePositionDetail,
 } from '../types'
 
 // Health
@@ -82,6 +83,32 @@ export const fetchPaperStatus = () =>
     () => api.get<PaperStatus>('/api/paper/status').then(r => r.data),
     TTL.PAPER,
   )
+
+export const fetchLivePositions = () =>
+  cachedFetch('positions:live',
+    () => api.get<{ positions: LivePositionDetail[] }>('/api/positions/live').then(r => r.data),
+    TTL.PRICES,
+  )
+
+// Live Scanner (item #3)
+export const fetchScannerStatus = () =>
+  cachedFetch('scanner:status',
+    () => api.get<ScannerStatus>('/api/scanner/status').then(r => r.data),
+    TTL.SCANNER,
+  )
+
+export const triggerScanNow = () =>
+  api.post('/api/scanner/scan-now').then(r => r.data)
+
+// Trading Universe (item #4)
+export const fetchUniverse = () =>
+  cachedFetch('universe',
+    () => api.get<UniverseConfigResponse>('/api/universe/').then(r => r.data),
+    TTL.SETTINGS,
+  )
+
+export const updateUniverse = (body: Partial<UniverseConfigResponse>) =>
+  api.put<UniverseConfigResponse>('/api/universe/', body).then(r => r.data)
 
 // Backtest — no cache (user-triggered)
 export const runBacktest = (params: BacktestRequest) =>

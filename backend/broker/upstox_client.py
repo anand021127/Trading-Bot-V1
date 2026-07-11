@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -14,22 +14,21 @@ from urllib3.util.retry import Retry
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.upstox.com/v2"
+V3_BASE_URL = "https://api.upstox.com/v3"
 
-# Upstox v2 valid historical candle intervals
-# Reference: https://upstox.com/developer/api-documentation/get-historical-candle-data
-VALID_INTERVALS = {
-    "1minute":  "1minute",
-    "1min":     "1minute",
-    "30minute": "30minute",
-    "30min":    "30minute",
-    "day":      "day",
-    "1day":     "day",
-    "week":     "week",
-    "month":    "month",
-    # Map common wrong values to correct ones
-    "5minute":  "30minute",   # Upstox v2 does NOT support 5min — use 30min
-    "15minute": "30minute",   # Upstox v2 does NOT support 15min — use 30min
-    "60minute": "day",
+# Upstox v3 Historical Candle Data API interval mapping: (unit, interval_number).
+# This is what actually fixes the old v2 bug where 5minute/15minute were
+# silently rewritten to 30minute — v3 genuinely supports all of these.
+V3_INTERVAL_MAP: Dict[str, Tuple[str, int]] = {
+    "1minute": ("minutes", 1), "1min": ("minutes", 1),
+    "3minute": ("minutes", 3), "3min": ("minutes", 3),
+    "5minute": ("minutes", 5), "5min": ("minutes", 5),
+    "15minute": ("minutes", 15), "15min": ("minutes", 15),
+    "30minute": ("minutes", 30), "30min": ("minutes", 30),
+    "60minute": ("minutes", 60), "hour": ("minutes", 60),
+    "day": ("days", 1), "1day": ("days", 1),
+    "week": ("weeks", 1),
+    "month": ("months", 1),
 }
 
 # Instrument key map for NIFTY50 stocks (NSE_EQ|ISIN format)
@@ -127,11 +126,13 @@ class UpstoxClient:
         return h
 
     def _get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        url = f"{self.base_url}{path}"
+        return self._get_url(f"{self.base_url}{path}", params)
+
+    def _get_url(self, url: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         try:
             r = self._session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
         except requests.Timeout:
-            raise UpstoxAPIError(408, f"Timeout for {path}")
+            raise UpstoxAPIError(408, f"Timeout for {url}")
         except requests.ConnectionError as e:
             raise UpstoxAPIError(503, f"Connection error: {e}")
 
@@ -240,6 +241,7 @@ class UpstoxClient:
                         "change":     round(chg, 2),
                         "change_pct": round((chg / prev * 100) if prev else 0, 3),
                         "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "has_data": True,
                     }
                 else:
                     result[sym] = self._empty_quote(sym)
@@ -257,49 +259,140 @@ class UpstoxClient:
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
         """
-        Fetch OHLCV candles from Upstox v2 historical candle API.
+        Fetch OHLCV candles from the Upstox v3 Historical Candle Data API.
 
-        Upstox v2 supported intervals: 1minute, 30minute, day, week, month
-        Note: 5minute and 15minute are NOT supported in v2.
-        Use 30minute as the intraday interval.
+        v3 fixed the v2 limitation that silently remapped 5minute/15minute
+        requests to 30minute — it now genuinely supports 1/3/5/15/30-minute,
+        daily, weekly, and monthly candles via:
+            GET /v3/historical-candle/{instrument_key}/{unit}/{interval}/{to_date}/{from_date}
+        where unit ∈ {minutes, days, weeks, months} and interval is an int.
 
-        Endpoint: GET /historical-candle/{instrument_key}/{interval}/{to_date}/{from_date}
+        Minute-level data has a limited per-request window, so multi-month
+        ranges are fetched in ~25-day chunks and concatenated — this is what
+        makes a full year of 5-minute backtesting actually possible (the old
+        client fetched one request's worth and quietly gave up).
         """
-        instrument_key = SYMBOL_TO_KEY.get(symbol.upper(), f"NSE_EQ|{symbol}")
+        if "|" in symbol:
+            instrument_key = symbol
+        else:
+            instrument_key = ALL_INSTRUMENTS.get(symbol.upper(), f"NSE_EQ|{symbol}")
 
-        # Map interval to valid Upstox v2 value
-        mapped_interval = VALID_INTERVALS.get(interval.lower(), "day")
+        unit, unit_interval = V3_INTERVAL_MAP.get(interval.lower(), ("days", 1))
 
         if not to_date:
             to_date = date.today().strftime("%Y-%m-%d")
         if not from_date:
-            # Go back far enough to get enough candles
-            days_back = 30 if mapped_interval in ("1minute", "30minute") else 365
+            days_back = 30 if unit == "minutes" else 365
             from_date = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
-        # Upstox v2 historical candle endpoint format
-        path = f"/historical-candle/{instrument_key}/{mapped_interval}/{to_date}/{from_date}"
+        to_dt = date.fromisoformat(to_date)
+        from_dt = date.fromisoformat(from_date)
+
+        # Chunk minute-granularity requests — Upstox v3 rejects overly wide
+        # windows at fine granularity with an explicit error rather than
+        # silently truncating, so we chunk proactively instead of guessing.
+        chunk_days = 25 if unit == "minutes" else (180 if unit == "days" else 3650)
+
+        all_rows: List[List[Any]] = []
+        chunk_end = to_dt
+        while chunk_end >= from_dt:
+            chunk_start = max(from_dt, chunk_end - timedelta(days=chunk_days))
+            path = (
+                f"/historical-candle/{instrument_key}/{unit}/{unit_interval}"
+                f"/{chunk_end.isoformat()}/{chunk_start.isoformat()}"
+            )
+            try:
+                data = self._get_url(f"{V3_BASE_URL}{path}")
+                rows = data.get("data", {}).get("candles", [])
+                all_rows.extend(rows)
+            except UpstoxAPIError as e:
+                logger.warning(
+                    "Historical candle chunk failed for %s %s/%s [%s..%s]: %s "
+                    "— continuing with remaining chunks (gap, not fabricated data)",
+                    symbol, unit, unit_interval, chunk_start, chunk_end, e,
+                )
+            chunk_end = chunk_start - timedelta(days=1)
+
         try:
-            data = self._get(path)
-            raw_candles = data.get("data", {}).get("candles", [])
-            result = []
-            for c in raw_candles:
-                # Upstox format: [timestamp, open, high, low, close, volume, oi]
+            # Dedupe (chunks can overlap at boundaries) and sort oldest-first.
+            seen: set = set()
+            result: List[Dict[str, Any]] = []
+            for c in all_rows:
                 if len(c) < 6:
                     continue
+                ts = str(c[0])
+                if ts in seen:
+                    continue
+                seen.add(ts)
                 result.append({
-                    "timestamp": str(c[0]),
+                    "timestamp": ts,
                     "open":   float(c[1]),
                     "high":   float(c[2]),
                     "low":    float(c[3]),
                     "close":  float(c[4]),
                     "volume": int(c[5]),
                 })
-            # Upstox returns newest first — reverse to oldest-first
-            result.reverse()
-            return result[-limit:]
+            result.sort(key=lambda r: r["timestamp"])
+            return result[-limit:] if limit else result
         except UpstoxAPIError as e:
-            logger.error("Historical candles failed for %s (%s): %s", symbol, mapped_interval, e)
+            logger.error("Historical candles failed for %s (%s): %s", symbol, interval, e)
+            raise
+        except Exception as e:
+            raise UpstoxAPIError(500, str(e))
+
+    def get_historical_candles_full_range(
+        self, symbol: str, interval: str, from_date: str, to_date: str,
+    ) -> List[Dict[str, Any]]:
+        """Same as get_historical_candles but returns every candle in the
+        range with no `limit` truncation — used by the backtest engine,
+        which needs the complete history, not just the most recent N bars."""
+        return self.get_historical_candles(
+            symbol, interval, from_date=from_date, to_date=to_date, limit=0,
+        )
+
+    # ─── Options ────────────────────────────────────────────────────────────
+
+    def get_option_chain(self, underlying_symbol: str, expiry_date: str) -> List[Dict[str, Any]]:
+        """
+        Fetch the option chain for an underlying (index or stock) and expiry.
+
+        Endpoint: GET /option/chain?instrument_key=...&expiry_date=YYYY-MM-DD
+
+        Returns a flat list of contracts:
+          [{"strike": 22000.0, "option_type": "CE", "instrument_key": "...",
+            "ltp": 123.45, "close_price": 118.0, "volume": 5000, "oi": 12000}, ...]
+
+        Never returns fabricated contracts — an API failure raises
+        UpstoxAPIError, and the caller (OptionPremiumStrategy) treats an
+        empty chain as "contract not resolved", not as a signal to trade.
+        """
+        instrument_key = ALL_INSTRUMENTS.get(underlying_symbol.upper(), f"NSE_EQ|{underlying_symbol}")
+        try:
+            data = self._get("/option/chain", params={
+                "instrument_key": instrument_key,
+                "expiry_date": expiry_date,
+            })
+            raw = data.get("data", [])
+            contracts: List[Dict[str, Any]] = []
+            for row in raw:
+                strike = row.get("strike_price")
+                for opt_type, key_field in (("CE", "call_options"), ("PE", "put_options")):
+                    opt = row.get(key_field)
+                    if not opt:
+                        continue
+                    market_data = opt.get("market_data", {}) or {}
+                    contracts.append({
+                        "strike": float(strike) if strike is not None else None,
+                        "option_type": opt_type,
+                        "instrument_key": opt.get("instrument_key"),
+                        "ltp": market_data.get("ltp"),
+                        "close_price": market_data.get("close_price"),
+                        "volume": market_data.get("volume"),
+                        "oi": market_data.get("oi"),
+                    })
+            return contracts
+        except UpstoxAPIError as e:
+            logger.error("Option chain fetch failed for %s (%s): %s", underlying_symbol, expiry_date, e)
             raise
         except Exception as e:
             raise UpstoxAPIError(500, str(e))
@@ -378,6 +471,7 @@ class UpstoxClient:
             "symbol": symbol, "ltp": 0.0, "open": 0.0, "high": 0.0,
             "low": 0.0, "close": 0.0, "volume": 0, "change": 0.0, "change_pct": 0.0,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "has_data": False,  # explicit: placeholder, not a real ₹0.00 price
         }
 
     # Backward compat

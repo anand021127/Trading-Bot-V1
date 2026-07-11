@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Save, RefreshCw, ExternalLink, CheckCircle, XCircle, AlertTriangle, Wifi, WifiOff } from 'lucide-react'
-import { fetchSettings, updateSettings, fetchEnvStatus, regenerateToken } from '../api/endpoints'
-import type { Settings } from '../types'
+import { fetchSettings, updateSettings, fetchEnvStatus, regenerateToken, fetchUniverse, updateUniverse } from '../api/endpoints'
+import type { Settings, UniverseConfigResponse } from '../types'
 import toast from 'react-hot-toast'
 import api from '../api/client'
 
@@ -52,6 +52,107 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) =>
       className={`relative w-11 h-6 rounded-full transition-colors ${value ? 'bg-blue-600' : 'bg-[#1e2d45]'}`}>
       <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${value ? 'translate-x-5' : 'translate-x-0'}`} />
     </button>
+  )
+}
+
+function UniverseSection() {
+  const [universe, setUniverse] = useState<UniverseConfigResponse | null>(null)
+  const [customText, setCustomText] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    fetchUniverse().then(u => {
+      setUniverse(u)
+      setCustomText(u.custom_symbols.join(', '))
+    }).catch(() => {})
+  }, [])
+
+  const save = async (patch: Partial<UniverseConfigResponse>) => {
+    if (!universe) return
+    setSaving(true)
+    try {
+      const updated = await updateUniverse({ ...universe, ...patch })
+      setUniverse(updated)
+      toast.success('Universe updated — bot will only scan these instruments')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to update universe')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!universe) {
+    return (
+      <Section title="Trading Universe">
+        <div className="text-xs text-slate-600">Loading...</div>
+      </Section>
+    )
+  }
+
+  const modes = universe.valid_modes
+
+  return (
+    <Section title="Trading Universe">
+      <Field label="Mode" desc="What the bot scans and trades">
+        <div className="flex gap-2 flex-wrap">
+          {modes.map(m => (
+            <button key={m} disabled={saving} onClick={() => save({ mode: m })}
+              className={`px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${
+                universe.mode === m
+                  ? 'bg-blue-600/20 text-blue-400 border-blue-600/50'
+                  : 'bg-[#0f1628] text-slate-500 border-[#1e2d45] hover:border-[#243044]'
+              }`}>
+              {m.replace('_', ' ')}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {universe.mode === 'STOCKS' && (
+        <>
+          <Field label="Index" desc="NIFTY50 = all 50 constituents. Custom = your own list.">
+            <div className="flex gap-2">
+              {['NIFTY50', 'CUSTOM'].map(idx => (
+                <button key={idx} disabled={saving} onClick={() => save({ index: idx })}
+                  className={`px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${
+                    universe.index === idx
+                      ? 'bg-blue-600/20 text-blue-400 border-blue-600/50'
+                      : 'bg-[#0f1628] text-slate-500 border-[#1e2d45] hover:border-[#243044]'
+                  }`}>
+                  {idx}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          {universe.index === 'CUSTOM' && (
+            <Field label="Custom Symbols" desc="Comma-separated, e.g. RELIANCE, TCS, HDFCBANK">
+              <div className="flex gap-2">
+                <input value={customText} onChange={e => setCustomText(e.target.value)}
+                  className="flex-1 bg-[#0f1628] border border-[#1e2d45] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-600/50" />
+                <button disabled={saving}
+                  onClick={() => save({ custom_symbols: customText.split(',').map(s => s.trim().toUpperCase()).filter(Boolean) })}
+                  className="px-3 py-2 rounded-lg text-xs font-medium bg-blue-600/20 text-blue-400 border border-blue-600/50">
+                  Apply
+                </button>
+              </div>
+            </Field>
+          )}
+
+          <Field label="Max Symbols" desc="Cap how many the scanner watches at once">
+            <NumInput value={universe.max_symbols} onChange={v => save({ max_symbols: v })} min={1} max={50} />
+          </Field>
+        </>
+      )}
+
+      <Field label="Currently Watching" desc="Exactly what the bot/scanner will look at">
+        <div className="flex flex-wrap gap-1.5">
+          {universe.resolved_symbols.map(s => (
+            <span key={s} className="px-2 py-1 rounded bg-[#0f1628] border border-[#1e2d45] text-[11px] text-slate-300">{s}</span>
+          ))}
+        </div>
+      </Field>
+    </Section>
   )
 }
 
@@ -309,6 +410,8 @@ export default function Settings() {
           )}
         </Field>
       </Section>
+
+      <UniverseSection />
 
       {/* Capital */}
       {cap && (

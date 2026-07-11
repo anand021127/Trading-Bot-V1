@@ -82,6 +82,7 @@ export const TTL = {
   TRADES:      30_000,  // 30s — trade history
   PERFORMANCE: 60_000,  // 1m  — analytics
   PAPER:       60_000,  // 1m  — paper status
+  SCANNER:     4_000,   // 4s  — live scanner status
   SETTINGS:    300_000, // 5m  — settings
   INSTRUMENTS: 600_000, // 10m — instrument list
 } as const
