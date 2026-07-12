@@ -99,6 +99,37 @@ class TestORBStrategy:
         assert sig.signal == SignalType.NONE
         assert sig.conditions["price_above_orb_high"] is False
 
+    def test_opening_range_resets_each_trading_day(self) -> None:
+        """Regression test for the bug reported in production: ORB was
+        anchoring to the very first day's opening range for an entire
+        multi-day/multi-year dataset, so it was comparing today's price
+        against a stale range from months earlier. Day 2 must use its OWN
+        opening range, not day 1's."""
+        def bar(ts, o, h, l, c, v):
+            return {"timestamp": ts, "open": o, "high": h, "low": l, "close": c, "volume": v}
+
+        candles = []
+        # Day 1: opening range 100-101, stays flat (no breakout all day).
+        for m in range(20):
+            candles.append(bar(f"2026-01-01T09:{15+m:02d}:00", 100.2, 100.5, 99.8, 100.3, 500))
+        # Day 2: gaps up — a completely different opening range, 105-106.
+        for m in range(15):
+            candles.append(bar(f"2026-01-02T09:{15+m:02d}:00", 105.2, 106.0, 104.8, 105.5, 500))
+        # Day 2 breakout above ITS OWN range (106), with volume.
+        candles.append(bar("2026-01-02T09:30:00", 105.5, 108.0, 105.3, 107.5, 3000))
+        for m in range(5):
+            candles.append(bar(f"2026-01-02T09:{31+m:02d}:00", 107.5, 108.5, 107.2, 108.0, 1200))
+
+        strat = ORBStrategy(volume_multiplier=1.5)
+        sig = strat.evaluate("TEST", candles)
+
+        # The bug would have used day 1's range (100-101) — price is already
+        # far above that from the very first bar of day 2, so it would look
+        # like an instant "breakout" with no real signal. The fix must use
+        # day 2's actual range (105-106).
+        assert sig.indicators["orb_high"] == 106.0
+        assert sig.signal == SignalType.BUY
+
 
 class TestOptionPremiumStrategy:
     CHAIN = [

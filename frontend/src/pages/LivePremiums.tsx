@@ -13,6 +13,8 @@ const NIFTY50 = [
   'HEROMOTOCO','INDUSINDBK','SBILIFE','HDFCLIFE','GRASIM','TATACONSUM','UPL','BRITANNIA','SHREECEM','BAJAJ-AUTO',
 ]
 
+const INDICES = ['NIFTY50', 'BANKNIFTY', 'SENSEX']
+
 interface Quote {
   symbol: string
   ltp: number
@@ -36,6 +38,7 @@ interface PriceResponse {
 
 export default function LivePremiums() {
   const [quotes, setQuotes]     = useState<Record<string, Quote>>({})
+  const [indexQuotes, setIndexQuotes] = useState<Record<string, Quote>>({})
   const [marketOpen, setMarketOpen] = useState<boolean | null>(null)
   const [tokenPresent, setTokenPresent] = useState(true)
   const [loading, setLoading]   = useState(true)
@@ -46,8 +49,11 @@ export default function LivePremiums() {
 
   const load = useCallback(async () => {
     try {
-      const res = await api.get<PriceResponse>('/api/prices/nifty50')
-      const data = res.data
+      const [stocksRes, indicesRes] = await Promise.all([
+        api.get<PriceResponse>('/api/prices/nifty50'),
+        api.get<PriceResponse>('/api/prices/indices').catch(() => null),
+      ])
+      const data = stocksRes.data
       // Handle both shapes: {prices: {...}} and flat {SYMBOL: {...}}
       const priceMap: Record<string, Quote> =
         data.prices && typeof data.prices === 'object' && !Array.isArray(data.prices)
@@ -56,6 +62,10 @@ export default function LivePremiums() {
 
       setMarketOpen(data.market_open ?? null)
       setTokenPresent(data.token_present ?? true)
+
+      if (indicesRes?.data?.prices) {
+        setIndexQuotes(indicesRes.data.prices)
+      }
 
       setQuotes(prev => {
         const flashes: Record<string, 'up' | 'down'> = {}
@@ -107,7 +117,7 @@ export default function LivePremiums() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-bold text-white">Live Premiums</h1>
-          <p className="text-xs text-slate-500 mt-0.5">NIFTY50 stock prices · Updates every 6 seconds</p>
+          <p className="text-xs text-slate-500 mt-0.5">NIFTY50 stocks + NIFTY/BANKNIFTY/SENSEX indices · Updates every 6 seconds</p>
         </div>
         <div className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full border ${
           connected ? 'bg-emerald-950/40 text-emerald-400 border-emerald-800/40' : 'bg-slate-800/40 text-slate-400 border-slate-700/40'
@@ -115,6 +125,28 @@ export default function LivePremiums() {
           <Wifi size={11} />
           {connected ? 'Live feed active' : 'Polling mode'}
         </div>
+      </div>
+
+      {/* Indices — NIFTY50, BANKNIFTY, SENSEX (item #5) */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+        {INDICES.map(sym => {
+          const q = indexQuotes[sym]
+          const ltp = q?.ltp ?? 0
+          const pct = q?.change_pct ?? 0
+          const hasData = ltp > 0
+          const isUp = pct >= 0
+          return (
+            <div key={sym} className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-3.5">
+              <div className="text-[11px] font-semibold text-slate-300 mb-1">{sym}</div>
+              <div className={`text-lg font-bold ${hasData ? pnlColor(pct) : 'text-slate-600'}`}>
+                {hasData ? `₹${ltp.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : marketOpen === false ? 'Closed' : '—'}
+              </div>
+              <div className={`text-xs font-medium mt-0.5 ${hasData ? pnlColor(pct) : 'text-slate-600'}`}>
+                {hasData ? `${isUp ? '+' : ''}${pct.toFixed(2)}%` : '—'}
+              </div>
+            </div>
+          )
+        })}
       </div>
 
       {/* Market closed banner */}

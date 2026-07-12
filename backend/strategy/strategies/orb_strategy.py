@@ -51,9 +51,30 @@ class ORBStrategy(Strategy):
         self.min_confidence_to_trade = min_confidence_to_trade
 
     def _capture_opening_range(self, candles: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
-        session_candles = candles[: self.orb_candles_count]
-        if len(session_candles) < self.orb_candles_count:
+        """Opening range for the CURRENT trading day only.
+
+        Bug this fixes: taking `candles[:orb_candles_count]` unconditionally
+        used the first bars of the *entire dataset* (e.g. day 1 of a year-
+        long backtest) as the opening range for every single day that
+        followed — so ORB could only ever "break out" relative to a stale,
+        arbitrary level from months earlier. This filters down to the
+        calendar day of the most recent candle first, then takes that day's
+        first `orb_candles_count` bars.
+        """
+        if not candles:
             return None
+        last_day = str(candles[-1].get("timestamp", ""))[:10]
+        if not last_day:
+            # No usable timestamp — fall back to the old (dataset-start)
+            # behavior rather than silently returning nothing.
+            today_candles = candles
+        else:
+            today_candles = [
+                c for c in candles if str(c.get("timestamp", ""))[:10] == last_day
+            ]
+        if len(today_candles) < self.orb_candles_count:
+            return None
+        session_candles = today_candles[: self.orb_candles_count]
         highs = [float(c["high"]) for c in session_candles]
         lows = [float(c["low"]) for c in session_candles]
         return {"high": max(highs), "low": min(lows)}
@@ -106,16 +127,25 @@ class ORBStrategy(Strategy):
             REASON_TEXT[name] for name, passed in conditions.items() if not passed
         ]
 
-        if confidence >= self.min_confidence_to_trade and all(conditions.values()):
-            sig.signal = SignalType.BUY
+        # Same rationale as EMATrendStrategy: compute real entry/stop/target
+        # numbers whenever the opening range exists, independent of whether
+        # the signal clears the trade threshold — so a relaxed/"daily floor"
+        # check has real numbers to act on instead of zeros.
+        if orb is not None:
             sig.entry_price = current_close
-            sig.stop_loss = round(orb["low"], 2) if orb and orb["low"] < current_close else round(
+            sig.stop_loss = round(orb["low"], 2) if orb["low"] < current_close else round(
                 current_close - self.atr_multiplier * current_atr, 2
             )
             risk = current_close - sig.stop_loss
             sig.target = round(current_close + 2 * risk, 2) if risk > 0 else current_close
+
+        if confidence >= self.min_confidence_to_trade and conditions.get("index_trend_ok", True):
+            sig.signal = SignalType.BUY
+            pass_label = "ALL CONDITIONS PASSED" if all(conditions.values()) else (
+                f"{sig.conditions_passed}/{sig.conditions_total} CONDITIONS PASSED"
+            )
             sig.entry_reason = (
-                f"ALL CONDITIONS PASSED — broke ORB high {orb['high']:.2f} on "
+                f"{pass_label} — broke ORB high {orb['high']:.2f} on "
                 f"{current_vol_ratio:.2f}x volume. BUY SIGNAL GENERATED."
             )
         else:

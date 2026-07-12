@@ -189,6 +189,45 @@ async def api_health():
     return {"status": "ok"}
 
 
+@app.get("/api/version")
+async def api_version():
+    """Lets you verify what's actually deployed vs. what you think you
+    deployed — if any of these are missing/false on your live URL, the
+    backend hasn't picked up the latest code (stale build, wrong branch,
+    or requirements.txt not re-installed)."""
+    sdk_installed = True
+    try:
+        import upstox_client  # noqa: F401
+    except ImportError:
+        sdk_installed = False
+
+    try:
+        routes_present = set(app.openapi().get("paths", {}).keys())
+    except Exception:
+        routes_present = set()
+
+    return {
+        "backend_build": "v9-multi-strategy-scanner-universe",
+        "features": {
+            "upstox_v3_websocket": True,
+            "upstox_python_sdk_installed": sdk_installed,
+            "multi_strategy_engine": True,
+            "live_scanner": True,
+            "universe_selection": True,
+            "realistic_backtest_engine": True,
+            "orb_daily_reset_fix": True,
+            "trailing_stop_manager": True,
+            "index_prices_endpoint": True,
+        },
+        "scanner_router_registered": "/api/scanner/status" in routes_present,
+        "universe_router_registered": "/api/universe/" in routes_present,
+        "backtest_v9_registered": "/api/backtest/run" in routes_present,
+        "ws_client_active": getattr(app.state, "ws_client", None) is not None,
+        "scanner_active": getattr(app.state, "scanner", None) is not None,
+        "engine_active": getattr(app.state, "engine", None) is not None,
+    }
+
+
 @app.get("/")
 async def root():
     return {

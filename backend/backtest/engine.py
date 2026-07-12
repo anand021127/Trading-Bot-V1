@@ -140,6 +140,7 @@ class BacktestEngine:
         risk_pct_per_trade: float = 0.01,
         min_candles_required: int = 60,
         rejected_sample_size: int = 200,
+        max_window_bars: int = 400,
     ) -> None:
         self.strategy_engine = strategy_engine or MultiStrategyEngine()
         self.costs = costs or CostConfig()
@@ -147,6 +148,14 @@ class BacktestEngine:
         self.risk_pct_per_trade = risk_pct_per_trade
         self.min_candles_required = min_candles_required
         self.rejected_sample_size = rejected_sample_size
+        # Bounds how much history each strategy evaluation looks back over.
+        # 400 5-minute bars ≈ 5-6 trading sessions — enough for EMA50/RSI14/
+        # ATR14 warmup AND for ORB to always have the *current* day's first
+        # bars in view. Without this bound, a full year of 5-minute candles
+        # means every single bar re-scans the entire dataset-to-date, which
+        # is both O(n²) slow and (before the day-aware ORB fix) part of why
+        # ORB was anchored to day-1's range for the whole year.
+        self.max_window_bars = max_window_bars
 
     def run(
         self,
@@ -180,7 +189,7 @@ class BacktestEngine:
             position: Optional[Dict[str, Any]] = None
 
             for i in range(self.min_candles_required, len(candles)):
-                window = candles[: i + 1]
+                window = candles[max(0, i + 1 - self.max_window_bars): i + 1]
                 bar = candles[i]
 
                 if position is not None:

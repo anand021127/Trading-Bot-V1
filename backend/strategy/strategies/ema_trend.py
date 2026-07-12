@@ -109,16 +109,26 @@ class EMATrendStrategy(Strategy):
             REASON_TEXT[name] for name, passed in conditions.items() if not passed
         ]
 
-        if confidence >= self.min_confidence_to_trade and all(conditions.values()):
-            sig.signal = SignalType.BUY
+        # Entry/stop/target are computed whenever we have a valid ATR,
+        # regardless of whether the signal clears the trade threshold below.
+        # This lets a caller (e.g. a relaxed "daily floor" check) evaluate a
+        # near-miss setup using real numbers instead of a placeholder — the
+        # `signal` flag, not these fields, is what gates whether this is
+        # actually actionable at the strategy's own standard.
+        if current_atr > 0:
             sig.entry_price = current_close
             sig.stop_loss = round(current_close - self.atr_multiplier * current_atr, 2)
             risk = current_close - sig.stop_loss
             sig.target = round(current_close + 2 * risk, 2)  # 2R target
+
+        if confidence >= self.min_confidence_to_trade:
+            sig.signal = SignalType.BUY
+            pass_label = "ALL CONDITIONS PASSED" if all(conditions.values()) else (
+                f"{sig.conditions_passed}/{sig.conditions_total} CONDITIONS PASSED"
+            )
             sig.entry_reason = (
-                f"ALL CONDITIONS PASSED — EMA{self.ema_fast}>{self.ema_slow}, "
-                f"price above EMA{self.ema_fast}, RSI {current_rsi:.1f} in band, "
-                f"volume {current_vol_ratio:.2f}x avg. BUY SIGNAL GENERATED."
+                f"{pass_label} — " + build_condition_summary(conditions) +
+                f". RSI {current_rsi:.1f}, volume {current_vol_ratio:.2f}x avg. BUY SIGNAL GENERATED."
             )
         else:
             sig.entry_reason = "NO TRADE — " + build_condition_summary(conditions)

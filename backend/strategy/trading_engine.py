@@ -149,6 +149,17 @@ class TradingEngine:
         # see evaluate_all_strategies() for the new, unified path.
         self.strategy_engine = MultiStrategyEngine()
         self.trailing_stop_manager = TrailingStopManager()
+        # "At least one good trade per day" — see run_trading_session(). This
+        # is a RELAXED floor, not an indiscriminate force-trade: it only
+        # fires on the single best candidate seen all day, re-checked fresh
+        # right before taking it, and it still respects every risk limit.
+        self.enable_daily_floor_trade = True
+        self.daily_floor_confidence = 60.0
+        self.daily_floor_trigger_hour = 12
+        self.daily_floor_trigger_minute = 0
+        self._trades_taken_today = 0
+        self._daily_floor_taken = False
+        self._best_of_day: Optional[Dict[str, Any]] = None  # {"symbol":..., "confidence":...}
         self._orb_levels: Dict[str, Dict[str, float]] = {}
         self._open_positions: Dict[str, Dict[str, Any]] = {}
 
@@ -193,6 +204,21 @@ class TradingEngine:
         return now >= exit_t
 
     # ─── ORB calculation ──────────────────────────────────────────────────────
+
+    def _resolve_watchlist(self) -> List[str]:
+        """What the live loop actually scans — driven by the real, saved
+        UniverseConfig (item #4), not a hardcoded slice. Falls back to the
+        old hardcoded NIFTY50 slice only if the universe config can't be
+        loaded for some reason, so the bot never just stops scanning."""
+        try:
+            from backend.config.universe_config import load_universe_config
+            uconfig = load_universe_config(self.db_manager)
+            symbols = uconfig.resolve_symbols()
+            if symbols:
+                return symbols
+        except Exception as e:
+            logger.warning("Could not load universe config, using default watchlist: %s", e)
+        return self.NIFTY50[: settings.universe.max_stocks_in_watchlist]
 
     def _capture_orb(self, symbol: str) -> Optional[Dict[str, float]]:
         """Fetch opening range (9:15–9:30 candles) for symbol."""
@@ -527,16 +553,231 @@ class TradingEngine:
 
     # ─── Main run loop ────────────────────────────────────────────────────────
 
+    def execute_multi_signal(self, signal: Any) -> Optional[str]:
+        """Execute a `StrategySignal` from the new multi-strategy engine
+        (EMA_TREND / ORB) through the same safety pipeline as the legacy
+        `execute_signal` — risk checks, position sizing, order placement,
+        position tracking. Kept as a separate method (rather than forcing
+        StrategySignal into SignalResult's shape) because the two signal
+        types carry genuinely different fields."""
+        if signal.signal != "BUY":
+            return None
+
+        allowed, reason = self.risk_manager.can_take_trade(signal.symbol)
+        if not allowed:
+            TradeLogger.log_risk_event("BLOCKED", reason, signal.symbol)
+            logger.info("Trade blocked for %s: %s", signal.symbol, reason)
+            return None
+
+        qty = self.position_sizer.calculate(
+            entry_price=signal.entry_price,
+            stop_loss_price=signal.stop_loss,
+        )
+        if qty <= 0:
+            logger.warning("Quantity 0 for %s — skipping", signal.symbol)
+            return None
+
+        trade_id = str(uuid.uuid4())
+        try:
+            req = OrderRequest(
+                symbol=signal.symbol, side="BUY", quantity=qty,
+                price=signal.entry_price, order_type="MARKET",
+            )
+            order = self.order_manager.place_order(req)
+
+            trade = Trade(
+                id=trade_id, symbol=signal.symbol, side="long", quantity=qty,
+                price=order.price or signal.entry_price,
+                timestamp=datetime.now(timezone.utc), strategy=signal.strategy_name,
+                status="filled", pnl=None,
+                notes=f"confidence={signal.confidence:.1f} strategy={signal.strategy_name}",
+            )
+            self.db_manager.insert_trade(trade)
+
+            self._open_positions[signal.symbol] = {
+                "trade_id": trade_id,
+                "entry_price": order.price or signal.entry_price,
+                "stop_loss": signal.stop_loss,
+                "target": signal.target,
+                "trailing_stop": signal.stop_loss,
+                "strategy_name": signal.strategy_name,
+                "quantity": qty,
+                "atr": signal.indicators.get("atr", 0.0),
+                "side": "long",
+                "entry_time": datetime.now(timezone.utc).isoformat(),
+            }
+            self.db_manager.upsert_position(Position(
+                symbol=signal.symbol, quantity=qty,
+                average_price=order.price or signal.entry_price,
+                entry_time=datetime.now(timezone.utc), side="long", unrealized_pnl=0.0,
+            ))
+
+            self.risk_manager.record_trade_opened()
+
+            TradeLogger.log_entry(
+                trade_id, signal.symbol, "BUY", qty,
+                order.price or signal.entry_price, signal.stop_loss,
+                signal.indicators.get("atr", 0.0), signal.indicators.get("rsi", 0.0),
+                0.0, signal.indicators.get("volume_ratio", 0.0),
+                signal.indicators.get("orb_high", 0.0), signal.indicators.get("orb_low", 0.0),
+                "BULLISH", settings.mode, signal.conditions,
+            )
+
+            msg = (
+                f"{'📝' if settings.mode == 'paper' else '🟢'} ENTRY: {signal.symbol} "
+                f"@ ₹{order.price:.2f} | SL: ₹{signal.stop_loss:.2f} | Target: ₹{signal.target:.2f} | "
+                f"Qty: {qty} | {signal.strategy_name} ({signal.confidence:.0f}% confidence)"
+            )
+            self.notify(msg)
+            return trade_id
+
+        except OrderError as e:
+            TradeLogger.log_error("TradingEngine.execute_multi_signal", e, {"symbol": signal.symbol})
+            logger.error("Order failed for %s: %s", signal.symbol, e)
+            return None
+
+    async def _monitor_open_positions(self) -> None:
+        """Check every open position against its stop-loss, target, and
+        trailing stop on every loop iteration.
+
+        This is the fix for a real bug: stop-loss/target were computed and
+        stored on entry, but nothing ever checked them intraday — the only
+        exit path was the 14:45 time-based force-exit. A position could run
+        straight through its own stop-loss for hours. This now enforces the
+        same exit logic `get_open_positions_detail()` merely *displayed*
+        before, and also asks each position's strategy for a strategy-
+        specific exit reason (e.g. EMA trend reversal, ORB range breakdown).
+        """
+        try:
+            from backend.api.websocket import get_prices_by_symbol
+            live_prices = get_prices_by_symbol()
+        except Exception:
+            live_prices = {}
+
+        for symbol in list(self._open_positions.keys()):
+            pos = self._open_positions[symbol]
+            tick = live_prices.get(symbol)
+            current_price = tick.get("ltp") if tick else None
+
+            if not current_price:
+                # No live tick yet — fall back to a fresh quote so a dead
+                # WebSocket feed doesn't leave positions unmonitored.
+                try:
+                    quotes = self.client.get_multiple_quotes([symbol])
+                    current_price = quotes.get(symbol, {}).get("ltp")
+                except Exception:
+                    current_price = None
+            if not current_price:
+                continue  # genuinely no price available — don't guess
+
+            trail = self.trailing_stop_manager.compute(
+                entry_price=pos["entry_price"], initial_stop=pos["stop_loss"],
+                current_price=current_price, current_stop=pos.get("trailing_stop", pos["stop_loss"]),
+            )
+            pos["trailing_stop"] = trail["stop"]
+
+            exit_reason: Optional[str] = None
+            if current_price <= pos["trailing_stop"]:
+                exit_reason = "STOP_LOSS_HIT" if trail["stage"] == 0 else "TRAILING_STOP_HIT"
+            elif pos.get("target", 0) > 0 and current_price >= pos["target"]:
+                exit_reason = "TARGET_HIT"
+            else:
+                try:
+                    candles = self.client.get_historical_candles(symbol, "5minute", limit=100)
+                    strat_exit = self.strategy_engine.check_exits(
+                        pos.get("strategy_name", self.strategy_name), pos, candles,
+                    )
+                    if strat_exit:
+                        exit_reason = strat_exit
+                except Exception as e:
+                    logger.debug("Strategy exit check failed for %s: %s", symbol, e)
+
+            if exit_reason:
+                await self._close_position(symbol, exit_reason)
+
+    def _maybe_take_daily_floor_trade(self, now: datetime) -> Optional[str]:
+        """"At least one good trade per day" — but never a fabricated one.
+
+        Fires at most once per day, only if:
+          - the feature is enabled,
+          - zero real trades have been taken today,
+          - there was a real near-miss candidate seen during today's scans
+            (tracked in `_best_of_day`, populated only from genuine
+            `evaluate_all_strategies()` results, never invented),
+          - it's at/after the configured trigger time.
+
+        The candidate is re-evaluated FRESH right here (never replays the
+        stale signal from earlier in the day) and only taken if it still
+        clears the relaxed floor with a real, computed entry price.
+        Returns the trade_id if a trade was taken, else None.
+        """
+        if not (
+            self.enable_daily_floor_trade
+            and not self._daily_floor_taken
+            and self._trades_taken_today == 0
+            and self._best_of_day is not None
+            and now.hour == self.daily_floor_trigger_hour
+            and now.minute >= self.daily_floor_trigger_minute
+        ):
+            return None
+
+        self._daily_floor_taken = True  # only ever attempt once per day
+        candidate_symbol = self._best_of_day["symbol"]
+        fresh_signals = self.evaluate_all_strategies(candidate_symbol)
+        fresh_best = max(fresh_signals, key=lambda s: s.confidence, default=None)
+
+        if fresh_best is None or fresh_best.confidence < self.daily_floor_confidence or fresh_best.entry_price <= 0:
+            logger.info(
+                "Daily floor trade skipped for %s — no longer clears even the "
+                "relaxed floor on a fresh check", candidate_symbol,
+            )
+            return None
+
+        fresh_best.signal = "BUY"
+        logger.info(
+            "Daily floor trade: %s via %s at %.0f%% confidence "
+            "(below full threshold, above the %.0f%% floor — no signal was fabricated)",
+            candidate_symbol, fresh_best.strategy_name, fresh_best.confidence, self.daily_floor_confidence,
+        )
+        trade_id = self.execute_multi_signal(fresh_best)
+        if trade_id:
+            self._trades_taken_today += 1
+            self.notify(
+                f"📌 Daily floor trade taken: {candidate_symbol} "
+                f"({fresh_best.confidence:.0f}% confidence) — no other setup cleared full threshold today."
+            )
+        return trade_id
+
     async def run_trading_session(self) -> None:
-        """Main async trading loop — runs during market hours."""
+        """Main async trading loop — runs during market hours.
+
+        Fixes vs. the previous version:
+          - Watchlist now comes from the real, saved UniverseConfig (item #4)
+            instead of a hardcoded NIFTY50 slice.
+          - Open positions are checked against stop-loss/target/trailing-stop
+            and strategy-specific exit conditions on EVERY loop iteration —
+            previously the only exit path was the 14:45 force-exit, so a
+            losing position could run unmonitored for hours.
+          - Entries now run the full multi-strategy engine (EMA_TREND + ORB),
+            not just the legacy ORB-only path, and take whichever has higher
+            confidence.
+          - Optional "daily floor trade": if the whole entry window is about
+            to close with zero trades taken, and there was a real (not
+            fabricated) near-miss setup during the day, it's re-checked
+            fresh and taken if it still clears a relaxed — but real —
+            confidence floor. This is what "take at least one trade a day"
+            means here: never inventing a signal, just not discarding the
+            day's best genuine near-miss.
+        """
         logger.info("Trading session starting")
-        watchlist = self.NIFTY50[:settings.universe.max_stocks_in_watchlist]
 
         while BotState.is_running():
             try:
                 now = datetime.now(IST)
+                watchlist = self._resolve_watchlist()
 
-                # Pre-market: capture ORB (9:15–9:30)
+                # Pre-market: capture ORB (9:15–9:30) for the legacy cache
+                # (still used by evaluate_signal(), kept for diagnostics use).
                 if now.hour == 9 and 15 <= now.minute < 30:
                     for sym in watchlist:
                         if sym not in self._orb_levels:
@@ -545,25 +786,51 @@ class TradingEngine:
                                 self._orb_levels[sym] = orb
                                 logger.info("ORB captured for %s: H=%.2f L=%.2f", sym, orb["orb_high"], orb["orb_low"])
 
+                # Monitor every open position EVERY cycle — the critical fix.
+                if self._open_positions:
+                    await self._monitor_open_positions()
+
                 # Force exit all at 14:45
                 if self._is_exit_all_time() and self._open_positions:
                     logger.info("14:45 — forcing exit of all positions")
                     for sym in list(self._open_positions.keys()):
                         await self._close_position(sym, "TIME_FORCE_EXIT")
 
-                # Main entry loop (9:30–12:30)
+                # Main entry loop
                 if self._is_entry_window() and self._is_market_open():
                     for sym in watchlist:
                         if not BotState.is_running():
                             break
-                        signal = self.evaluate_signal(sym)
-                        if signal.signal == "long":
-                            self.execute_signal(signal)
+                        if sym in self._open_positions:
+                            continue
 
-                # Reset ORB at end of day
+                        signals = self.evaluate_all_strategies(sym)
+                        best = MultiStrategyEngine.best_signal(signals)
+
+                        if best is not None and best.signal == "BUY":
+                            trade_id = self.execute_multi_signal(best)
+                            if trade_id:
+                                self._trades_taken_today += 1
+                        else:
+                            # Track the single best near-miss of the day for
+                            # the optional floor-trade check below. Only a
+                            # real, freshly-computed signal is ever tracked —
+                            # nothing here is invented.
+                            for sig in signals:
+                                if sig.signal == "NONE" and sig.confidence >= self.daily_floor_confidence:
+                                    if not self._best_of_day or sig.confidence > self._best_of_day["confidence"]:
+                                        self._best_of_day = {"symbol": sym, "confidence": sig.confidence}
+
+                    # Daily floor trade — see _maybe_take_daily_floor_trade().
+                    self._maybe_take_daily_floor_trade(now)
+
+                # Reset daily state at end of day
                 if now.hour == 15 and now.minute >= 30:
                     self._orb_levels.clear()
                     self.risk_manager.reset_for_new_day()
+                    self._trades_taken_today = 0
+                    self._daily_floor_taken = False
+                    self._best_of_day = None
 
                 await asyncio.sleep(300)  # 5-minute candle interval
 

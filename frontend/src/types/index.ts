@@ -258,49 +258,59 @@ export interface BacktestRequest {
   end_date?: string
   commission_pct?: number
   slippage_pct?: number
+  stt_pct?: number
   symbols?: string[]
   capital?: number
-  strategy?: string
+  interval?: string          // 1minute|3minute|5minute|15minute|30minute|day
+  strategies?: string[]      // EMA_TREND | ORB
+  risk_pct_per_trade?: number
 }
 
 export interface BacktestTrade {
   symbol: string
-  strategy?: string
-  entry_time?: string
-  exit_time?: string
+  strategy: string
+  entry_time: string
+  exit_time: string
   entry_price: number
   exit_price: number
   quantity: number
-  exit_reason?: string
-  gross_pnl?: number
-  net_pnl?: number
-  pnl_r?: number
-  charges?: number
-  stage_at_exit?: number
-  duration_bars?: number
+  exit_reason: string
+  gross_pnl: number
+  net_pnl: number
+  charges: number
+  confidence: number
+}
+
+export interface RejectedSignalSample {
+  symbol: string
+  timestamp: string
+  strategy: string
+  reasons: string[]
 }
 
 export interface BacktestResponse {
-  total_trades?: number
+  total_candles_scanned?: number
+  signals_generated?: number
+  trades_taken?: number
   winning_trades?: number
   losing_trades?: number
-  win_rate?: number
+  accuracy_pct?: number
   profit_factor?: number
   net_profit?: number
   net_profit_pct?: number
   max_drawdown_pct?: number
-  sharpe_ratio?: number
-  avg_win_r?: number
-  avg_loss_r?: number
   total_charges?: number
-  slippage_impact?: number
-  best_trade?: { symbol: string; net_pnl: number; pnl_r: number; exit_date: string }
-  worst_trade?: { symbol: string; net_pnl: number; pnl_r: number; exit_date: string }
+  equity_curve?: Array<{ timestamp: string; equity: number }>
   trade_log?: BacktestTrade[]
-  equity_curve?: Array<{ date: string; value: number }>
-  monthly_returns?: Record<string, number>
+  rejected_signals_sample?: RejectedSignalSample[]
+  rejected_signals_total_count?: number
+  rejection_reason_counts?: Record<string, number>
+  skipped_symbols?: Array<{ symbol: string; reason: string }>
   data_source?: string
-  strategy_used?: string
+  fetch_errors?: Array<{ symbol: string; error: string }>
+  symbols_requested?: string[]
+  date_range?: { start: string; end: string }
+  interval?: string
   message?: string
 }
 
