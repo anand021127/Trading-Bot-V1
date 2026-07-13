@@ -179,6 +179,127 @@ class TestOptionPremiumStrategy:
         assert sig.signal == SignalType.NONE
         assert "contract" in sig.rejected_reasons[0].lower()
 
+    def test_illiquid_atm_strike_is_skipped_for_next_liquid_one(self) -> None:
+        """A professional desk won't blindly buy the mathematically-nearest
+        strike if nobody's quoting it — it should walk to the next strike
+        that actually has real open interest."""
+        chain = [
+            {"strike": 22000, "option_type": "CE", "instrument_key": "NSE_FO|CE22000", "oi": 10},   # illiquid
+            {"strike": 22100, "option_type": "CE", "instrument_key": "NSE_FO|CE22100", "oi": 50000},  # liquid
+        ]
+        strat = OptionPremiumStrategy(min_open_interest=500)
+        contract = strat.select_contract({
+            "spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": chain,
+        })
+        assert contract is not None
+        assert contract["strike"] == 22100
+
+    def test_wide_bid_ask_spread_is_rejected(self) -> None:
+        chain = [
+            {"strike": 22000, "option_type": "CE", "instrument_key": "NSE_FO|CE22000",
+             "oi": 50000, "bid_price": 100.0, "ask_price": 130.0},  # 30% spread — too wide
+        ]
+        strat = OptionPremiumStrategy(max_bid_ask_spread_pct=8.0)
+        contract = strat.select_contract({
+            "spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": chain,
+        })
+        assert contract is None
+
+    def test_tight_bid_ask_spread_is_accepted(self) -> None:
+        chain = [
+            {"strike": 22000, "option_type": "CE", "instrument_key": "NSE_FO|CE22000",
+             "oi": 50000, "bid_price": 100.0, "ask_price": 102.0},  # 2% spread
+        ]
+        strat = OptionPremiumStrategy(max_bid_ask_spread_pct=8.0)
+        contract = strat.select_contract({
+            "spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": chain,
+        })
+        assert contract is not None
+
+    def test_missing_liquidity_data_does_not_block(self) -> None:
+        """Real backward-compat case: Upstox not returning oi/bid/ask for a
+        contract shouldn't silently block every trade — only known-bad
+        liquidity should."""
+        strat = OptionPremiumStrategy()
+        contract = strat.select_contract({
+            "spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": self.CHAIN,
+        })
+        assert contract is not None
+
+    def test_excessive_theta_relative_to_premium_is_rejected(self) -> None:
+        chain = [
+            {"strike": 22000, "option_type": "CE", "instrument_key": "NSE_FO|CE22000",
+             "oi": 50000, "ltp": 20.0, "theta": -5.0},  # 25% of premium decaying per day
+        ]
+        strat = OptionPremiumStrategy(max_theta_pct_of_premium=10.0)
+        contract = strat.select_contract({
+            "spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": chain,
+        })
+        assert contract is None
+
+    def test_acceptable_theta_is_not_rejected(self) -> None:
+        chain = [
+            {"strike": 22000, "option_type": "CE", "instrument_key": "NSE_FO|CE22000",
+             "oi": 50000, "ltp": 200.0, "theta": -5.0},  # 2.5% of premium
+        ]
+        strat = OptionPremiumStrategy(max_theta_pct_of_premium=10.0)
+        contract = strat.select_contract({
+            "spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": chain,
+        })
+        assert contract is not None
+
+    def test_expiry_day_blocks_new_entries_by_default(self) -> None:
+        from datetime import date
+        strat = OptionPremiumStrategy(min_momentum_pct=1.0)
+        context = {
+            "spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": self.CHAIN,
+            "expiry_date": date.today().isoformat(),
+        }
+        sig = strat.evaluate("NIFTY", self._premium_candles_rising_above_vwap(), context)
+        assert sig.signal == SignalType.NONE
+        assert sig.conditions["not_expiry_day"] is False
+
+    def test_non_expiry_day_does_not_block(self) -> None:
+        from datetime import date, timedelta
+        strat = OptionPremiumStrategy(min_momentum_pct=1.0)
+        context = {
+            "spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": self.CHAIN,
+            "expiry_date": (date.today() + timedelta(days=5)).isoformat(),
+        }
+        sig = strat.evaluate("NIFTY", self._premium_candles_rising_above_vwap(), context)
+        assert sig.signal == SignalType.BUY
+
+    def test_expiry_day_entries_can_be_explicitly_allowed(self) -> None:
+        from datetime import date
+        strat = OptionPremiumStrategy(min_momentum_pct=1.0, allow_expiry_day_entries=True)
+        context = {
+            "spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": self.CHAIN,
+            "expiry_date": date.today().isoformat(),
+        }
+        sig = strat.evaluate("NIFTY", self._premium_candles_rising_above_vwap(), context)
+        assert sig.signal == SignalType.BUY
+
+    def test_check_exit_forces_exit_on_expiry_day(self) -> None:
+        from datetime import date
+        strat = OptionPremiumStrategy()
+        candles = self._premium_candles_rising_above_vwap()
+        reason = strat.check_exit({}, candles, context={"expiry_date": date.today().isoformat()})
+        assert reason is not None
+        assert "EXPIRY_DAY" in reason
+
+    def test_greeks_and_liquidity_data_surfaced_in_indicators(self) -> None:
+        chain = [
+            {"strike": 22000, "option_type": "CE", "instrument_key": "NSE_FO|CE22000",
+             "oi": 50000, "delta": 0.52, "theta": -8.0, "iv": 14.2},
+        ]
+        strat = OptionPremiumStrategy(min_momentum_pct=1.0)
+        context = {"spot_price": 22010, "underlying_trend": "BULLISH", "option_chain": chain}
+        sig = strat.evaluate("NIFTY", self._premium_candles_rising_above_vwap(), context)
+        assert sig.indicators["open_interest"] == 50000
+        assert sig.indicators["delta"] == 0.52
+        assert sig.indicators["theta"] == -8.0
+        assert sig.indicators["iv"] == 14.2
+
 
 class TestMultiStrategyEngine:
     def test_evaluate_returns_one_signal_per_strategy(self) -> None:

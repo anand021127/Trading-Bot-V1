@@ -352,6 +352,42 @@ class UpstoxClient:
 
     # ─── Options ────────────────────────────────────────────────────────────
 
+    def get_option_expiries(self, underlying_symbol: str) -> List[str]:
+        """
+        All available expiry dates for an underlying (index or stock).
+
+        Endpoint: GET /option/contract?instrument_key=... (no expiry_date
+        param returns contracts across every available expiry).
+
+        Returns ISO date strings ("YYYY-MM-DD"), sorted ascending. Never
+        fabricates a date — an API failure raises UpstoxAPIError, and an
+        empty list means "Upstox genuinely has no contracts for this
+        underlying right now," not "assume some date."
+        """
+        instrument_key = ALL_INSTRUMENTS.get(underlying_symbol.upper(), f"NSE_EQ|{underlying_symbol}")
+        try:
+            data = self._get("/option/contract", params={"instrument_key": instrument_key})
+            raw = data.get("data", [])
+            expiries = sorted({row["expiry"] for row in raw if row.get("expiry")})
+            return expiries
+        except UpstoxAPIError:
+            raise
+        except Exception as e:
+            raise UpstoxAPIError(500, str(e))
+
+    def get_nearest_expiry(self, underlying_symbol: str) -> Optional[str]:
+        """The nearest expiry that hasn't already passed. Returns None
+        (never a guessed date) if Upstox has no upcoming expiries or the
+        call fails."""
+        try:
+            expiries = self.get_option_expiries(underlying_symbol)
+        except UpstoxAPIError as e:
+            logger.warning("Could not fetch expiries for %s: %s", underlying_symbol, e)
+            return None
+        today = date.today().isoformat()
+        upcoming = [e for e in expiries if e >= today]
+        return upcoming[0] if upcoming else None
+
     def get_option_chain(self, underlying_symbol: str, expiry_date: str) -> List[Dict[str, Any]]:
         """
         Fetch the option chain for an underlying (index or stock) and expiry.
@@ -360,11 +396,15 @@ class UpstoxClient:
 
         Returns a flat list of contracts:
           [{"strike": 22000.0, "option_type": "CE", "instrument_key": "...",
-            "ltp": 123.45, "close_price": 118.0, "volume": 5000, "oi": 12000}, ...]
+            "ltp": 123.45, "close_price": 118.0, "volume": 5000, "oi": 12000,
+            "bid_price": 122.0, "ask_price": 124.0,
+            "iv": 14.2, "delta": 0.52, "theta": -8.3, "gamma": 0.004, "vega": 12.1}, ...]
 
-        Never returns fabricated contracts — an API failure raises
-        UpstoxAPIError, and the caller (OptionPremiumStrategy) treats an
-        empty chain as "contract not resolved", not as a signal to trade.
+        Greeks/IV come straight from Upstox's own `option_greeks` block — this
+        client never computes or estimates them itself. Never returns
+        fabricated contracts — an API failure raises UpstoxAPIError, and the
+        caller (OptionPremiumStrategy) treats an empty chain as "contract not
+        resolved," not as a signal to trade.
         """
         instrument_key = ALL_INSTRUMENTS.get(underlying_symbol.upper(), f"NSE_EQ|{underlying_symbol}")
         try:
@@ -381,6 +421,7 @@ class UpstoxClient:
                     if not opt:
                         continue
                     market_data = opt.get("market_data", {}) or {}
+                    greeks = opt.get("option_greeks", {}) or {}
                     contracts.append({
                         "strike": float(strike) if strike is not None else None,
                         "option_type": opt_type,
@@ -389,6 +430,13 @@ class UpstoxClient:
                         "close_price": market_data.get("close_price"),
                         "volume": market_data.get("volume"),
                         "oi": market_data.get("oi"),
+                        "bid_price": market_data.get("bid_price"),
+                        "ask_price": market_data.get("ask_price"),
+                        "iv": greeks.get("iv"),
+                        "delta": greeks.get("delta"),
+                        "theta": greeks.get("theta"),
+                        "gamma": greeks.get("gamma"),
+                        "vega": greeks.get("vega"),
                     })
             return contracts
         except UpstoxAPIError as e:

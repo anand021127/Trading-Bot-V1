@@ -74,9 +74,13 @@ class LiveScanner:
         trading_engine: Any,
         universe_resolver: Any,
         seconds_between_symbols: float = 3.0,
+        mode_resolver: Optional[Any] = None,
     ) -> None:
         self.trading_engine = trading_engine
         self.universe_resolver = universe_resolver  # callable -> List[str]
+        # callable -> "STOCKS" | "OPTIONS". Optional so existing callers
+        # that only care about stocks don't need to change anything.
+        self.mode_resolver = mode_resolver or (lambda: "STOCKS")
         self.seconds_between_symbols = seconds_between_symbols
 
         self._results: Dict[str, ScannerEntry] = {}
@@ -102,7 +106,18 @@ class LiveScanner:
             pass
 
         try:
-            signals = self.trading_engine.evaluate_all_strategies(symbol)
+            mode = self.mode_resolver()
+        except Exception:
+            mode = "STOCKS"
+
+        try:
+            if mode == "OPTIONS":
+                # Trading the index's OPTION PREMIUM, not the index price
+                # itself — expiry/trend are auto-detected for real.
+                best = self.trading_engine.evaluate_option_premium(symbol)
+                signals = [best]
+            else:
+                signals = self.trading_engine.evaluate_all_strategies(symbol)
         except Exception as e:
             entry.error = str(e)
             entry.decision = f"ERROR — {e}"
@@ -125,6 +140,13 @@ class LiveScanner:
             entry.trend = "BULLISH" if conds.get("ema_trend_up") else "BEARISH" if conds else "NEUTRAL"
             if not entry.ltp:
                 entry.ltp = ema_signal.entry_price or entry.ltp
+
+        option_signal = next((s for s in signals if s.strategy_name == "OPTION_PREMIUM"), None)
+        if option_signal is not None and not entry.ltp:
+            entry.ltp = option_signal.entry_price or None
+            contract = option_signal.indicators.get("selected_contract") if option_signal.indicators else None
+            if contract:
+                entry.trend = "BULLISH" if contract.get("option_type") == "CE" else "BEARISH"
 
         best = max(signals, key=lambda s: s.confidence, default=None)
         if best is not None:

@@ -199,6 +199,7 @@ async def token_callback_get(code: Optional[str] = None) -> Dict[str, Any]:
                 _db.save_token(token)
             except Exception:
                 pass
+            _restart_websocket_client(token)
             return {
                 "status": "success",
                 "message": "Token saved to database and environment. Bot is ready to trade.",
@@ -206,6 +207,68 @@ async def token_callback_get(code: Optional[str] = None) -> Dict[str, Any]:
         return {"status": "error", "detail": data.get("message", "Token exchange failed")}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+
+def _restart_websocket_client(token: str) -> None:
+    """Fix for a real bug: the v3 WebSocket client only started once at
+    server boot with whatever token existed at that moment. If the token
+    was saved to the DB AFTER boot (e.g. right now, via this OAuth
+    callback), the socket stayed permanently in 'auth_failed' — REST calls
+    worked because they re-check the token every request, but the socket
+    never got the memo. This restarts it with the token that's actually
+    valid right now."""
+    try:
+        import backend.api.main as main_mod
+        from backend.broker.websocket_client import UpstoxWebSocketClient
+        from backend.broker.upstox_client import ALL_INSTRUMENTS
+        from backend.api.websocket import update_price_cache
+
+        app = getattr(main_mod, "app", None)
+        if app is None:
+            return
+        old_client = getattr(app.state, "ws_client", None)
+        if old_client is not None:
+            try:
+                old_client.stop()
+            except Exception:
+                pass
+
+        new_client = UpstoxWebSocketClient(
+            access_token=token,
+            instrument_keys=list(ALL_INSTRUMENTS.values()),
+            on_price_update=update_price_cache,
+            mode="full",
+        )
+        new_client.start()
+        app.state.ws_client = new_client
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Could not restart WebSocket client with new token: %s", e)
+
+
+@router.post("/disconnect-token")
+async def disconnect_token() -> Dict[str, Any]:
+    """Fully clear the Upstox token from both the environment and the
+    persisted DB, and stop the WebSocket client. Use this to get back to a
+    genuinely clean/disconnected state — without it, a token saved in an
+    earlier session keeps getting silently reloaded on every request."""
+    os.environ["UPSTOX_ACCESS_TOKEN"] = ""
+    try:
+        _db.save_token("")
+    except Exception:
+        pass
+
+    try:
+        import backend.api.main as main_mod
+        app = getattr(main_mod, "app", None)
+        client = getattr(app.state, "ws_client", None) if app else None
+        if client is not None:
+            client.stop()
+            app.state.ws_client = None
+    except Exception:
+        pass
+
+    return {"status": "disconnected", "message": "Token cleared from DB and environment. WebSocket stopped."}
 
 
 @router.get("/broker-status")

@@ -65,12 +65,12 @@ async def get_signals(
 @router.get("/option-premium")
 async def get_option_premium_signal(
     underlying: str = Query(..., description="NIFTY50 | BANKNIFTY | SENSEX"),
-    expiry: str = Query(..., description="YYYY-MM-DD"),
-    trend: str = Query(..., description="BULLISH | BEARISH — required to pick CE vs PE"),
+    expiry: Optional[str] = Query(None, description="YYYY-MM-DD — omit to auto-pick the nearest real expiry"),
+    trend: Optional[str] = Query(None, description="BULLISH | BEARISH — omit to auto-detect from the underlying's own EMA trend"),
 ) -> Dict[str, Any]:
     if _engine_ref is None:
         raise HTTPException(status_code=503, detail="Trading engine not initialized (no Upstox token configured?)")
-    if trend not in ("BULLISH", "BEARISH"):
+    if trend is not None and trend not in ("BULLISH", "BEARISH"):
         raise HTTPException(status_code=400, detail="trend must be BULLISH or BEARISH")
 
     try:

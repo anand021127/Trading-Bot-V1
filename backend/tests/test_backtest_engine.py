@@ -133,3 +133,18 @@ class TestCostConfig:
         result = costs.apply(entry=100.0, exit_price=90.0, qty=100)
         assert result["gross_pnl"] == -1000.0
         assert result["net_pnl"] < result["gross_pnl"]  # loss made worse by real costs
+
+    def test_option_trades_use_the_higher_options_stt_rate(self) -> None:
+        """Options STT (0.15% on premium, sell-side) is materially higher
+        than equity STT (0.1%) — using the equity rate for options would
+        understate real costs."""
+        costs = CostConfig(stt_pct=0.001, option_stt_pct=0.0015)
+        equity_result = costs.apply(entry=100.0, exit_price=110.0, qty=100, is_option=False)
+        option_result = costs.apply(entry=100.0, exit_price=110.0, qty=100, is_option=True)
+        assert option_result["stt"] > equity_result["stt"]
+        assert option_result["stt"] == round(110.0 * 100 * 0.0015, 2)
+
+    def test_default_is_equity_stt_for_backward_compatibility(self) -> None:
+        costs = CostConfig(stt_pct=0.001)
+        result = costs.apply(entry=100.0, exit_price=110.0, qty=100)
+        assert result["stt"] == round(110.0 * 100 * 0.001, 2)

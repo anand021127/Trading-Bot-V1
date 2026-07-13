@@ -150,3 +150,6 @@ export const fetchEnvStatus = () =>
 
 export const regenerateToken = () =>
   api.post<{ auth_url: string }>('/api/settings/regenerate-token').then(r => r.data)
+
+export const disconnectToken = () =>
+  api.post<{ status: string; message: string }>('/api/settings/disconnect-token').then(r => r.data)

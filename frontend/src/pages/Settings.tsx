@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Save, RefreshCw, ExternalLink, CheckCircle, XCircle, AlertTriangle, Wifi, WifiOff } from 'lucide-react'
-import { fetchSettings, updateSettings, fetchEnvStatus, regenerateToken, fetchUniverse, updateUniverse } from '../api/endpoints'
+import { fetchSettings, updateSettings, fetchEnvStatus, regenerateToken, disconnectToken, fetchUniverse, updateUniverse } from '../api/endpoints'
 import type { Settings, UniverseConfigResponse } from '../types'
 import toast from 'react-hot-toast'
 import api from '../api/client'
@@ -145,9 +145,42 @@ function UniverseSection() {
         </>
       )}
 
+      {universe.mode === 'OPTIONS' && (
+        <Field label="Indices to trade options on" desc="Pick any combination — e.g. NIFTY50 + SENSEX together. Each trades its own ATM CE/PE premium (auto-selected strike, auto-selected nearest expiry, auto-detected trend), not the index price itself.">
+          <div className="flex gap-2 flex-wrap">
+            {universe.valid_option_indices.map(idx => {
+              const selected = universe.option_indices.includes(idx)
+              return (
+                <button key={idx} disabled={saving}
+                  onClick={() => {
+                    const next = selected
+                      ? universe.option_indices.filter(i => i !== idx)
+                      : [...universe.option_indices, idx]
+                    save({ option_indices: next })
+                  }}
+                  className={`px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${
+                    selected
+                      ? 'bg-purple-600/20 text-purple-300 border-purple-600/50'
+                      : 'bg-[#0f1628] text-slate-500 border-[#1e2d45] hover:border-[#243044]'
+                  }`}>
+                  {idx}
+                </button>
+              )
+            })}
+          </div>
+          {universe.option_indices.length === 0 && (
+            <div className="text-[11px] text-amber-400 mt-1.5">
+              ⚠ Select at least one index — with none selected the bot has nothing to scan.
+            </div>
+          )}
+        </Field>
+      )}
+
       <Field label="Currently Watching" desc="Exactly what the bot/scanner will look at">
         <div className="flex flex-wrap gap-1.5">
-          {universe.resolved_symbols.map(s => (
+          {universe.resolved_symbols.length === 0 ? (
+            <span className="text-[11px] text-amber-400">Nothing selected — the bot/scanner won't scan anything.</span>
+          ) : universe.resolved_symbols.map(s => (
             <span key={s} className="px-2 py-1 rounded bg-[#0f1628] border border-[#1e2d45] text-[11px] text-slate-300">{s}</span>
           ))}
         </div>
@@ -235,6 +268,21 @@ export default function Settings() {
       toast.error(e instanceof Error ? e.message : 'Failed to generate token URL')
     } finally {
       setTokenLoading(false)
+    }
+  }
+
+  const [disconnecting, setDisconnecting] = useState(false)
+  const handleDisconnectToken = async () => {
+    setDisconnecting(true)
+    try {
+      await disconnectToken()
+      toast.success('Token disconnected — bot and scanner will now show no-data until reconnected')
+      const status = await fetchEnvStatus()
+      setEnvStatus(status)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to disconnect token')
+    } finally {
+      setDisconnecting(false)
     }
   }
 
@@ -336,8 +384,10 @@ export default function Settings() {
         <div className="space-y-3">
           <div className="text-xs text-slate-400">
             Upstox tokens expire every 24 hours. Click "Generate Token" — a browser tab opens for you to log in.
-            After approval, the token is automatically saved to the database and survives server restarts.
-            You do NOT need to edit Render environment variables daily.
+            After approval, the token is automatically saved to the database and survives server restarts —
+            <strong className="text-amber-400"> including across days.</strong> If you see live-looking data
+            without generating a token today, this is why: a token from an earlier session is still valid and
+            being reused automatically. Use "Disconnect" below to force a clean, token-free state.
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">
@@ -347,7 +397,7 @@ export default function Settings() {
                 : 'bg-red-950/30 border-red-800/40 text-red-400'
             }`}>
               {envStatus['UPSTOX_ACCESS_TOKEN'] ? <CheckCircle size={12} /> : <XCircle size={12} />}
-              {envStatus['UPSTOX_ACCESS_TOKEN'] ? 'Token is set' : 'Token missing — bot cannot trade'}
+              {envStatus['UPSTOX_ACCESS_TOKEN'] ? 'Token is set (may be from an earlier session)' : 'Token missing — bot cannot trade'}
             </div>
 
             <button onClick={handleRegenToken} disabled={tokenLoading}
@@ -355,12 +405,20 @@ export default function Settings() {
               {tokenLoading ? <RefreshCw size={12} className="animate-spin" /> : <ExternalLink size={12} />}
               Generate / Reconnect Token
             </button>
+
+            <button onClick={handleDisconnectToken} disabled={disconnecting}
+              className="flex items-center gap-2 px-4 py-2 bg-red-950/40 hover:bg-red-950/60 border border-red-800/50 text-red-300 text-xs font-medium rounded-lg transition-colors disabled:opacity-60">
+              {disconnecting ? <RefreshCw size={12} className="animate-spin" /> : <XCircle size={12} />}
+              Disconnect Token
+            </button>
           </div>
 
           <div className="text-[10px] text-slate-600 bg-[#0f1628] border border-[#1e2d45] rounded-lg p-2.5">
             <strong className="text-slate-500">How it works:</strong> Click "Generate Token" → approve in Upstox → 
             token auto-saved to SQLite database → survives Render restarts (on persistent disk /data/).
-            No Render dashboard edits needed.
+            No Render dashboard edits needed. "Disconnect" clears it from both the database and the running
+            process, and stops the WebSocket — the scanner and bot will then show empty/no-data honestly
+            until you reconnect.
           </div>
         </div>
       </Section>

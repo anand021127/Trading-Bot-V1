@@ -31,16 +31,21 @@ from backend.strategy.signal import StrategySignal
 class CostConfig:
     commission_pct: float = 0.0003
     slippage_pct: float = 0.0001
-    stt_pct: float = 0.001
+    stt_pct: float = 0.001            # equity STT — 0.1% (delivery) / 0.025% (intraday, sell-only)
+    # Options STT is a materially different rate from equity — as of the
+    # April 2026 revision it's 0.15% on the PREMIUM, sell-side only. Using
+    # the equity rate for options would meaningfully understate real costs.
+    option_stt_pct: float = 0.0015
     stamp_duty_pct: float = 0.00003
 
-    def apply(self, entry: float, exit_price: float, qty: int) -> Dict[str, float]:
+    def apply(self, entry: float, exit_price: float, qty: int, is_option: bool = False) -> Dict[str, float]:
         buy_val = entry * qty
         sell_val = exit_price * qty
         gross_pnl = sell_val - buy_val
         brokerage = (buy_val + sell_val) * self.commission_pct
         slippage = (buy_val + sell_val) * self.slippage_pct
-        stt = sell_val * self.stt_pct
+        stt_rate = self.option_stt_pct if is_option else self.stt_pct
+        stt = sell_val * stt_rate
         stamp_duty = buy_val * self.stamp_duty_pct
         charges = brokerage + slippage + stt + stamp_duty
         return {
@@ -197,7 +202,10 @@ class BacktestEngine:
                     if exit_reason:
                         exit_price = self._exit_price_for(position, bar, exit_reason)
                         qty = position["quantity"]
-                        costs = self.costs.apply(position["entry_price"], exit_price, qty)
+                        costs = self.costs.apply(
+                            position["entry_price"], exit_price, qty,
+                            is_option=position["strategy"] == "OPTION_PREMIUM",
+                        )
                         trade = BacktestTrade(
                             symbol=symbol, strategy=position["strategy"],
                             entry_time=position["entry_time"], exit_time=bar.get("timestamp", ""),
@@ -252,7 +260,10 @@ class BacktestEngine:
                 last_bar = candles[-1]
                 exit_price = last_bar["close"]
                 qty = position["quantity"]
-                costs = self.costs.apply(position["entry_price"], exit_price, qty)
+                costs = self.costs.apply(
+                    position["entry_price"], exit_price, qty,
+                    is_option=position["strategy"] == "OPTION_PREMIUM",
+                )
                 trade = BacktestTrade(
                     symbol=symbol, strategy=position["strategy"],
                     entry_time=position["entry_time"], exit_time=last_bar.get("timestamp", ""),

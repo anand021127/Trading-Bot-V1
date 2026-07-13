@@ -103,3 +103,51 @@ class TestLiveScanner:
     def test_get_result_returns_none_for_unscanned_symbol(self) -> None:
         scanner = LiveScanner(trading_engine=MagicMock(), universe_resolver=lambda: [])
         assert scanner.get_result("NOPE") is None
+
+
+class TestLiveScannerOptionsMode:
+    def test_options_mode_calls_evaluate_option_premium_not_evaluate_all_strategies(self) -> None:
+        engine = MagicMock()
+        option_sig = StrategySignal(strategy_name="OPTION_PREMIUM", symbol="NIFTY50",
+                                     signal=SignalType.BUY, confidence=90.0, entry_price=145.5)
+        option_sig.indicators = {"selected_contract": {"option_type": "CE", "strike": 22000}}
+        engine.evaluate_option_premium.return_value = option_sig
+
+        scanner = LiveScanner(
+            trading_engine=engine, universe_resolver=lambda: ["NIFTY50"],
+            mode_resolver=lambda: "OPTIONS",
+        )
+        entry = scanner.scan_symbol("NIFTY50")
+
+        engine.evaluate_option_premium.assert_called_once_with("NIFTY50")
+        engine.evaluate_all_strategies.assert_not_called()
+        assert entry.signal == SignalType.BUY
+        assert entry.ltp == 145.5
+        assert entry.trend == "BULLISH"  # CE selected
+
+    def test_stocks_mode_still_uses_evaluate_all_strategies(self) -> None:
+        engine = _make_engine({"RELIANCE": [_ema_signal("RELIANCE", True)]})
+        scanner = LiveScanner(
+            trading_engine=engine, universe_resolver=lambda: ["RELIANCE"],
+            mode_resolver=lambda: "STOCKS",
+        )
+        scanner.scan_symbol("RELIANCE")
+        engine.evaluate_all_strategies.assert_called_once()
+
+    def test_default_mode_resolver_is_stocks_when_not_supplied(self) -> None:
+        engine = _make_engine({"RELIANCE": [_ema_signal("RELIANCE", True)]})
+        scanner = LiveScanner(trading_engine=engine, universe_resolver=lambda: ["RELIANCE"])
+        scanner.scan_symbol("RELIANCE")
+        engine.evaluate_all_strategies.assert_called_once()
+        engine.evaluate_option_premium.assert_not_called()
+
+    def test_options_mode_error_is_shown_honestly(self) -> None:
+        engine = MagicMock()
+        engine.evaluate_option_premium.side_effect = RuntimeError("no option chain access")
+        scanner = LiveScanner(
+            trading_engine=engine, universe_resolver=lambda: ["SENSEX"],
+            mode_resolver=lambda: "OPTIONS",
+        )
+        entry = scanner.scan_symbol("SENSEX")
+        assert entry.error is not None
+        assert "no option chain access" in entry.error

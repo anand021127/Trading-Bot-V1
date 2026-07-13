@@ -17,6 +17,7 @@ from backend.config.universe_config import (
     save_universe_config,
     NIFTY50_SYMBOLS,
     VALID_MODES,
+    VALID_OPTION_INDICES,
 )
 from backend.database.db_manager import DatabaseManager
 
@@ -32,6 +33,7 @@ async def get_universe() -> Dict[str, Any]:
         **config.to_dict(),
         "resolved_symbols": config.resolve_symbols(),
         "valid_modes": list(VALID_MODES),
+        "valid_option_indices": list(VALID_OPTION_INDICES),
         "nifty50_constituents": NIFTY50_SYMBOLS,
     }
 
@@ -44,6 +46,7 @@ async def update_universe(body: Dict[str, Any]) -> Dict[str, Any]:
         index=body.get("index", current.index),
         custom_symbols=body.get("custom_symbols", current.custom_symbols),
         max_symbols=body.get("max_symbols", current.max_symbols),
+        option_indices=body.get("option_indices", current.option_indices),
     )
     error = merged.validate()
     if error:

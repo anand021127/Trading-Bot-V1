@@ -362,8 +362,10 @@ export interface UniverseConfigResponse {
   index: string
   custom_symbols: string[]
   max_symbols: number
+  option_indices: string[]
   resolved_symbols: string[]
   valid_modes: string[]
+  valid_option_indices: string[]
   nifty50_constituents: string[]
 }
 

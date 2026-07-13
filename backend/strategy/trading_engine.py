@@ -31,6 +31,29 @@ logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 settings = load_settings()
 
+# NSE/BSE F&O lot sizes for the indices this bot supports in OPTIONS mode.
+# These change periodically when exchanges revise them — verify against
+# the current NSE/BSE circular before relying on this for real orders.
+LOT_SIZES: Dict[str, int] = {
+    "NIFTY50": 75,
+    "BANKNIFTY": 30,
+    "SENSEX": 20,
+}
+
+# Exchange "quantity freeze" limits — the maximum quantity allowed in a
+# SINGLE order for index derivatives, meant to stop fat-finger orders from
+# moving the market. An order above this is rejected outright by the
+# exchange, not just flagged. These are revised periodically (NIFTY has
+# changed at least twice in the past year) — verify against the current
+# NSE/BSE circular. This bot caps order size at the limit rather than
+# splitting into multiple orders, so a signal sized above the freeze limit
+# trades AT the limit, not the full computed size.
+FREEZE_QUANTITY_LIMITS: Dict[str, int] = {
+    "NIFTY50": 1800,
+    "BANKNIFTY": 600,
+    "SENSEX": 900,   # not confirmed from BSE's own published limit — verify before live use
+}
+
 
 @dataclass
 class SignalResult:
@@ -210,15 +233,23 @@ class TradingEngine:
         UniverseConfig (item #4), not a hardcoded slice. Falls back to the
         old hardcoded NIFTY50 slice only if the universe config can't be
         loaded for some reason, so the bot never just stops scanning."""
+        symbols, _mode = self._resolve_universe()
+        return symbols
+
+    def _resolve_universe(self) -> tuple:
+        """(symbols, mode) — mode is 'STOCKS' or 'OPTIONS'. OPTIONS mode
+        means `symbols` are underlying indices (e.g. NIFTY50, SENSEX)
+        whose OPTION PREMIUMS get traded via OptionPremiumStrategy, not
+        their own index price action."""
         try:
             from backend.config.universe_config import load_universe_config
             uconfig = load_universe_config(self.db_manager)
             symbols = uconfig.resolve_symbols()
             if symbols:
-                return symbols
+                return symbols, uconfig.mode
         except Exception as e:
             logger.warning("Could not load universe config, using default watchlist: %s", e)
-        return self.NIFTY50[: settings.universe.max_stocks_in_watchlist]
+        return self.NIFTY50[: settings.universe.max_stocks_in_watchlist], "STOCKS"
 
     def _capture_orb(self, symbol: str) -> Optional[Dict[str, float]]:
         """Fetch opening range (9:15–9:30 candles) for symbol."""
@@ -403,14 +434,66 @@ class TradingEngine:
         strategy_names = ["EMA_TREND", "ORB"]
         return self.strategy_engine.evaluate(symbol, candles, context, strategy_names)
 
+    def detect_underlying_trend(self, symbol: str) -> str:
+        """Real trend detection for an index/underlying, using the same
+        EMA_TREND conditions used everywhere else — not a guess. Returns
+        BULLISH / BEARISH / NEUTRAL. Used to auto-pick CE vs PE for options
+        mode, since we're trading the index's option premium, not the
+        index itself, so we still need to know its direction."""
+        try:
+            candles = self.client.get_historical_candles(symbol, "5minute", limit=100)
+        except Exception as e:
+            TradeLogger.log_error("TradingEngine.detect_underlying_trend", e, {"symbol": symbol})
+            return "NEUTRAL"
+
+        ema_strat = next(
+            (s for s in self.strategy_engine.strategies if s.name == "EMA_TREND"), None
+        )
+        if ema_strat is None or len(candles) < ema_strat.min_candles:
+            return "NEUTRAL"
+        sig = ema_strat.evaluate(symbol, candles)
+        if sig.conditions.get("ema_trend_up") and sig.conditions.get("price_above_ema20"):
+            return "BULLISH"
+        if sig.conditions.get("ema_trend_up") is False:
+            return "BEARISH"
+        return "NEUTRAL"
+
     def evaluate_option_premium(
-        self, underlying_symbol: str, expiry_date: str, underlying_trend: str,
+        self,
+        underlying_symbol: str,
+        expiry_date: Optional[str] = None,
+        underlying_trend: Optional[str] = None,
     ) -> Any:
         """Run just the Option Premium strategy for `underlying_symbol`
-        (e.g. 'NIFTY50', 'BANKNIFTY'). Fetches the real option chain, picks
-        the ATM contract, fetches that contract's own candles, then scores
-        momentum + VWAP. Returns a single StrategySignal (possibly NONE)."""
+        (e.g. 'NIFTY50', 'BANKNIFTY', 'SENSEX'). Fetches the real option
+        chain, picks the ATM contract, fetches that contract's own candles,
+        then scores momentum + VWAP. Returns a single StrategySignal
+        (possibly NONE).
+
+        `expiry_date` — if omitted, auto-picks the nearest real upcoming
+        expiry from Upstox (never guesses a date).
+        `underlying_trend` — if omitted, auto-detected via
+        `detect_underlying_trend()` so this can run unattended from the
+        scanner/live loop without a human picking a direction every time.
+        """
         from backend.strategy.strategies.option_premium import OptionPremiumStrategy
+        from backend.strategy.signal import StrategySignal
+
+        if not expiry_date:
+            try:
+                expiry_date = self.client.get_nearest_expiry(underlying_symbol)
+            except Exception as e:
+                TradeLogger.log_error("TradingEngine.evaluate_option_premium", e,
+                                       {"symbol": underlying_symbol})
+                expiry_date = None
+            if not expiry_date:
+                sig = StrategySignal(strategy_name="OPTION_PREMIUM", symbol=underlying_symbol)
+                sig.rejected_reasons = ["No upcoming option expiry found for this underlying"]
+                sig.entry_reason = "NO TRADE — " + sig.rejected_reasons[0]
+                return sig
+
+        if not underlying_trend:
+            underlying_trend = self.detect_underlying_trend(underlying_symbol)
 
         try:
             chain = self.client.get_option_chain(underlying_symbol, expiry_date)
@@ -436,10 +519,10 @@ class TradingEngine:
             "spot_price": spot,
             "underlying_trend": underlying_trend,
             "option_chain": chain,
+            "expiry_date": expiry_date,
         }
         contract = strat.select_contract(context)
         if contract is None or not contract.get("instrument_key"):
-            from backend.strategy.signal import StrategySignal
             sig = StrategySignal(strategy_name="OPTION_PREMIUM", symbol=underlying_symbol)
             sig.rejected_reasons = ["Could not resolve ATM contract from live option chain/spot"]
             sig.entry_reason = "NO TRADE — " + sig.rejected_reasons[0]
@@ -573,6 +656,27 @@ class TradingEngine:
             entry_price=signal.entry_price,
             stop_loss_price=signal.stop_loss,
         )
+
+        # Options trade in fixed lots, not arbitrary share counts. Round
+        # down to the nearest whole lot (minimum 1 lot) — placing a
+        # non-lot-multiple order would just get rejected by the exchange,
+        # or worse, silently misprice the real risk being taken.
+        selected_contract = signal.indicators.get("selected_contract") if signal.indicators else None
+        if selected_contract:
+            lot_size = LOT_SIZES.get(signal.symbol.upper(), 1)
+            qty = max(lot_size, (qty // lot_size) * lot_size)
+
+            # Exchange quantity-freeze limit — an order above this is
+            # rejected outright, not just flagged. Cap rather than split.
+            freeze_limit = FREEZE_QUANTITY_LIMITS.get(signal.symbol.upper())
+            if freeze_limit and qty > freeze_limit:
+                capped_qty = (freeze_limit // lot_size) * lot_size
+                logger.warning(
+                    "%s order size %d exceeds exchange freeze limit %d — capping to %d",
+                    signal.symbol, qty, freeze_limit, capped_qty,
+                )
+                qty = max(lot_size, capped_qty)
+
         if qty <= 0:
             logger.warning("Quantity 0 for %s — skipping", signal.symbol)
             return None
@@ -605,6 +709,15 @@ class TradingEngine:
                 "atr": signal.indicators.get("atr", 0.0),
                 "side": "long",
                 "entry_time": datetime.now(timezone.utc).isoformat(),
+                # For OPTION_PREMIUM positions: the actual contract being
+                # held. Exit monitoring MUST watch this contract's own
+                # price, not the underlying index's — a NIFTY option's
+                # stop-loss is in premium terms (e.g. ₹140), which has no
+                # relationship to the index's spot price (e.g. 22,150).
+                "contract_instrument_key": (
+                    selected_contract.get("instrument_key") if selected_contract else None
+                ),
+                "expiry_date": signal.indicators.get("expiry_date") if signal.indicators else None,
             }
             self.db_manager.upsert_position(Position(
                 symbol=signal.symbol, quantity=qty,
@@ -656,12 +769,30 @@ class TradingEngine:
 
         for symbol in list(self._open_positions.keys()):
             pos = self._open_positions[symbol]
-            tick = live_prices.get(symbol)
+            # For OPTION_PREMIUM positions, everything below must watch the
+            # actual contract's price — comparing an option's premium-based
+            # stop-loss against the underlying index's spot price would be
+            # comparing two unrelated numbers.
+            contract_key = pos.get("contract_instrument_key")
+            price_lookup_key = contract_key or symbol
+
+            tick = live_prices.get(price_lookup_key)
             current_price = tick.get("ltp") if tick else None
 
-            if not current_price:
-                # No live tick yet — fall back to a fresh quote so a dead
-                # WebSocket feed doesn't leave positions unmonitored.
+            if not current_price and contract_key:
+                # Option contracts aren't subscribed on the live WebSocket
+                # feed (they're expiry-specific and created dynamically), so
+                # fall back to the latest historical candle's close as the
+                # current-price proxy.
+                try:
+                    recent = self.client.get_historical_candles(contract_key, "5minute", limit=1)
+                    current_price = recent[-1]["close"] if recent else None
+                except Exception:
+                    current_price = None
+            elif not current_price:
+                # No live tick yet for a regular stock/index — fall back to
+                # a fresh quote so a dead WebSocket feed doesn't leave
+                # positions unmonitored.
                 try:
                     quotes = self.client.get_multiple_quotes([symbol])
                     current_price = quotes.get(symbol, {}).get("ltp")
@@ -683,9 +814,10 @@ class TradingEngine:
                 exit_reason = "TARGET_HIT"
             else:
                 try:
-                    candles = self.client.get_historical_candles(symbol, "5minute", limit=100)
+                    candles = self.client.get_historical_candles(price_lookup_key, "5minute", limit=100)
+                    exit_context = {"expiry_date": pos.get("expiry_date")} if pos.get("expiry_date") else None
                     strat_exit = self.strategy_engine.check_exits(
-                        pos.get("strategy_name", self.strategy_name), pos, candles,
+                        pos.get("strategy_name", self.strategy_name), pos, candles, exit_context,
                     )
                     if strat_exit:
                         exit_reason = strat_exit
@@ -723,8 +855,13 @@ class TradingEngine:
 
         self._daily_floor_taken = True  # only ever attempt once per day
         candidate_symbol = self._best_of_day["symbol"]
-        fresh_signals = self.evaluate_all_strategies(candidate_symbol)
-        fresh_best = max(fresh_signals, key=lambda s: s.confidence, default=None)
+        universe_mode = self._best_of_day.get("mode", "STOCKS")
+
+        if universe_mode == "OPTIONS":
+            fresh_best = self.evaluate_option_premium(candidate_symbol)
+        else:
+            fresh_signals = self.evaluate_all_strategies(candidate_symbol)
+            fresh_best = max(fresh_signals, key=lambda s: s.confidence, default=None)
 
         if fresh_best is None or fresh_best.confidence < self.daily_floor_confidence or fresh_best.entry_price <= 0:
             logger.info(
@@ -774,11 +911,13 @@ class TradingEngine:
         while BotState.is_running():
             try:
                 now = datetime.now(IST)
-                watchlist = self._resolve_watchlist()
+                watchlist, universe_mode = self._resolve_universe()
 
                 # Pre-market: capture ORB (9:15–9:30) for the legacy cache
                 # (still used by evaluate_signal(), kept for diagnostics use).
-                if now.hour == 9 and 15 <= now.minute < 30:
+                # Not applicable in OPTIONS mode — ORB is a stock/index price
+                # breakout concept, not a premium-trading one.
+                if universe_mode == "STOCKS" and now.hour == 9 and 15 <= now.minute < 30:
                     for sym in watchlist:
                         if sym not in self._orb_levels:
                             orb = self._capture_orb(sym)
@@ -804,8 +943,15 @@ class TradingEngine:
                         if sym in self._open_positions:
                             continue
 
-                        signals = self.evaluate_all_strategies(sym)
-                        best = MultiStrategyEngine.best_signal(signals)
+                        if universe_mode == "OPTIONS":
+                            # Trading the index's OPTION PREMIUM (CE/PE),
+                            # not the index itself — expiry and underlying
+                            # trend are auto-detected for real, unattended.
+                            best = self.evaluate_option_premium(sym)
+                            signals = [best]
+                        else:
+                            signals = self.evaluate_all_strategies(sym)
+                            best = MultiStrategyEngine.best_signal(signals)
 
                         if best is not None and best.signal == "BUY":
                             trade_id = self.execute_multi_signal(best)
@@ -819,7 +965,7 @@ class TradingEngine:
                             for sig in signals:
                                 if sig.signal == "NONE" and sig.confidence >= self.daily_floor_confidence:
                                     if not self._best_of_day or sig.confidence > self._best_of_day["confidence"]:
-                                        self._best_of_day = {"symbol": sym, "confidence": sig.confidence}
+                                        self._best_of_day = {"symbol": sym, "confidence": sig.confidence, "mode": universe_mode}
 
                     # Daily floor trade — see _maybe_take_daily_floor_trade().
                     self._maybe_take_daily_floor_trade(now)
@@ -903,8 +1049,17 @@ class TradingEngine:
 
         details: List[Dict[str, Any]] = []
         for symbol, pos in self._open_positions.items():
-            tick = live_prices.get(symbol)
+            # Same fix as _monitor_open_positions: an option position must
+            # be priced by its own contract, not the underlying index.
+            contract_key = pos.get("contract_instrument_key")
+            tick = live_prices.get(contract_key or symbol)
             current_price = tick.get("ltp") if tick else None
+            if not current_price and contract_key:
+                try:
+                    recent = self.client.get_historical_candles(contract_key, "5minute", limit=1)
+                    current_price = recent[-1]["close"] if recent else None
+                except Exception:
+                    current_price = None
 
             trailing_stop = pos.get("trailing_stop", pos["stop_loss"])
             if current_price:

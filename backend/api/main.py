@@ -102,10 +102,17 @@ async def lifespan(app: FastAPI):
             except Exception:
                 return []
 
+        def _resolve_universe_mode() -> str:
+            try:
+                return load_universe_config(db).mode
+            except Exception:
+                return "STOCKS"
+
         if app.state.engine is not None:
             scanner = LiveScanner(
                 trading_engine=app.state.engine,
                 universe_resolver=_resolve_universe,
+                mode_resolver=_resolve_universe_mode,
                 seconds_between_symbols=3.0,
             )
             scanner.start()
