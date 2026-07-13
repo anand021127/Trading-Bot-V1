@@ -364,3 +364,23 @@ async def run_single_test(test_name: str) -> Dict[str, Any]:
 @router.get("/history")
 async def get_test_history() -> List[Dict[str, Any]]:
     return []
+
+
+@router.get("/instrument-master")
+async def instrument_master_status() -> Dict[str, Any]:
+    """Status of the live Upstox instrument master resolver — the fix for
+    hardcoded ISINs going stale after corporate actions (e.g. KOTAKBANK's
+    face-value sub-division breaking historical-candle fetches with
+    'Invalid Instrument key'). If `symbols_loaded` is 0, resolution is
+    silently running on the static fallback dict only."""
+    from backend.broker.instrument_master import get_master_status
+    return get_master_status()
+
+
+@router.post("/instrument-master/refresh")
+async def instrument_master_refresh() -> Dict[str, Any]:
+    """Force an immediate re-fetch, bypassing the 24h TTL — use this right
+    after seeing an 'Invalid Instrument key' error instead of waiting for
+    the next scheduled refresh or a redeploy."""
+    from backend.broker.instrument_master import force_refresh
+    return force_refresh()

@@ -213,8 +213,10 @@ async def api_version():
     except Exception:
         routes_present = set()
 
+    from backend.broker.instrument_master import get_master_status
+
     return {
-        "backend_build": "v9-multi-strategy-scanner-universe",
+        "backend_build": "v14-dynamic-instrument-master",
         "features": {
             "upstox_v3_websocket": True,
             "upstox_python_sdk_installed": sdk_installed,
@@ -225,6 +227,8 @@ async def api_version():
             "orb_daily_reset_fix": True,
             "trailing_stop_manager": True,
             "index_prices_endpoint": True,
+            "dynamic_instrument_master": True,
+            "professional_options_risk_controls": True,
         },
         "scanner_router_registered": "/api/scanner/status" in routes_present,
         "universe_router_registered": "/api/universe/" in routes_present,
@@ -232,6 +236,7 @@ async def api_version():
         "ws_client_active": getattr(app.state, "ws_client", None) is not None,
         "scanner_active": getattr(app.state, "scanner", None) is not None,
         "engine_active": getattr(app.state, "engine", None) is not None,
+        "instrument_master": get_master_status(),
     }
 
 

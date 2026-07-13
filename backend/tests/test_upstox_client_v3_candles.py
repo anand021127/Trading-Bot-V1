@@ -132,6 +132,47 @@ class TestGetHistoricalCandlesV3:
         assert "NSE_FO|12345" in captured_urls[0]
         assert "NSE_EQ|NSE_FO" not in captured_urls[0]  # the old double-mangling bug
 
+    def test_live_instrument_master_overrides_stale_static_isin(self) -> None:
+        """Regression test for a real production incident: KOTAKBANK's
+        hardcoded ISIN (INE237A01028) started failing with 'Invalid
+        Instrument key' after a corporate action changed which key
+        Upstox's live master recognizes. get_historical_candles must use
+        the live master's current key, not the stale static one."""
+        client = UpstoxClient(access_token="tok")
+        captured_urls: List[str] = []
+
+        def fake_get_url(url: str, params: Any = None) -> Dict[str, Any]:
+            captured_urls.append(url)
+            return {"data": {"candles": []}}
+
+        with patch("backend.broker.instrument_master.resolve_instrument_key",
+                   return_value="NSE_EQ|INE_CURRENT_POST_SPLIT_KEY"), \
+             patch.object(client, "_get_url", side_effect=fake_get_url):
+            client.get_historical_candles(
+                "KOTAKBANK", "5minute", from_date="2026-01-01", to_date="2026-01-02",
+            )
+
+        assert "INE_CURRENT_POST_SPLIT_KEY" in captured_urls[0]
+        assert "INE237A01028" not in captured_urls[0]  # the stale key must not be used
+
+    def test_falls_back_to_static_isin_when_live_master_unavailable(self) -> None:
+        """If the live master can't be reached (network blip), the static
+        dict is still better than nothing — never just fail the request."""
+        client = UpstoxClient(access_token="tok")
+        captured_urls: List[str] = []
+
+        def fake_get_url(url: str, params: Any = None) -> Dict[str, Any]:
+            captured_urls.append(url)
+            return {"data": {"candles": []}}
+
+        with patch("backend.broker.instrument_master._instrument_master.resolve", return_value=None), \
+             patch.object(client, "_get_url", side_effect=fake_get_url):
+            client.get_historical_candles(
+                "RELIANCE", "5minute", from_date="2026-01-01", to_date="2026-01-02",
+            )
+
+        assert "INE002A01018" in captured_urls[0]  # static RELIANCE ISIN used as fallback
+
     def test_full_range_helper_does_not_truncate(self) -> None:
         client = UpstoxClient(access_token="tok")
         rows = [_candle_row(f"2026-01-0{i}T09:15:00+05:30") for i in range(1, 6)]

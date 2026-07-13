@@ -125,6 +125,21 @@ class UpstoxClient:
             h["Authorization"] = f"Bearer {self.access_token}"
         return h
 
+    def _resolve_key(self, symbol: str) -> str:
+        """Resolve a trading symbol to its instrument_key, preferring the
+        live daily-refreshed Upstox instrument master over the static
+        SYMBOL_TO_KEY/INDEX_TO_KEY dict — hardcoded ISINs go stale after
+        corporate actions (this is what broke KOTAKBANK in production: a
+        face-value sub-division changed which instrument_key Upstox's live
+        master recognizes, and the static dict kept the old, now-invalid
+        one). Raw instrument keys (containing '|') pass through untouched."""
+        if "|" in symbol:
+            return symbol
+        from backend.broker.instrument_master import resolve_instrument_key
+        static_fallback = ALL_INSTRUMENTS.get(symbol.upper())
+        resolved = resolve_instrument_key(symbol, static_fallback=static_fallback)
+        return resolved or f"NSE_EQ|{symbol}"
+
     def _get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         return self._get_url(f"{self.base_url}{path}", params)
 
@@ -218,13 +233,13 @@ class UpstoxClient:
         one API call."""
         if not symbols:
             return {}
-        keys = ",".join(ALL_INSTRUMENTS.get(s.upper(), f"NSE_EQ|{s}") for s in symbols)
+        keys = ",".join(self._resolve_key(s) for s in symbols)
         try:
             data = self._get("/market-quote/quotes", params={"instrument_key": keys})
             raw = data.get("data", {})
             result: Dict[str, Any] = {}
             for sym in symbols:
-                key = ALL_INSTRUMENTS.get(sym.upper(), f"NSE_EQ|{sym}")
+                key = self._resolve_key(sym)
                 q = raw.get(key, {})
                 if q:
                     ohlc = q.get("ohlc", {})
@@ -272,10 +287,7 @@ class UpstoxClient:
         makes a full year of 5-minute backtesting actually possible (the old
         client fetched one request's worth and quietly gave up).
         """
-        if "|" in symbol:
-            instrument_key = symbol
-        else:
-            instrument_key = ALL_INSTRUMENTS.get(symbol.upper(), f"NSE_EQ|{symbol}")
+        instrument_key = self._resolve_key(symbol)
 
         unit, unit_interval = V3_INTERVAL_MAP.get(interval.lower(), ("days", 1))
 
@@ -364,7 +376,7 @@ class UpstoxClient:
         empty list means "Upstox genuinely has no contracts for this
         underlying right now," not "assume some date."
         """
-        instrument_key = ALL_INSTRUMENTS.get(underlying_symbol.upper(), f"NSE_EQ|{underlying_symbol}")
+        instrument_key = self._resolve_key(underlying_symbol)
         try:
             data = self._get("/option/contract", params={"instrument_key": instrument_key})
             raw = data.get("data", [])
@@ -406,7 +418,7 @@ class UpstoxClient:
         caller (OptionPremiumStrategy) treats an empty chain as "contract not
         resolved," not as a signal to trade.
         """
-        instrument_key = ALL_INSTRUMENTS.get(underlying_symbol.upper(), f"NSE_EQ|{underlying_symbol}")
+        instrument_key = self._resolve_key(underlying_symbol)
         try:
             data = self._get("/option/chain", params={
                 "instrument_key": instrument_key,
