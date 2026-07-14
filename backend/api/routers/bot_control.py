@@ -42,7 +42,7 @@ async def start_bot() -> Dict[str, Any]:
     """Start the trading bot."""
     if BotState.is_running():
         return {"success": False, "message": "Bot is already running"}
-    if BotState._kill_switch:
+    if BotState.status()["kill_switch_active"]:
         return {"success": False, "message": "Kill switch is active. Reset it first via /bot/reset-kill"}
     if _engine_ref is not None:
         _engine_ref.start()

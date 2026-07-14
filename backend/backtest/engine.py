@@ -166,7 +166,13 @@ class BacktestEngine:
         self,
         symbol_candles: Dict[str, List[Dict[str, Any]]],
         strategy_names: Optional[List[str]] = None,
+        progress_callback: Optional[Any] = None,
     ) -> BacktestResult:
+        """`progress_callback(dict)` — if given, called periodically with
+        {"phase": "processing", "symbol": ..., "symbol_index": ..., "total_symbols": ...,
+         "bar_index": ..., "total_bars": ...} so a long-running backtest (e.g. a full
+        year of 5-minute NIFTY data) can report real progress to a polling
+        client instead of the caller just waiting on a single request."""
         result = BacktestResult()
         equity = self.capital
         peak = self.capital
@@ -179,8 +185,9 @@ class BacktestEngine:
         candles_scanned = 0
 
         strategy_names = strategy_names or ["EMA_TREND", "ORB"]
+        total_symbols = len(symbol_candles)
 
-        for symbol, candles in symbol_candles.items():
+        for symbol_index, (symbol, candles) in enumerate(symbol_candles.items()):
             if len(candles) < self.min_candles_required:
                 result.skipped_symbols.append({
                     "symbol": symbol,
@@ -192,8 +199,23 @@ class BacktestEngine:
 
             candles_scanned += len(candles)
             position: Optional[Dict[str, Any]] = None
+            total_bars = len(candles)
 
             for i in range(self.min_candles_required, len(candles)):
+                if progress_callback and i % 200 == 0:
+                    try:
+                        progress_callback({
+                            "phase": "processing",
+                            "symbol": symbol,
+                            "symbol_index": symbol_index + 1,
+                            "total_symbols": total_symbols,
+                            "bar_index": i,
+                            "total_bars": total_bars,
+                            "trades_so_far": len(all_trades),
+                        })
+                    except Exception:
+                        pass  # progress reporting must never break the backtest itself
+
                 window = candles[max(0, i + 1 - self.max_window_bars): i + 1]
                 bar = candles[i]
 

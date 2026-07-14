@@ -245,7 +245,7 @@ export default function Settings() {
     if (!settings) return
     setSaving(true)
     try {
-      const res = await updateSettings(settings)
+      await updateSettings(settings)
       setSaved(true)
       toast.success('Settings saved to database — persists across restarts!')
       setTimeout(() => setSaved(false), 4000)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set
 from zoneinfo import ZoneInfo
@@ -54,7 +55,16 @@ manager = ConnectionManager()
 
 # Price cache populated by the broker's Upstox v3 WebSocket client.
 # Keyed by instrument_key (e.g. "NSE_EQ|INE002A01018", "NSE_INDEX|Nifty 50").
+#
+# Thread-safety note: the Upstox SDK runs its WebSocket callback on its OWN
+# thread (not the asyncio event loop thread), while FastAPI request
+# handlers and the LiveScanner's asyncio.to_thread() calls read this same
+# dict from other threads. Mutating and iterating a plain dict from
+# different threads without a lock can raise a rare
+# "dictionary changed size during iteration" RuntimeError under real
+# concurrent load — this lock closes that race.
 _price_cache: Dict[str, Any] = {}
+_price_cache_lock = threading.Lock()
 
 # instrument_key -> friendly symbol (e.g. "RELIANCE", "NIFTY50"), populated
 # lazily from backend.broker.upstox_client.ALL_INSTRUMENTS so the cache below
@@ -74,18 +84,24 @@ def _ensure_symbol_map() -> None:
 
 
 def update_price_cache(prices: Dict[str, Any]) -> None:
-    """Called by the broker's Upstox v3 WebSocket client on every tick batch.
-    `prices` is keyed by instrument_key; we mirror it into a by-symbol view
-    too so REST/WS consumers can look either up."""
+    """Called by the broker's Upstox v3 WebSocket client on every tick batch
+    — from the SDK's own thread, not the asyncio event loop. `prices` is
+    keyed by instrument_key; we mirror it into a by-symbol view too so
+    REST/WS consumers can look either up."""
     _ensure_symbol_map()
-    _price_cache.update(prices)
+    with _price_cache_lock:
+        _price_cache.update(prices)
 
 
 def get_prices_by_symbol() -> Dict[str, Any]:
     _ensure_symbol_map()
+    with _price_cache_lock:
+        # Snapshot under the lock, then build the by-symbol view outside
+        # it — keeps the locked section as short as possible.
+        snapshot = dict(_price_cache)
     return {
         _key_to_symbol.get(k, k): v
-        for k, v in _price_cache.items()
+        for k, v in snapshot.items()
     }
 
 

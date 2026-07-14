@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Play, CheckCircle, XCircle, RefreshCw, Clock, Loader } from 'lucide-react'
 import { runAllTests, runSingleTest } from '../api/endpoints'
-import type { DiagnosticResult } from '../types'
 
 const ALL_TESTS = [
   { name: 'authentication', label: 'Authentication', desc: 'Verify Upstox API token is valid and not expired' },
@@ -90,7 +89,7 @@ export default function ApiTest() {
         })
       })
       setSummary({ passed: res.passed ?? 0, failed: res.failed ?? 0 })
-    } catch (e) {
+    } catch {
       // If backend is down, mark all as failed
       ALL_TESTS.forEach(t => setTest(t.name, { status: 'FAIL', error: 'Backend unreachable' }))
       setSummary({ passed: 0, failed: ALL_TESTS.length })

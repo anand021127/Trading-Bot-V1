@@ -1,7 +1,7 @@
 import api from './client'
 import { cachedFetch, TTL } from './cache'
 import type {
-  OverviewData, Trade, Position, LiveQuote,
+  OverviewData, Trade, Position,
   PerformanceResponse, DiagnosticResult, Settings,
   PaperStatus, BacktestRequest, BacktestResponse,
   HealthStatus, DiagnosticsResponse,
@@ -110,12 +110,14 @@ export const fetchUniverse = () =>
 export const updateUniverse = (body: Partial<UniverseConfigResponse>) =>
   api.put<UniverseConfigResponse>('/api/universe/', body).then(r => r.data)
 
-// Backtest — no cache (user-triggered)
+// Backtest — no cache (user-triggered), now an async background task
 export const runBacktest = (params: BacktestRequest) =>
-  api.post<BacktestResponse>('/api/backtest/run', params).then(r => r.data)
+  api.post<{ task_id: string; status: string; message: string }>('/api/backtest/run', params).then(r => r.data)
 
 export const getBacktestStatus = (taskId: string) =>
-  api.get(`/api/backtest/status/${taskId}`).then(r => r.data)
+  api.get<{ task_id: string; status: string; progress: Record<string, unknown>; error: string | null; elapsed_seconds: number }>(
+    `/api/backtest/status/${taskId}`,
+  ).then(r => r.data)
 
 export const getBacktestResult = (taskId: string) =>
   api.get<BacktestResponse>(`/api/backtest/result/${taskId}`).then(r => r.data)

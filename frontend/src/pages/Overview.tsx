@@ -1,15 +1,14 @@
 import { useState } from 'react'
 import {
   TrendingUp, TrendingDown, Activity, Shield, AlertTriangle,
-  RefreshCw, Play, Square, Zap, Wifi, WifiOff, CheckCircle, XCircle
+  RefreshCw, Play, Square, Zap, Wifi, WifiOff
 } from 'lucide-react'
 import { fetchOverview } from '../api/endpoints'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { usePolling } from '../hooks/usePolling'
 import MetricCard from '../components/MetricCard'
-import StatusBadge from '../components/StatusBadge'
 import { formatCurrency, formatPercent, formatR, formatTime, formatDuration, pnlColor } from '../utils/formatters'
-import type { OverviewData } from '../types'
+import type { OverviewData, Position } from '../types'
 import api from '../api/client'
 import toast from 'react-hot-toast'
 
@@ -311,7 +310,7 @@ export default function Overview() {
                 </tr>
               </thead>
               <tbody>
-                {positions.map((pos: any) => {
+                {positions.map((pos: Position) => {
                   const ep = pos.entry_price ?? pos.average_price ?? 0
                   const livePrice = prices[pos.symbol]?.ltp ?? pos.current_price ?? ep
                   const livePnl = (livePrice - ep) * pos.quantity

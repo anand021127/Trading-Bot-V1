@@ -75,48 +75,80 @@ class SignalResult:
 
 
 class BotState:
-    """Thread-safe bot running state."""
-    _running = False
-    _kill_switch = False
-    _start_time: Optional[datetime] = None
-    _stop_reason: str = ""
+    """Bot running state — persisted to the shared SQLite DB, NOT just an
+    in-process class attribute.
+
+    Root cause this fixes: this project runs as TWO separate OS processes
+    on Render (the web API and a standalone `backend/worker.py` process
+    that actually runs the trading loop). Each process has its own Python
+    memory space, so a plain in-process class attribute here would mean
+    the dashboard's Start/Stop/Kill controls (hitting the web process)
+    have zero effect on the worker process actually placing trades — and
+    the dashboard would show whatever the WEB process's own independent
+    copy of this state happens to be, not the worker's. Persisting to the
+    DB on Render's shared disk (/data) makes both processes agree.
+    """
+    _db: Any = None  # lazily-constructed shared DatabaseManager
+
+    _KEY_RUNNING = "bot_state_running"
+    _KEY_KILL = "bot_state_kill_switch"
+    _KEY_START_TIME = "bot_state_start_time"
+    _KEY_STOP_REASON = "bot_state_stop_reason"
+
+    @classmethod
+    def _get_db(cls) -> Any:
+        if cls._db is None:
+            from backend.database.db_manager import DatabaseManager
+            cls._db = DatabaseManager(db_path=settings.database.path)
+        return cls._db
 
     @classmethod
     def start(cls) -> None:
-        cls._running = True
-        cls._kill_switch = False
-        cls._start_time = datetime.now(timezone.utc)
-        cls._stop_reason = ""
+        db = cls._get_db()
+        db.save_setting(cls._KEY_RUNNING, "true")
+        db.save_setting(cls._KEY_KILL, "false")
+        db.save_setting(cls._KEY_START_TIME, datetime.now(timezone.utc).isoformat())
+        db.save_setting(cls._KEY_STOP_REASON, "")
 
     @classmethod
     def stop(cls, reason: str = "Manual stop") -> None:
-        cls._running = False
-        cls._stop_reason = reason
+        db = cls._get_db()
+        db.save_setting(cls._KEY_RUNNING, "false")
+        db.save_setting(cls._KEY_STOP_REASON, reason)
 
     @classmethod
     def kill(cls, reason: str = "Emergency kill switch") -> None:
-        cls._kill_switch = True
-        cls._running = False
-        cls._stop_reason = reason
+        db = cls._get_db()
+        db.save_setting(cls._KEY_KILL, "true")
+        db.save_setting(cls._KEY_RUNNING, "false")
+        db.save_setting(cls._KEY_STOP_REASON, reason)
         TradeLogger.log_critical("BotState", f"KILL SWITCH ACTIVATED: {reason}")
 
     @classmethod
     def reset_kill(cls) -> None:
-        cls._kill_switch = False
+        cls._get_db().save_setting(cls._KEY_KILL, "false")
 
     @classmethod
     def is_running(cls) -> bool:
-        return cls._running and not cls._kill_switch
+        db = cls._get_db()
+        running = db.get_setting(cls._KEY_RUNNING, "false") == "true"
+        killed = db.get_setting(cls._KEY_KILL, "false") == "true"
+        return running and not killed
 
     @classmethod
     def status(cls) -> Dict[str, Any]:
+        db = cls._get_db()
+        running = db.get_setting(cls._KEY_RUNNING, "false") == "true"
+        killed = db.get_setting(cls._KEY_KILL, "false") == "true"
+        start_time_raw = db.get_setting(cls._KEY_START_TIME, "")
+        start_time = datetime.fromisoformat(start_time_raw) if start_time_raw else None
         return {
-            "running": cls._running,
-            "kill_switch_active": cls._kill_switch,
-            "start_time": cls._start_time.isoformat() if cls._start_time else None,
-            "stop_reason": cls._stop_reason,
-            "uptime_seconds": int((datetime.now(timezone.utc) - cls._start_time).total_seconds())
-            if cls._start_time and cls._running else 0,
+            "running": running,
+            "kill_switch_active": killed,
+            "start_time": start_time_raw or None,
+            "stop_reason": db.get_setting(cls._KEY_STOP_REASON, ""),
+            "uptime_seconds": int((datetime.now(timezone.utc) - start_time).total_seconds())
+            if start_time and running else 0,
         }
 
 
@@ -978,7 +1010,14 @@ class TradingEngine:
                     self._daily_floor_taken = False
                     self._best_of_day = None
 
-                await asyncio.sleep(300)  # 5-minute candle interval
+                # Sleep in short chunks rather than one 300s block, so a
+                # Stop/Kill from the dashboard takes effect within a few
+                # seconds instead of up to 5 minutes — the loop condition
+                # is only re-checked once per full sleep otherwise.
+                for _ in range(60):  # 60 x 5s = 300s total, same overall cadence
+                    if not BotState.is_running():
+                        break
+                    await asyncio.sleep(5)
 
             except Exception as e:
                 TradeLogger.log_error("TradingEngine.run_trading_session", e)

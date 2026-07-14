@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -84,6 +85,7 @@ class LiveScanner:
         self.seconds_between_symbols = seconds_between_symbols
 
         self._results: Dict[str, ScannerEntry] = {}
+        self._results_lock = threading.Lock()
         self.currently_scanning: Optional[str] = None
         self.is_running: bool = False
         self.last_full_pass_completed_at: Optional[str] = None
@@ -121,7 +123,8 @@ class LiveScanner:
         except Exception as e:
             entry.error = str(e)
             entry.decision = f"ERROR — {e}"
-            self._results[symbol] = entry
+            with self._results_lock:
+                self._results[symbol] = entry
             return entry
 
         entry.strategy_breakdown = [s.to_dict() for s in signals]
@@ -157,7 +160,8 @@ class LiveScanner:
                 reason for s in signals for reason in s.rejected_reasons
             ]
 
-        self._results[symbol] = entry
+        with self._results_lock:
+            self._results[symbol] = entry
         return entry
 
     def scan_once(self) -> List[ScannerEntry]:
@@ -208,13 +212,16 @@ class LiveScanner:
     # ── status for the dashboard ──────────────────────────────────────────
 
     def status_report(self) -> Dict[str, Any]:
+        with self._results_lock:
+            results_snapshot = list(self._results.values())
         return {
             "is_running": self.is_running,
             "currently_scanning": self.currently_scanning,
             "last_full_pass_completed_at": self.last_full_pass_completed_at,
             "watching_count": len(self.universe_resolver()),
-            "results": [e.to_dict() for e in self._results.values()],
+            "results": [e.to_dict() for e in results_snapshot],
         }
 
     def get_result(self, symbol: str) -> Optional[ScannerEntry]:
-        return self._results.get(symbol)
+        with self._results_lock:
+            return self._results.get(symbol)

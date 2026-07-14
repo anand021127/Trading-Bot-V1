@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import axios from 'axios'
 import { Play, BarChart2, RefreshCw, AlertTriangle, Info } from 'lucide-react'
-import { runBacktest } from '../api/endpoints'
+import { runBacktest, getBacktestStatus, getBacktestResult } from '../api/endpoints'
 import { formatCurrency, pnlColor } from '../utils/formatters'
 import type { BacktestResponse } from '../types'
 
@@ -48,22 +49,54 @@ export default function Backtest() {
   const toggleSymbol = (sym: string) =>
     setSelectedSymbols(prev => prev.includes(sym) ? prev.filter(s => s !== sym) : [...prev, sym])
 
+  const [progress, setProgress] = useState<{ phase?: string; symbol?: string; symbol_index?: number; total_symbols?: number; bar_index?: number; total_bars?: number; symbols_fetched?: number } | null>(null)
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => { if (pollRef.current) clearTimeout(pollRef.current) }, [])
+
   const handleRun = async () => {
     if (selectedSymbols.length === 0) { setError('Select at least one symbol.'); return }
-    setRunning(true); setError(null); setResult(null)
+    setRunning(true); setError(null); setResult(null); setProgress(null)
     try {
-      const res = await runBacktest({
+      const start = await runBacktest({
         start_date: startDate, end_date: endDate,
         capital: Number(capital), symbols: selectedSymbols,
         interval, strategies: strategyParam(strategy),
       })
-      setResult(res)
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail
+      pollTask(start.task_id)
+    } catch (e: unknown) {
+      const detail = axios.isAxiosError(e) ? e.response?.data?.detail : undefined
       setError(typeof detail === 'string' ? detail : (e instanceof Error ? e.message : 'Backtest failed.'))
-    } finally {
       setRunning(false)
     }
+  }
+
+  const pollTask = (taskId: string) => {
+    const tick = async () => {
+      try {
+        const status = await getBacktestStatus(taskId)
+        if (status.status === 'completed') {
+          const finalResult = await getBacktestResult(taskId)
+          setResult(finalResult)
+          setRunning(false)
+          setProgress(null)
+          return
+        }
+        if (status.status === 'failed') {
+          setError(status.error || 'Backtest failed.')
+          setRunning(false)
+          setProgress(null)
+          return
+        }
+        setProgress(status.progress ?? null)
+        pollRef.current = setTimeout(tick, 1000)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Lost connection while polling backtest progress.')
+        setRunning(false)
+        setProgress(null)
+      }
+    }
+    tick()
   }
 
   const r = result
@@ -209,6 +242,20 @@ export default function Backtest() {
           {running ? <><RefreshCw size={14} className="animate-spin" /> Running backtest...</>
                    : <><Play size={14} /> Run Backtest</>}
         </button>
+
+        {running && progress && (
+          <div className="text-xs text-slate-400 bg-[#0f1628] border border-[#1e2d45] rounded-lg p-3">
+            {progress.phase === 'fetching_data' && (
+              <span>Fetching real historical data — {progress.symbols_fetched ?? 0}/{progress.total_symbols ?? '?'} symbols done...</span>
+            )}
+            {progress.phase === 'processing' && (
+              <span>
+                Processing {progress.symbol} ({progress.symbol_index}/{progress.total_symbols}) —
+                bar {progress.bar_index}/{progress.total_bars}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Results */}
