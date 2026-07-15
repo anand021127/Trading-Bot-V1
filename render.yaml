@@ -1,9 +1,33 @@
 services:
+  # Consolidated to a single service. The trading loop used to run in a
+  # SEPARATE "worker" service (backend/worker.py) as its own OS process.
+  # That was the root cause of a real bug: bot status (BotState) lived
+  # independently in each process's memory, so Start/Stop/Kill on the
+  # dashboard (this service) had no effect on whether the OTHER process
+  # actually traded. The trading loop now runs as an in-process background
+  # task inside this same web service (backend/api/main.py's lifespan) —
+  # one process, one BotState, no cross-process sync needed. This also
+  # means you now only pay for one service instead of two.
+  #
+  # IMPORTANT — plan must be a PAID tier, not "free":
+  #   1. Free web services spin down after ~15 min of no HTTP traffic,
+  #      killing this process (and every in-memory thing it's doing —
+  #      the WebSocket feed, the scanner, the trading loop) mid-session.
+  #   2. Free web services CANNOT attach a persistent disk at all
+  #      (https://render.com/docs/free) — the `disk:` block below is
+  #      silently non-functional on a free plan, meaning your saved
+  #      Upstox token, universe config, and trade history get wiped on
+  #      every restart. This is why a token "generated an hour ago" can
+  #      already look invalid — the process holding it may have already
+  #      cycled.
+  #   Render's Starter tier ($7/mo at time of writing) removes both
+  #   limitations. There is no way to fix this from application code —
+  #   it's a hosting-tier limitation, not a bug.
   - type: web
     name: upstox-bot-api
     env: python
     region: singapore
-    plan: free
+    plan: starter
     rootDir: .
     buildCommand: pip install -r backend/requirements.txt
     startCommand: uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT
@@ -32,35 +56,11 @@ services:
       - key: SECRET_KEY
         sync: false
 
-  - type: worker
-    name: upstox-bot-worker
-    env: python
-    region: singapore
-    plan: free
-    rootDir: .
-    buildCommand: pip install -r backend/requirements.txt
-    startCommand: python -m backend.worker
-    autoDeploy: true
-    disk:
-      name: bot-data
-      mountPath: /data
-      sizeGB: 1
-    envVars:
-      - key: UPSTOX_CLIENT_ID
-        sync: false
-      - key: UPSTOX_CLIENT_SECRET
-        sync: false
-      - key: UPSTOX_REDIRECT_URI
-        sync: false
-      - key: UPSTOX_ACCESS_TOKEN
-        sync: false
-      - key: EMAIL_PASSWORD
-        sync: false
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_CHAT_ID
-        sync: false
-      - key: FRONTEND_URL
-        sync: false
-      - key: SECRET_KEY
-        sync: false
+# backend/worker.py is still present and still works standalone if you
+# ever want to split load back out into a separate service (e.g. running
+# heavy backtests on their own compute so they can't affect the live
+# trading loop's responsiveness) — it is simply no longer REQUIRED for
+# the bot to function correctly. If you do reintroduce it as a second
+# service, remember: BotState is DB-backed specifically so two processes
+# can agree, but that only works if they share the SAME persistent disk,
+# which again requires both services to be on a paid plan.

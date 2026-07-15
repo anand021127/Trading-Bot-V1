@@ -917,6 +917,34 @@ class TradingEngine:
             )
         return trade_id
 
+    async def run_forever(self, poll_interval_seconds: float = 10.0) -> None:
+        """Wrapper around `run_trading_session()` for a long-lived background
+        task (whether that's this same web process or a standalone worker).
+
+        `run_trading_session()`'s own loop condition is `while
+        BotState.is_running():` — if the bot isn't started yet (the normal
+        state right after boot, before anyone's clicked Start), it returns
+        almost immediately, having done nothing. Calling it once, directly,
+        as the background task would mean the task quietly finishes at
+        boot and NEVER comes back even after the user clicks Start later.
+        This wrapper polls BotState and re-enters `run_trading_session()`
+        every time it becomes active, for as long as the process runs.
+        """
+        logger.info("Trading supervisor started — waiting for Start via the dashboard")
+        while True:
+            if BotState.is_running():
+                logger.info("BotState is running — entering trading session")
+                try:
+                    await self.run_trading_session()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.exception("Trading session crashed, retrying after backoff: %s", e)
+                    await asyncio.sleep(30)
+                logger.info("Trading session ended — back to waiting for Start")
+            else:
+                await asyncio.sleep(poll_interval_seconds)
+
     async def run_trading_session(self) -> None:
         """Main async trading loop — runs during market hours.
 

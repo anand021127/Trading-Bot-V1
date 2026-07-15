@@ -1,6 +1,7 @@
 """FastAPI application — production Upstox trading bot backend."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import sys
@@ -121,8 +122,36 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[WARN] Could not start live scanner: {e}")
 
+    # Trading loop — runs in-process as a background task, same pattern as
+    # the scanner above. This used to require a SEPARATE Render worker
+    # service (backend/worker.py) running as its own OS process. On
+    # Render's free tier that meant paying for two spin-down-prone
+    # services instead of one, AND it was the root cause of a real bug:
+    # BotState lived independently in each process's memory, so
+    # Start/Stop/Kill on the dashboard (this process) had no effect on
+    # whether the OTHER process actually traded. Running it here instead
+    # means there is only ever one process, one BotState, one truth — the
+    # DB-backed BotState from the previous fix is kept as a safety net
+    # (still lets a genuinely separate worker.py be run manually if
+    # someone wants to split load later), but nothing requires it anymore.
+    #
+    # backend/worker.py is left in place and still works standalone if you
+    # explicitly want a separate process — it is simply no longer required
+    # for the bot to function correctly on a single Render service.
+    app.state.trading_task = None
+    try:
+        if app.state.engine is not None and settings.mode in ("paper", "live"):
+            app.state.trading_task = asyncio.create_task(app.state.engine.run_forever())
+    except Exception as e:
+        print(f"[WARN] Could not start in-process trading loop: {e}")
+
     yield
     # Graceful shutdown
+    if getattr(app.state, "trading_task", None) is not None:
+        try:
+            app.state.trading_task.cancel()
+        except Exception:
+            pass
     if getattr(app.state, "scanner", None) is not None:
         try:
             app.state.scanner.stop()

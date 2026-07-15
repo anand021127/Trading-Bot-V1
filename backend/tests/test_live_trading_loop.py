@@ -13,9 +13,25 @@ import tempfile
 import uuid
 from unittest.mock import patch
 
+import pytest
+
 from backend.database.db_manager import DatabaseManager
 from backend.strategy.signal import StrategySignal, SignalType
-from backend.strategy.trading_engine import TradingEngine
+from backend.strategy.trading_engine import TradingEngine, BotState
+
+
+@pytest.fixture(autouse=True)
+def isolated_botstate_db():
+    """Point BotState at a fresh temp-file DB for each test in this file,
+    so tests calling BotState.start()/stop() don't leak into the shared
+    default DB used by the rest of the app/tests."""
+    path = f"{tempfile.gettempdir()}/test_live_loop_botstate_{uuid.uuid4().hex}.db"
+    db = DatabaseManager(db_path=path)
+    db.init_db()
+    original = BotState._db
+    BotState._db = db
+    yield
+    BotState._db = original
 
 
 def _isolated_engine() -> TradingEngine:
@@ -129,6 +145,45 @@ class TestResolveWatchlist:
         with patch("backend.config.universe_config.load_universe_config", side_effect=RuntimeError("boom")):
             watchlist = engine._resolve_watchlist()
         assert len(watchlist) > 0  # never returns an empty scan list on error
+
+
+class TestRunForever:
+    def test_does_not_enter_trading_session_while_not_running(self) -> None:
+        """Regression test for a real bug: calling run_trading_session()
+        directly as a background task meant it returned almost instantly
+        (its own loop condition is 'while BotState.is_running()') and
+        never came back even after a later Start — the task just quietly
+        finished at boot. run_forever() must keep polling instead."""
+        engine = _isolated_engine()
+        call_count = {"n": 0}
+
+        async def fake_session():
+            call_count["n"] += 1
+
+        async def cancel_sleep(*a, **kw):
+            raise asyncio.CancelledError
+
+        with patch.object(engine, "run_trading_session", side_effect=fake_session), \
+             patch("asyncio.sleep", side_effect=cancel_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                asyncio.run(engine.run_forever())
+
+        assert call_count["n"] == 0  # never entered — bot was never started
+
+    def test_enters_trading_session_once_running(self) -> None:
+        engine = _isolated_engine()
+        BotState.start()
+        call_count = {"n": 0}
+
+        async def fake_session():
+            call_count["n"] += 1
+            raise asyncio.CancelledError  # stop the run_forever loop after one entry
+
+        with patch.object(engine, "run_trading_session", side_effect=fake_session):
+            with pytest.raises(asyncio.CancelledError):
+                asyncio.run(engine.run_forever())
+
+        assert call_count["n"] == 1
 
 
 class TestDailyFloorTrade:

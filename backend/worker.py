@@ -1,6 +1,19 @@
-"""Background worker entry point for Render.
+"""Background worker entry point for Render — OPTIONAL, not required.
 
-Runs the trading engine loop independently of the API server.
+The trading loop now runs in-process as a background task inside the web
+service itself (see backend/api/main.py's lifespan), the same way the
+live scanner does. That fixed a real bug: running the trading loop here,
+as a genuinely separate OS process, meant this process's BotState was
+independent of the web process's — Start/Stop/Kill on the dashboard had
+no effect on whether this process actually traded.
+
+This file still works if you deliberately want to split load back out
+into a second Render service later (e.g. to isolate heavy backtests from
+the live trading loop's responsiveness). If you do, remember BotState is
+DB-backed specifically so two processes can agree on it — but that only
+works if both services share the same persistent disk, which requires
+both to be on a paid Render plan (free services can't attach disks at
+all: https://render.com/docs/free).
 """
 from __future__ import annotations
 
@@ -61,18 +74,7 @@ async def main() -> None:
             while True:
                 await asyncio.sleep(60)
 
-        poll_interval_seconds = 10
-        while True:
-            if BotState.is_running():
-                logger.info("BotState is running — entering trading session")
-                try:
-                    await engine.run_trading_session()
-                except Exception as e:
-                    logger.exception("Trading session crashed, will retry after backoff: %s", e)
-                    await asyncio.sleep(30)
-                logger.info("Trading session ended — back to waiting for Start")
-            else:
-                await asyncio.sleep(poll_interval_seconds)
+        await engine.run_forever()
 
     except ImportError as e:
         logger.error("Import error in worker: %s — running heartbeat only", e)
