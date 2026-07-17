@@ -48,6 +48,43 @@ def _sharp_downtrend_candles(n: int = 150) -> List[Dict[str, Any]]:
 
 
 class TestBacktestEngine:
+    def test_position_size_never_exceeds_available_capital(self) -> None:
+        """Regression test for the exact bug reported in production: ORB
+        selected on a symbol with a very tight opening range produces a
+        tiny risk_per_share, and risk-based sizing alone has no upper
+        bound — it can size a position worth many times the account,
+        turning one adverse move into a "full capital lost" result. This
+        is what was happening; the fix caps position value at equity."""
+        def bar(ts, o, h, l, c, v):
+            return {"timestamp": ts, "open": o, "high": h, "low": l, "close": c, "volume": v}
+
+        candles = []
+        # Extremely tight opening range: high=100.05, low=100.00.
+        for m in range(15):
+            candles.append(bar(f"2026-01-01T09:{15+m:02d}:00", 100.02, 100.05, 100.00, 100.03, 500))
+        # Breakout bar just above the tiny range, with volume — risk_per_share
+        # will be ~0.10 against a >100 entry price, which would otherwise
+        # size a position worth 10x+ the account.
+        candles.append(bar("2026-01-01T09:30:00", 100.03, 100.15, 100.02, 100.12, 3000))
+        for m in range(60):
+            candles.append(bar(f"2026-01-01T09:{31+m:02d}:00", 100.12, 100.20, 100.05, 100.15, 1000))
+
+        engine = BacktestEngine(capital=100_000, min_candles_required=15, risk_pct_per_trade=0.01)
+        result = engine.run({"TEST": candles}, strategy_names=["ORB"])
+
+        for trade in result.trade_log:
+            position_value = trade["entry_price"] * trade["quantity"]
+            assert position_value <= 100_000 * 1.001  # tiny rounding slack, never a multiple of equity
+
+    def test_unaffordable_signal_is_skipped_not_forced(self) -> None:
+        """With near-zero capital, even 1 share may be unaffordable —
+        must skip the entry rather than force a position anyway."""
+        engine = BacktestEngine(capital=1.0, min_candles_required=60, risk_pct_per_trade=0.01)
+        result = engine.run({"HDFCBANK": _uptrend_candles(150)})
+        for trade in result.trade_log:
+            assert trade["entry_price"] * trade["quantity"] <= 1.0 * 1.5  # essentially never affordable here
+
+
     def test_processes_full_history_and_generates_multiple_trades(self) -> None:
         """The old bug produced ~2 trades/year regardless of data. A 150-bar
         real uptrend should produce several, not a token amount."""
@@ -78,13 +115,45 @@ class TestBacktestEngine:
         assert all(r["reasons"] for r in result.rejected_signals_sample)
 
     def test_losing_trade_is_recorded_honestly(self) -> None:
+        """A position with NO favorable excursion before reversing must
+        still be recorded as a real loss — verified at the exit-logic
+        level directly, since end-to-end fixture timing (when EMA_TREND
+        actually enters) is sensitive to the exact candle sequence and
+        the trailing-stop improvement means any real prior uptrend before
+        a crash can legitimately convert what used to be a loss into a
+        locked-in profit (that's the fix working, not a bug — see
+        test_sharp_reversal_with_prior_uptrend_locks_in_profit_via_trailing_stop)."""
+        engine = BacktestEngine(min_candles_required=60)
+        position = {
+            "strategy": "EMA_TREND", "entry_price": 107.5, "stop_loss": 105.0,
+            "trailing_stop": 105.0, "target": 200.0, "quantity": 100, "confidence": 80.0,
+        }
+        # Very next bar after entry crashes straight through the stop —
+        # no favorable move ever happened to ratchet the trailing stop up.
+        bar = {"timestamp": "bar-0001", "open": 106.0, "high": 106.5, "low": 103.0, "close": 103.5, "volume": 1000}
+
+        reason = engine._check_exit(position, bar, window=[bar])
+        assert reason == "STOP_LOSS_HIT"
+
+        exit_price = engine._exit_price_for(position, bar, reason)
+        costs = engine.costs.apply(position["entry_price"], exit_price, position["quantity"])
+        assert costs["net_pnl"] < 0
+
+    def test_sharp_reversal_with_prior_uptrend_locks_in_profit_via_trailing_stop(self) -> None:
+        """This is the actual behavior change from adding trailing-stop
+        parity with live trading: a position that ran up for a while
+        before reversing now exits with a locked-in gain instead of
+        round-tripping all the way back down to the original fixed stop
+        — a real improvement, not a regression."""
         engine = BacktestEngine(min_candles_required=60)
         result = engine.run({"HDFCBANK": _sharp_downtrend_candles(150)})
 
         assert result.trades_taken >= 1
-        assert result.losing_trades >= 1
-        assert any(t["exit_reason"] == "STOP_LOSS_HIT" for t in result.trade_log)
-        assert result.net_profit < 0
+        trade = result.trade_log[0]
+        assert trade["exit_reason"] in ("TRAILING_STOP_HIT", "STOP_LOSS_HIT")
+        # The prior uptrend before the crash means this should lock in a
+        # real gain via the trailing stop, not the old fixed-stop loss.
+        assert trade["net_pnl"] > 0
 
     def test_accuracy_and_profit_factor_computed_from_real_trades(self) -> None:
         engine = BacktestEngine(min_candles_required=60)

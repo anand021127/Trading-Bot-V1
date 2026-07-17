@@ -57,4 +57,16 @@ async def update_universe(body: Dict[str, Any]) -> Dict[str, Any]:
         "saved": True,
         **merged.to_dict(),
         "resolved_symbols": merged.resolve_symbols(),
+        # These three were missing from the PUT response while GET / had
+        # them — the frontend's UniverseSection reads them unconditionally
+        # on every render (e.g. `universe.valid_option_indices.map(...)`),
+        # and replaces its whole state with whatever this endpoint returns
+        # after a save. Omitting them here meant selecting OPTIONS mode
+        # crashed the entire app with an uncaught "Cannot read properties
+        # of undefined (reading 'map')" — no error boundary catches that,
+        # so the page just went blank until a manual refresh re-fetched
+        # the complete shape from GET.
+        "valid_modes": list(VALID_MODES),
+        "valid_option_indices": list(VALID_OPTION_INDICES),
+        "nifty50_constituents": NIFTY50_SYMBOLS,
     }

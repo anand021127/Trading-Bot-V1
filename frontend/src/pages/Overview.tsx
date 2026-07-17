@@ -216,8 +216,8 @@ export default function Overview() {
             val: sys?.api_health ?? 'unknown',
           },
           {
-            label: 'Watching', ok: (data?.universe?.watching_count ?? 0) > 0,
-            val: `${data?.universe?.watching_count ?? 0} symbols (${data?.universe?.mode ?? 'STOCKS'})`,
+            label: 'Configured Universe', ok: (data?.universe?.watching_count ?? 0) > 0 && (data?.scanner?.is_running ?? false),
+            val: `${data?.universe?.watching_count ?? 0} symbols (${data?.universe?.mode ?? 'STOCKS'})${data?.scanner?.is_running ? '' : ' — scanner stopped'}`,
           },
           {
             label: 'Scanner', ok: data?.scanner?.is_running ?? false,

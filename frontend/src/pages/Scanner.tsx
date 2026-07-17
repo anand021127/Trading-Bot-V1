@@ -26,7 +26,7 @@ function ScannerRow({ entry }: { entry: ScannerEntry }) {
         onClick={() => setExpanded(e => !e)}
         className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
       >
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-3 min-w-0 flex-shrink-0">
           <div className="text-sm font-semibold text-white w-20 flex-shrink-0">{entry.symbol}</div>
           <div className="text-xs text-slate-400 w-20 flex-shrink-0">{entry.ltp != null ? formatCurrency(entry.ltp) : '—'}</div>
           <div className="flex items-center gap-3 flex-shrink-0">
@@ -44,13 +44,17 @@ function ScannerRow({ entry }: { entry: ScannerEntry }) {
             </div>
           </div>
         </div>
-        <div className={`text-xs font-medium truncate ml-2 ${isBuy ? 'text-emerald-400' : entry.error ? 'text-red-400' : 'text-slate-500'}`}>
+        <div className={`flex-1 min-w-0 text-xs font-medium truncate text-right ml-2 ${isBuy ? 'text-emerald-400' : entry.error ? 'text-red-400' : 'text-slate-500'}`}
+          title={entry.error ? `ERROR — ${entry.error}` : entry.decision}>
           {entry.error ? `ERROR — ${entry.error}` : entry.decision}
         </div>
       </button>
 
       {expanded && (
         <div className="border-t border-[#1e2d45] px-4 py-3 space-y-2">
+          {!entry.error && (
+            <div className="text-[11px] text-slate-400 mb-2">{entry.decision}</div>
+          )}
           {entry.strategy_breakdown.map(s => (
             <div key={s.strategy_name} className="text-xs">
               <div className="flex items-center justify-between">
@@ -106,6 +110,17 @@ export default function Scanner() {
   const results = data?.results ?? []
   const buySignals = results.filter(r => r.signal === 'BUY').length
 
+  const lastPassAgo = data?.last_full_pass_completed_at
+    ? (Date.now() - new Date(data.last_full_pass_completed_at).getTime()) / 1000
+    : null
+  // A full pass over the whole watchlist takes roughly
+  // (watching_count x 3s) — flag results as stale once we're well past
+  // that, since that means the scanner likely isn't actually completing
+  // cycles (e.g. broker disconnected) and what's shown below may be from
+  // before that happened, not a live read right now.
+  const expectedCycleSeconds = Math.max(30, (data?.watching_count ?? 20) * 3 * 2)
+  const isStale = lastPassAgo !== null && lastPassAgo > expectedCycleSeconds
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -122,6 +137,17 @@ export default function Scanner() {
           Scan Now
         </button>
       </div>
+
+      {isStale && results.length > 0 && (
+        <div className="flex items-start gap-2 bg-amber-950/20 border border-amber-800/40 rounded-lg p-3 text-xs text-amber-300">
+          <AlertTriangle size={13} className="flex-shrink-0 mt-0.5" />
+          <div>
+            Results below are from {Math.round((lastPassAgo ?? 0) / 60)} min ago — the scanner hasn't
+            completed a fresh pass recently. This usually means the bot lost its connection (check
+            Settings → Broker Connection Status) rather than these being live right now.
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         {[

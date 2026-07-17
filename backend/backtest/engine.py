@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from backend.strategy.exit_manager import TrailingStopManager
 from backend.strategy.strategy_engine import MultiStrategyEngine
 from backend.strategy.signal import StrategySignal
 
@@ -149,6 +150,7 @@ class BacktestEngine:
     ) -> None:
         self.strategy_engine = strategy_engine or MultiStrategyEngine()
         self.costs = costs or CostConfig()
+        self.trailing_stop_manager = TrailingStopManager()
         self.capital = capital
         self.risk_pct_per_trade = risk_pct_per_trade
         self.min_candles_required = min_candles_required
@@ -267,11 +269,31 @@ class BacktestEngine:
                     if risk_per_share > 0:
                         risk_amount = equity * self.risk_pct_per_trade
                         qty = max(1, int(risk_amount / risk_per_share))
+
+                        # Safety cap: risk-based sizing alone has no upper
+                        # bound. If a strategy's stop-loss lands very close
+                        # to its entry price (a tight ORB range is the
+                        # common case — EMA_TREND's ATR-based stop is much
+                        # less prone to this), risk_per_share can be tiny,
+                        # making qty explode into a position worth many
+                        # times the entire account — an unrealistic, un-
+                        # affordable trade that isn't margin-financed here.
+                        # This is what was causing "full capital lost" on
+                        # ORB specifically. Cap the position's notional
+                        # value at the available equity, same as a real
+                        # account without margin would enforce.
+                        max_affordable_qty = int(equity / best.entry_price) if best.entry_price > 0 else 0
+                        if max_affordable_qty < 1:
+                            position = None
+                            continue
+                        qty = min(qty, max_affordable_qty)
+
                         position = {
                             "strategy": best.strategy_name,
                             "entry_time": bar.get("timestamp", ""),
                             "entry_price": best.entry_price,
                             "stop_loss": best.stop_loss,
+                            "trailing_stop": best.stop_loss,
                             "target": best.target,
                             "quantity": qty,
                             "confidence": best.confidence,
@@ -340,8 +362,29 @@ class BacktestEngine:
     def _check_exit(
         self, position: Dict[str, Any], bar: Dict[str, Any], window: List[Dict[str, Any]],
     ) -> Optional[str]:
-        if bar["low"] <= position["stop_loss"]:
-            return "STOP_LOSS_HIT"
+        # Ratchet the trailing stop using the best price reached this bar
+        # (the high, for a long position) — same logic live trading uses.
+        # This is what lets a trade that ran to +1.5R and pulled back exit
+        # with a locked-in gain instead of round-tripping all the way back
+        # to the original stop, which is what a fixed-stop-only backtest
+        # (the previous version of this engine) would have done.
+        trail = self.trailing_stop_manager.compute(
+            entry_price=position["entry_price"],
+            initial_stop=position["stop_loss"],
+            current_price=bar["high"],
+            current_stop=position.get("trailing_stop", position["stop_loss"]),
+        )
+        position["trailing_stop"] = trail["stop"]
+
+        if bar["low"] <= position["trailing_stop"]:
+            # Label from whether the stop has actually moved from its
+            # original value — not from trail["stage"], which is
+            # recomputed fresh from THIS bar's price alone and forgets
+            # that an earlier, more favorable bar already ratcheted the
+            # floor upward. Using stage directly mislabeled profitable
+            # trailing-stop exits as "STOP_LOSS_HIT" whenever the price
+            # had since pulled back before this exit bar.
+            return "TRAILING_STOP_HIT" if position["trailing_stop"] > position["stop_loss"] else "STOP_LOSS_HIT"
         if position["target"] > 0 and bar["high"] >= position["target"]:
             return "TARGET_HIT"
         strat_exit = self.strategy_engine.check_exits(
@@ -353,8 +396,8 @@ class BacktestEngine:
 
     @staticmethod
     def _exit_price_for(position: Dict[str, Any], bar: Dict[str, Any], reason: str) -> float:
-        if reason == "STOP_LOSS_HIT":
-            return min(position["stop_loss"], bar["high"])
+        if reason in ("STOP_LOSS_HIT", "TRAILING_STOP_HIT"):
+            return min(position["trailing_stop"], bar["high"])
         if reason == "TARGET_HIT":
             return max(position["target"], bar["low"])
         return bar["close"]

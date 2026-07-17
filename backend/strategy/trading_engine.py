@@ -841,7 +841,10 @@ class TradingEngine:
 
             exit_reason: Optional[str] = None
             if current_price <= pos["trailing_stop"]:
-                exit_reason = "STOP_LOSS_HIT" if trail["stage"] == 0 else "TRAILING_STOP_HIT"
+                # Same fix as the backtest engine: label from whether the
+                # stop actually moved, not from this bar's freshly-
+                # recomputed stage (which forgets earlier ratcheting).
+                exit_reason = "TRAILING_STOP_HIT" if pos["trailing_stop"] > pos["stop_loss"] else "STOP_LOSS_HIT"
             elif pos.get("target", 0) > 0 and current_price >= pos["target"]:
                 exit_reason = "TARGET_HIT"
             else:

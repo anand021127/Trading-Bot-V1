@@ -72,7 +72,10 @@ function UniverseSection() {
     setSaving(true)
     try {
       const updated = await updateUniverse({ ...universe, ...patch })
-      setUniverse(updated)
+      // Merge rather than replace: never let an incomplete response wipe
+      // out fields the render depends on (this exact gap used to crash
+      // the whole page with no error boundary to catch it).
+      setUniverse(prev => prev ? { ...prev, ...updated } : updated)
       toast.success('Universe updated — bot will only scan these instruments')
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Failed to update universe')
