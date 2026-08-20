@@ -1,0 +1,21 @@
+name: Deploy to Render (template)
+
+# This workflow template demonstrates how to trigger a deploy to Render
+# using the Render API. It is a template and will only run if you add
+# `RENDER_SERVICE_ID` and `RENDER_API_KEY` to your repository secrets.
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    if: ${{ secrets.RENDER_API_KEY && secrets.RENDER_SERVICE_ID }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render Deploy
+        run: |
+          curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"clearCache":false}'

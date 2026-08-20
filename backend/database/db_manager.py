@@ -1,0 +1,436 @@
+"""Production SQLite database manager for the Upstox trading bot."""
+from __future__ import annotations
+
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from backend.database.models import PerformanceSnapshot, Position, Trade
+
+
+class AttributeRow(sqlite3.Row):
+    """SQLite row that supports both mapping and legacy attribute access."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except IndexError as exc:
+            raise AttributeError(name) from exc
+
+
+class DatabaseManager:
+    """Handle all storage for trades, positions, and performance data."""
+
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        self.db_path = db_path or str(Path("/data") / "trading_bot.db")
+        self._mem_conn: Optional[sqlite3.Connection] = None
+        if self.db_path == ":memory:":
+            self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self._mem_conn.row_factory = AttributeRow
+            self._mem_conn.execute("PRAGMA foreign_keys = ON")
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    # ─── Connection ───────────────────────────────────────────────────────────
+
+    def _connect(self) -> sqlite3.Connection:
+        if self.db_path == ":memory:" and self._mem_conn is not None:
+            return self._mem_conn
+        else:
+            db_path = Path(self.db_path)
+            if not db_path.is_absolute():
+                db_path = Path.cwd() / db_path
+            parent = db_path.parent
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+            except (PermissionError, OSError):
+                db_path = Path.cwd() / db_path.name
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
+            conn.row_factory = AttributeRow
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA journal_mode = WAL")
+            return conn
+
+    # ─── Schema ───────────────────────────────────────────────────────────────
+
+    def init_db(self) -> None:
+        """Create all tables if they do not already exist."""
+        with self._connect() as conn:
+            # Legacy trades table (simple — used by original tests)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    price REAL NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    strategy TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'filled',
+                    pnl REAL,
+                    notes TEXT NOT NULL DEFAULT '',
+                    mode TEXT DEFAULT 'paper',
+                    entry_time TEXT,
+                    exit_time TEXT,
+                    entry_price REAL,
+                    exit_price REAL,
+                    initial_stop REAL,
+                    final_stop REAL,
+                    exit_reason TEXT,
+                    gross_pnl REAL,
+                    net_pnl REAL,
+                    brokerage REAL,
+                    stt REAL,
+                    pnl_r REAL,
+                    trade_duration_min INTEGER,
+                    stage_at_exit INTEGER,
+                    orb_high REAL,
+                    orb_low REAL,
+                    atr_at_entry REAL,
+                    rsi_at_entry REAL,
+                    choppiness_at_entry REAL,
+                    volume_ratio REAL,
+                    ema20_at_entry REAL,
+                    ema50_at_entry REAL,
+                    trend_bias TEXT,
+                    max_favorable REAL,
+                    max_adverse REAL,
+                    conditions_checked TEXT,
+                    created_at TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    symbol TEXT PRIMARY KEY,
+                    quantity INTEGER NOT NULL,
+                    average_price REAL NOT NULL,
+                    entry_time TEXT NOT NULL,
+                    side TEXT NOT NULL DEFAULT 'long',
+                    unrealized_pnl REAL NOT NULL DEFAULT 0.0,
+                    initial_stop REAL,
+                    trailing_stop REAL,
+                    stage INTEGER DEFAULT 1,
+                    trade_id TEXT,
+                    mode TEXT DEFAULT 'paper'
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS performance_snapshots (
+                    date TEXT PRIMARY KEY,
+                    net_pnl REAL NOT NULL,
+                    trades_count INTEGER NOT NULL,
+                    win_rate REAL NOT NULL,
+                    equity REAL NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS api_test_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    test_name TEXT,
+                    status TEXT,
+                    response_time_ms REAL,
+                    error_message TEXT,
+                    tested_at TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS option_chain_snapshots (
+                    id TEXT PRIMARY KEY,
+                    underlying TEXT NOT NULL,
+                    expiry TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    spot REAL,
+                    pcr REAL,
+                    max_pain REAL,
+                    payload TEXT NOT NULL DEFAULT '{}'
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS strategies (
+                    name TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    parameters TEXT NOT NULL DEFAULT '{}'
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS backtests (
+                    id TEXT PRIMARY KEY,
+                    strategy TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    result TEXT NOT NULL DEFAULT '{}'
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS logs (
+                    id TEXT PRIMARY KEY,
+                    level TEXT NOT NULL,
+                    logger TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            # Existing deployments may have been created by an earlier schema
+            # version. SQLite CREATE TABLE IF NOT EXISTS does not add columns,
+            # so migrate the small set of fields used by current option trades.
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
+            migrations = {
+                "mode": "TEXT DEFAULT 'paper'",
+                "entry_time": "TEXT",
+                "exit_time": "TEXT",
+                "entry_price": "REAL",
+                "exit_price": "REAL",
+                "net_pnl": "REAL",
+                "exit_reason": "TEXT",
+            }
+            for column, definition in migrations.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE trades ADD COLUMN {column} {definition}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_mode ON trades(mode)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
+            conn.commit()
+
+    # ─── Trades ───────────────────────────────────────────────────────────────
+
+    def insert_trade(self, trade: Trade) -> None:
+        """Insert a trade record."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO trades
+                   (id, symbol, side, quantity, price, timestamp, strategy, status, pnl, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    trade.id, trade.symbol, trade.side, trade.quantity,
+                    trade.price, trade.timestamp.isoformat(),
+                    trade.strategy, trade.status, trade.pnl, trade.notes,
+                ),
+            )
+            conn.commit()
+
+    def list_trades(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        symbol: Optional[str] = None,
+        mode: Optional[str] = None,
+        exit_reason: Optional[str] = None,
+    ) -> List[Any]:
+        """List trades with optional filters. Returns sqlite3.Row objects."""
+        clauses = []
+        params: List[Any] = []
+
+        if date_from:
+            clauses.append("(entry_time >= ? OR timestamp >= ?)")
+            params.extend([date_from, date_from])
+        if date_to:
+            clauses.append("(entry_time <= ? OR timestamp <= ?)")
+            params.extend([date_to + "T23:59:59", date_to + "T23:59:59"])
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol.upper())
+        if mode:
+            clauses.append("mode = ?")
+            params.append(mode)
+        if exit_reason:
+            clauses.append("exit_reason = ?")
+            params.append(exit_reason)
+
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        sql = f"SELECT * FROM trades {where} ORDER BY COALESCE(entry_time, timestamp) DESC"
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return rows
+
+    def get_trade(self, trade_id: str) -> Optional[Any]:
+        """Get a single trade by ID."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
+        return row
+
+    # ─── Positions ────────────────────────────────────────────────────────────
+
+    def upsert_position(self, position: Position) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO positions
+                   (symbol, quantity, average_price, entry_time, side, unrealized_pnl)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(symbol) DO UPDATE SET
+                       quantity=excluded.quantity,
+                       average_price=excluded.average_price,
+                       entry_time=excluded.entry_time,
+                       side=excluded.side,
+                       unrealized_pnl=excluded.unrealized_pnl""",
+                (
+                    position.symbol, position.quantity, position.average_price,
+                    position.entry_time.isoformat(), position.side, position.unrealized_pnl,
+                ),
+            )
+            conn.commit()
+
+    def list_positions(self) -> List[Any]:
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM positions ORDER BY symbol").fetchall()
+
+    def get_open_positions(self) -> List[Position]:
+        """Fetch all currently open positions as Position model instances."""
+        rows = self.list_positions()
+        positions: List[Position] = []
+        for r in rows:
+            entry_time = r["entry_time"]
+            if isinstance(entry_time, str):
+                try:
+                    entry_time = datetime.fromisoformat(entry_time)
+                except Exception:
+                    entry_time = self._now()
+            positions.append(
+                Position(
+                    symbol=r["symbol"],
+                    quantity=r["quantity"],
+                    average_price=r["average_price"],
+                    entry_time=entry_time,
+                    side=r["side"] if "side" in r.keys() else "long",
+                    unrealized_pnl=r["unrealized_pnl"] if "unrealized_pnl" in r.keys() else 0.0,
+                )
+            )
+        return positions
+
+    def delete_position(self, symbol: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
+            conn.commit()
+
+    # ─── Performance ──────────────────────────────────────────────────────────
+
+    def save_performance_snapshot(self, snapshot: PerformanceSnapshot) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO performance_snapshots
+                   (date, net_pnl, trades_count, win_rate, equity, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(date) DO UPDATE SET
+                       net_pnl=excluded.net_pnl, trades_count=excluded.trades_count,
+                       win_rate=excluded.win_rate, equity=excluded.equity,
+                       created_at=excluded.created_at""",
+                (
+                    snapshot.date, snapshot.net_pnl, snapshot.trades_count,
+                    snapshot.win_rate, snapshot.equity, snapshot.created_at.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def list_performance_snapshots(self) -> List[Any]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM performance_snapshots ORDER BY date"
+            ).fetchall()
+
+    # ─── App settings (persistent across restarts) ────────────────────────────
+
+    def save_setting(self, key: str, value: str) -> None:
+        """Persist a key-value setting to SQLite."""
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                """INSERT INTO app_settings (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                       value=excluded.value, updated_at=excluded.updated_at""",
+                (key, value, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        """Read a persisted setting value."""
+        try:
+            with self._connect() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS app_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+                row = conn.execute(
+                    "SELECT value FROM app_settings WHERE key = ?", (key,)
+                ).fetchone()
+                return row[0] if row else default
+        except Exception:
+            return default
+
+    def save_settings_blob(self, settings_dict: dict) -> None:
+        """Save entire settings dict as JSON blob."""
+        import json
+        self.save_setting("__settings_blob__", json.dumps(settings_dict))
+
+    def load_settings_blob(self) -> Optional[dict]:
+        """Load settings dict from DB. Returns None if not saved yet."""
+        import json
+        raw = self.get_setting("__settings_blob__", "")
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    def save_token(self, token: str) -> None:
+        """Persist access token to DB and JSON file (survives process restart)."""
+        clean_token = token.strip()
+        self.save_setting("upstox_access_token", clean_token)
+        import json
+        payload = {
+            "access_token": clean_token,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "source": "oauth_callback"
+        }
+        paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
+        if self.db_path and self.db_path != ":memory:":
+            custom_dir = Path(self.db_path).parent
+            if custom_dir != Path.cwd() and custom_dir != Path("/data"):
+                paths = [str(custom_dir / "upstox_token.json")]
+        for p in paths:
+            try:
+                parent = Path(p).parent
+                parent.mkdir(parents=True, exist_ok=True)
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+            except Exception:
+                pass
+
+    def load_token(self) -> str:
+        """Load access token from DB or fallback JSON file."""
+        val = self.get_setting("upstox_access_token", "")
+        if val and val.strip():
+            return val.strip()
+        import json
+        paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
+        if self.db_path and self.db_path != ":memory:":
+            custom_dir = Path(self.db_path).parent
+            if custom_dir != Path.cwd() and custom_dir != Path("/data"):
+                paths = [str(custom_dir / "upstox_token.json")]
+        for p in paths:
+            try:
+                if os.path.exists(p):
+                    with open(p, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                        token = d.get("access_token", "")
+                        if token and token.strip():
+                            return token.strip()
+            except Exception:
+                pass
+        return ""

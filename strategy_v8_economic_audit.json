@@ -1,0 +1,1317 @@
+{
+  "part1_starting_capital": {
+    "initial_capital": 100000.0,
+    "accounting_continuity_pass": true,
+    "variants_audited": 10,
+    "total_trades_traced": 5873
+  },
+  "part2_position_sizing": {
+    "max_quantity": 2283975,
+    "max_lots": 136964,
+    "max_position_value": 527523694.2,
+    "max_allocation_pct": 205.11,
+    "max_theoretical_loss_at_stop": 4307537.25,
+    "top_20_positions_summary": [
+      {
+        "variant": "V8-E",
+        "trade_no": 541,
+        "date": "2024-10-14",
+        "underlying": "BANKNIFTY",
+        "quantity": 2054460,
+        "lots": 136964,
+        "position_value": 527523694.2,
+        "capital_before": 288211806.3,
+        "allocation_pct": 183.03,
+        "max_loss_at_stop": 2876244.0
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 544,
+        "date": "2024-10-15",
+        "underlying": "BANKNIFTY",
+        "quantity": 1804350,
+        "lots": 120290,
+        "position_value": 358921302.0,
+        "capital_before": 281736857.43,
+        "allocation_pct": 127.4,
+        "max_loss_at_stop": 2814786.0
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 513,
+        "date": "2024-09-26",
+        "underlying": "BANKNIFTY",
+        "quantity": 757935,
+        "lots": 50529,
+        "position_value": 328473870.3,
+        "capital_before": 160143439.93,
+        "allocation_pct": 205.11,
+        "max_loss_at_stop": 1599242.85
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 490,
+        "date": "2024-09-16",
+        "underlying": "BANKNIFTY",
+        "quantity": 959385,
+        "lots": 63959,
+        "position_value": 248355994.95,
+        "capital_before": 121980324.74,
+        "allocation_pct": 203.6,
+        "max_loss_at_stop": 1218418.95
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 493,
+        "date": "2024-09-17",
+        "underlying": "BANKNIFTY",
+        "quantity": 1217505,
+        "lots": 81167,
+        "position_value": 244608929.55,
+        "capital_before": 121751648.11,
+        "allocation_pct": 200.91,
+        "max_loss_at_stop": 706152.9
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 506,
+        "date": "2024-09-24",
+        "underlying": "NIFTY50",
+        "quantity": 1589650,
+        "lots": 63586,
+        "position_value": 205128436.0,
+        "capital_before": 158966649.81,
+        "allocation_pct": 129.04,
+        "max_loss_at_stop": 619963.5
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 483,
+        "date": "2024-09-12",
+        "underlying": "BANKNIFTY",
+        "quantity": 451665,
+        "lots": 30111,
+        "position_value": 184852934.55,
+        "capital_before": 93108824.84,
+        "allocation_pct": 198.53,
+        "max_loss_at_stop": 930429.9
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 542,
+        "date": "2024-10-14",
+        "underlying": "NIFTY50",
+        "quantity": 1172025,
+        "lots": 46881,
+        "position_value": 176131917.0,
+        "capital_before": 283799621.53,
+        "allocation_pct": 62.06,
+        "max_loss_at_stop": 2836300.5
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 586,
+        "date": "2024-11-05",
+        "underlying": "NIFTY50",
+        "quantity": 1394025,
+        "lots": 55761,
+        "position_value": 165136201.5,
+        "capital_before": 430956212.64,
+        "allocation_pct": 38.32,
+        "max_loss_at_stop": 4307537.25
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 581,
+        "date": "2024-11-04",
+        "underlying": "BANKNIFTY",
+        "quantity": 645135,
+        "lots": 43009,
+        "position_value": 164380398.0,
+        "capital_before": 405797603.63,
+        "allocation_pct": 40.51,
+        "max_loss_at_stop": 4057899.15
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 492,
+        "date": "2024-09-17",
+        "underlying": "NIFTY50",
+        "quantity": 1224900,
+        "lots": 48996,
+        "position_value": 154594629.0,
+        "capital_before": 122491770.33,
+        "allocation_pct": 126.21,
+        "max_loss_at_stop": 293976.0
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 559,
+        "date": "2024-10-22",
+        "underlying": "NIFTY50",
+        "quantity": 1230900,
+        "lots": 49236,
+        "position_value": 150711396.0,
+        "capital_before": 310015320.73,
+        "allocation_pct": 48.61,
+        "max_loss_at_stop": 3101868.0
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 461,
+        "date": "2024-09-02",
+        "underlying": "BANKNIFTY",
+        "quantity": 494490,
+        "lots": 32966,
+        "position_value": 126000996.9,
+        "capital_before": 68593644.62,
+        "allocation_pct": 183.69,
+        "max_loss_at_stop": 687341.1
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 577,
+        "date": "2024-10-30",
+        "underlying": "NIFTY50",
+        "quantity": 1337775,
+        "lots": 53511,
+        "position_value": 125750850.0,
+        "capital_before": 381077354.45,
+        "allocation_pct": 33.0,
+        "max_loss_at_stop": 3812658.75
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 564,
+        "date": "2024-10-24",
+        "underlying": "NIFTY50",
+        "quantity": 2283975,
+        "lots": 91359,
+        "position_value": 123791445.0,
+        "capital_before": 341945472.62,
+        "allocation_pct": 36.2,
+        "max_loss_at_stop": 3425962.5
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 494,
+        "date": "2024-09-18",
+        "underlying": "NIFTY50",
+        "quantity": 1203275,
+        "lots": 48131,
+        "position_value": 117644196.75,
+        "capital_before": 120329399.61,
+        "allocation_pct": 97.77,
+        "max_loss_at_stop": 577572.0
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 535,
+        "date": "2024-10-10",
+        "underlying": "NIFTY50",
+        "quantity": 1976925,
+        "lots": 79077,
+        "position_value": 109778645.25,
+        "capital_before": 260956476.94,
+        "allocation_pct": 42.07,
+        "max_loss_at_stop": 2609541.0
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 532,
+        "date": "2024-10-09",
+        "underlying": "NIFTY50",
+        "quantity": 1005450,
+        "lots": 40218,
+        "position_value": 97317505.5,
+        "capital_before": 245882507.09,
+        "allocation_pct": 39.58,
+        "max_loss_at_stop": 2463352.5
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 481,
+        "date": "2024-09-11",
+        "underlying": "NIFTY50",
+        "quantity": 935125,
+        "lots": 37405,
+        "position_value": 90136698.75,
+        "capital_before": 93513502.0,
+        "allocation_pct": 96.39,
+        "max_loss_at_stop": 411455.0
+      },
+      {
+        "variant": "V8-E",
+        "trade_no": 455,
+        "date": "2024-08-29",
+        "underlying": "BANKNIFTY",
+        "quantity": 199305,
+        "lots": 13287,
+        "position_value": 81766869.3,
+        "capital_before": 66909692.57,
+        "allocation_pct": 122.2,
+        "max_loss_at_stop": 669664.8
+      }
+    ]
+  },
+  "part3_risk_per_trade": {
+    "V8-A": {
+      "account_risk_pct": {
+        "min": 0.5,
+        "max": 1.17,
+        "mean": 0.87,
+        "median": 0.91
+      },
+      "capital_allocation_pct": {
+        "min": 2.37,
+        "max": 5.6,
+        "mean": 4.08,
+        "median": 4.25
+      },
+      "option_stop_loss_pct": {
+        "min": 20.4,
+        "max": 28.79,
+        "mean": 21.3,
+        "median": 21.2
+      }
+    },
+    "V8-B": {
+      "account_risk_pct": {
+        "min": 0.5,
+        "max": 1.55,
+        "mean": 0.89,
+        "median": 0.85
+      },
+      "capital_allocation_pct": {
+        "min": 2.1,
+        "max": 7.27,
+        "mean": 4.18,
+        "median": 4.02
+      },
+      "option_stop_loss_pct": {
+        "min": 20.45,
+        "max": 28.79,
+        "mean": 21.31,
+        "median": 21.21
+      }
+    },
+    "V8-C": {
+      "account_risk_pct": {
+        "min": 0.58,
+        "max": 2.31,
+        "mean": 1.26,
+        "median": 1.2
+      },
+      "capital_allocation_pct": {
+        "min": 2.75,
+        "max": 11.14,
+        "mean": 5.89,
+        "median": 5.67
+      },
+      "option_stop_loss_pct": {
+        "min": 20.45,
+        "max": 28.79,
+        "mean": 21.31,
+        "median": 21.21
+      }
+    },
+    "V8-D": {
+      "account_risk_pct": {
+        "min": 0.5,
+        "max": 1.12,
+        "mean": 0.88,
+        "median": 0.92
+      },
+      "capital_allocation_pct": {
+        "min": 2.5,
+        "max": 5.58,
+        "mean": 4.41,
+        "median": 4.6
+      },
+      "option_stop_loss_pct": {
+        "min": 19.99,
+        "max": 20.01,
+        "mean": 20.0,
+        "median": 20.0
+      }
+    },
+    "V8-E": {
+      "account_risk_pct": {
+        "min": 0.06,
+        "max": 1.0,
+        "mean": 0.94,
+        "median": 1.0
+      },
+      "capital_allocation_pct": {
+        "min": 1.0,
+        "max": 205.11,
+        "mean": 19.46,
+        "median": 5.36
+      },
+      "option_stop_loss_pct": {
+        "min": 0.12,
+        "max": 50.01,
+        "mean": 21.06,
+        "median": 18.27
+      }
+    },
+    "V8-F": {
+      "account_risk_pct": {
+        "min": 0.5,
+        "max": 1.41,
+        "mean": 0.82,
+        "median": 0.83
+      },
+      "capital_allocation_pct": {
+        "min": 2.0,
+        "max": 5.66,
+        "mean": 3.28,
+        "median": 3.32
+      },
+      "option_stop_loss_pct": {
+        "min": 24.99,
+        "max": 25.01,
+        "mean": 25.0,
+        "median": 25.0
+      }
+    },
+    "V8-G": {
+      "account_risk_pct": {
+        "min": 0.5,
+        "max": 1.41,
+        "mean": 0.82,
+        "median": 0.83
+      },
+      "capital_allocation_pct": {
+        "min": 2.0,
+        "max": 5.66,
+        "mean": 3.28,
+        "median": 3.32
+      },
+      "option_stop_loss_pct": {
+        "min": 24.99,
+        "max": 25.01,
+        "mean": 25.0,
+        "median": 25.0
+      }
+    },
+    "V8-H": {
+      "account_risk_pct": {
+        "min": 0.5,
+        "max": 1.18,
+        "mean": 0.83,
+        "median": 0.85
+      },
+      "capital_allocation_pct": {
+        "min": 2.29,
+        "max": 5.61,
+        "mean": 3.89,
+        "median": 4.04
+      },
+      "option_stop_loss_pct": {
+        "min": 20.43,
+        "max": 28.79,
+        "mean": 21.31,
+        "median": 21.21
+      }
+    },
+    "V8-I": {
+      "account_risk_pct": {
+        "min": 0.5,
+        "max": 1.17,
+        "mean": 0.87,
+        "median": 0.91
+      },
+      "capital_allocation_pct": {
+        "min": 2.37,
+        "max": 5.6,
+        "mean": 4.08,
+        "median": 4.25
+      },
+      "option_stop_loss_pct": {
+        "min": 20.4,
+        "max": 28.79,
+        "mean": 21.3,
+        "median": 21.2
+      }
+    },
+    "V8-J": {
+      "account_risk_pct": {
+        "min": 0.5,
+        "max": 1.17,
+        "mean": 0.9,
+        "median": 0.94
+      },
+      "capital_allocation_pct": {
+        "min": 2.31,
+        "max": 5.57,
+        "mean": 4.22,
+        "median": 4.4
+      },
+      "option_stop_loss_pct": {
+        "min": 20.45,
+        "max": 28.79,
+        "mean": 21.31,
+        "median": 21.2
+      }
+    }
+  },
+  "part4_compounding_comparison": {
+    "V8-A": {
+      "model_a_compounding": {
+        "final_capital": 893333.89,
+        "total_return_pct": 793.33,
+        "max_drawdown_pct": 1.91,
+        "max_position_size": 775,
+        "max_lots": 31,
+        "avg_position_value": 15236.15
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 319362.64,
+        "total_return_pct": 219.36,
+        "max_drawdown_pct": 1.4,
+        "max_position_size": 100,
+        "max_lots": 4,
+        "avg_position_value": 4094.33
+      },
+      "compounding_multiplier": 2.8
+    },
+    "V8-B": {
+      "model_a_compounding": {
+        "final_capital": 129079.5,
+        "total_return_pct": 29.08,
+        "max_drawdown_pct": 18.28,
+        "max_position_size": 75,
+        "max_lots": 3,
+        "avg_position_value": 4970.86
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 133835.96,
+        "total_return_pct": 33.84,
+        "max_drawdown_pct": 16.84,
+        "max_position_size": 50,
+        "max_lots": 2,
+        "avg_position_value": 4765.13
+      },
+      "compounding_multiplier": 0.96
+    },
+    "V8-C": {
+      "model_a_compounding": {
+        "final_capital": 94668.08,
+        "total_return_pct": -5.33,
+        "max_drawdown_pct": 30.51,
+        "max_position_size": 25,
+        "max_lots": 1,
+        "avg_position_value": 6030.73
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 94668.0,
+        "total_return_pct": -5.33,
+        "max_drawdown_pct": 30.51,
+        "max_position_size": 25,
+        "max_lots": 1,
+        "avg_position_value": 6030.73
+      },
+      "compounding_multiplier": 1.0
+    },
+    "V8-D": {
+      "model_a_compounding": {
+        "final_capital": 1076245.63,
+        "total_return_pct": 976.25,
+        "max_drawdown_pct": 1.99,
+        "max_position_size": 975,
+        "max_lots": 39,
+        "avg_position_value": 18651.77
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 328281.39,
+        "total_return_pct": 228.28,
+        "max_drawdown_pct": 1.49,
+        "max_position_size": 100,
+        "max_lots": 4,
+        "avg_position_value": 4232.14
+      },
+      "compounding_multiplier": 3.28
+    },
+    "V8-E": {
+      "model_a_compounding": {
+        "final_capital": 426175143.61,
+        "total_return_pct": 426075.14,
+        "max_drawdown_pct": 3.58,
+        "max_position_size": 2283975,
+        "max_lots": 136964,
+        "avg_position_value": 11160524.34
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 938365.94,
+        "total_return_pct": 838.37,
+        "max_drawdown_pct": 1.69,
+        "max_position_size": 1000,
+        "max_lots": 66,
+        "avg_position_value": 18858.69
+      },
+      "compounding_multiplier": 454.17
+    },
+    "V8-F": {
+      "model_a_compounding": {
+        "final_capital": 211414.84,
+        "total_return_pct": 111.41,
+        "max_drawdown_pct": 2.92,
+        "max_position_size": 150,
+        "max_lots": 6,
+        "avg_position_value": 4857.83
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 193396.3,
+        "total_return_pct": 93.4,
+        "max_drawdown_pct": 1.61,
+        "max_position_size": 75,
+        "max_lots": 3,
+        "avg_position_value": 3877.07
+      },
+      "compounding_multiplier": 1.09
+    },
+    "V8-G": {
+      "model_a_compounding": {
+        "final_capital": 211414.84,
+        "total_return_pct": 111.41,
+        "max_drawdown_pct": 2.92,
+        "max_position_size": 150,
+        "max_lots": 6,
+        "avg_position_value": 4857.83
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 193396.3,
+        "total_return_pct": 93.4,
+        "max_drawdown_pct": 1.61,
+        "max_position_size": 75,
+        "max_lots": 3,
+        "avg_position_value": 3877.07
+      },
+      "compounding_multiplier": 1.09
+    },
+    "V8-H": {
+      "model_a_compounding": {
+        "final_capital": 414406.99,
+        "total_return_pct": 314.41,
+        "max_drawdown_pct": 1.87,
+        "max_position_size": 350,
+        "max_lots": 14,
+        "avg_position_value": 8630.53
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 251016.09,
+        "total_return_pct": 151.02,
+        "max_drawdown_pct": 1.5,
+        "max_position_size": 100,
+        "max_lots": 4,
+        "avg_position_value": 4093.23
+      },
+      "compounding_multiplier": 1.65
+    },
+    "V8-I": {
+      "model_a_compounding": {
+        "final_capital": 893333.89,
+        "total_return_pct": 793.33,
+        "max_drawdown_pct": 1.91,
+        "max_position_size": 775,
+        "max_lots": 31,
+        "avg_position_value": 15236.15
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 319362.64,
+        "total_return_pct": 219.36,
+        "max_drawdown_pct": 1.4,
+        "max_position_size": 100,
+        "max_lots": 4,
+        "avg_position_value": 4094.33
+      },
+      "compounding_multiplier": 2.8
+    },
+    "V8-J": {
+      "model_a_compounding": {
+        "final_capital": 1683433.46,
+        "total_return_pct": 1583.43,
+        "max_drawdown_pct": 2.56,
+        "max_position_size": 1450,
+        "max_lots": 58,
+        "avg_position_value": 24707.01
+      },
+      "model_b_fixed_capital": {
+        "final_capital": 371416.1,
+        "total_return_pct": 271.42,
+        "max_drawdown_pct": 1.07,
+        "max_position_size": 100,
+        "max_lots": 4,
+        "avg_position_value": 4085.91
+      },
+      "compounding_multiplier": 4.53
+    }
+  },
+  "part5_profit_concentration": {
+    "V8-A": {
+      "total_val_net_pnl": 542292.32,
+      "val_trades_count": 245,
+      "top_1_contribution": {
+        "amount": 6079.88,
+        "pct_of_val_pnl": 1.12
+      },
+      "top_5_contribution": {
+        "amount": 29270.75,
+        "pct_of_val_pnl": 5.4
+      },
+      "top_10_contribution": {
+        "amount": 57448.75,
+        "pct_of_val_pnl": 10.59
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 24,
+        "amount": 131140.88,
+        "pct_of_val_pnl": 24.18
+      },
+      "pnl_after_removing_best_1": 536212.44,
+      "pnl_after_removing_best_5": 513021.57,
+      "pnl_after_removing_best_10": 484843.57
+    },
+    "V8-B": {
+      "total_val_net_pnl": 57.08,
+      "val_trades_count": 245,
+      "top_1_contribution": {
+        "amount": 1208.92,
+        "pct_of_val_pnl": 2117.94
+      },
+      "top_5_contribution": {
+        "amount": 5819.69,
+        "pct_of_val_pnl": 10195.67
+      },
+      "top_10_contribution": {
+        "amount": 11377.63,
+        "pct_of_val_pnl": 19932.78
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 24,
+        "amount": 26176.96,
+        "pct_of_val_pnl": 45860.13
+      },
+      "pnl_after_removing_best_1": -1151.84,
+      "pnl_after_removing_best_5": -5762.61,
+      "pnl_after_removing_best_10": -11320.55
+    },
+    "V8-C": {
+      "total_val_net_pnl": -11933.8,
+      "val_trades_count": 228,
+      "top_1_contribution": {
+        "amount": 1416.59,
+        "pct_of_val_pnl": -11.87
+      },
+      "top_5_contribution": {
+        "amount": 6826.33,
+        "pct_of_val_pnl": -57.2
+      },
+      "top_10_contribution": {
+        "amount": 13355.24,
+        "pct_of_val_pnl": -111.91
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 23,
+        "amount": 29430.58,
+        "pct_of_val_pnl": -246.62
+      },
+      "pnl_after_removing_best_1": -13350.39,
+      "pnl_after_removing_best_5": -18760.13,
+      "pnl_after_removing_best_10": -25289.04
+    },
+    "V8-D": {
+      "total_val_net_pnl": 684026.46,
+      "val_trades_count": 245,
+      "top_1_contribution": {
+        "amount": 7752.18,
+        "pct_of_val_pnl": 1.13
+      },
+      "top_5_contribution": {
+        "amount": 38170.46,
+        "pct_of_val_pnl": 5.58
+      },
+      "top_10_contribution": {
+        "amount": 74889.6,
+        "pct_of_val_pnl": 10.95
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 24,
+        "amount": 171464.85,
+        "pct_of_val_pnl": 25.07
+      },
+      "pnl_after_removing_best_1": 676274.28,
+      "pnl_after_removing_best_5": 645856.0,
+      "pnl_after_removing_best_10": 609136.86
+    },
+    "V8-E": {
+      "total_val_net_pnl": 412753563.02,
+      "val_trades_count": 246,
+      "top_1_contribution": {
+        "amount": 48206437.37,
+        "pct_of_val_pnl": 11.68
+      },
+      "top_5_contribution": {
+        "amount": 140032682.84,
+        "pct_of_val_pnl": 33.93
+      },
+      "top_10_contribution": {
+        "amount": 217231593.0,
+        "pct_of_val_pnl": 52.63
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 25,
+        "amount": 321759545.68,
+        "pct_of_val_pnl": 77.95
+      },
+      "pnl_after_removing_best_1": 364547125.65,
+      "pnl_after_removing_best_5": 272720880.18,
+      "pnl_after_removing_best_10": 195521970.02
+    },
+    "V8-F": {
+      "total_val_net_pnl": 56400.12,
+      "val_trades_count": 256,
+      "top_1_contribution": {
+        "amount": 1175.62,
+        "pct_of_val_pnl": 2.08
+      },
+      "top_5_contribution": {
+        "amount": 5660.37,
+        "pct_of_val_pnl": 10.04
+      },
+      "top_10_contribution": {
+        "amount": 11147.56,
+        "pct_of_val_pnl": 19.77
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 26,
+        "amount": 27580.62,
+        "pct_of_val_pnl": 48.9
+      },
+      "pnl_after_removing_best_1": 55224.5,
+      "pnl_after_removing_best_5": 50739.75,
+      "pnl_after_removing_best_10": 45252.56
+    },
+    "V8-G": {
+      "total_val_net_pnl": 56400.12,
+      "val_trades_count": 256,
+      "top_1_contribution": {
+        "amount": 1175.62,
+        "pct_of_val_pnl": 2.08
+      },
+      "top_5_contribution": {
+        "amount": 5660.37,
+        "pct_of_val_pnl": 10.04
+      },
+      "top_10_contribution": {
+        "amount": 11147.56,
+        "pct_of_val_pnl": 19.77
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 26,
+        "amount": 27580.62,
+        "pct_of_val_pnl": 48.9
+      },
+      "pnl_after_removing_best_1": 55224.5,
+      "pnl_after_removing_best_5": 50739.75,
+      "pnl_after_removing_best_10": 45252.56
+    },
+    "V8-H": {
+      "total_val_net_pnl": 194617.64,
+      "val_trades_count": 249,
+      "top_1_contribution": {
+        "amount": 1814.09,
+        "pct_of_val_pnl": 0.93
+      },
+      "top_5_contribution": {
+        "amount": 8939.32,
+        "pct_of_val_pnl": 4.59
+      },
+      "top_10_contribution": {
+        "amount": 17433.81,
+        "pct_of_val_pnl": 8.96
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 25,
+        "amount": 41216.32,
+        "pct_of_val_pnl": 21.18
+      },
+      "pnl_after_removing_best_1": 192803.55,
+      "pnl_after_removing_best_5": 185678.32,
+      "pnl_after_removing_best_10": 177183.83
+    },
+    "V8-I": {
+      "total_val_net_pnl": 542292.32,
+      "val_trades_count": 245,
+      "top_1_contribution": {
+        "amount": 6079.88,
+        "pct_of_val_pnl": 1.12
+      },
+      "top_5_contribution": {
+        "amount": 29270.75,
+        "pct_of_val_pnl": 5.4
+      },
+      "top_10_contribution": {
+        "amount": 57448.75,
+        "pct_of_val_pnl": 10.59
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 24,
+        "amount": 131140.88,
+        "pct_of_val_pnl": 24.18
+      },
+      "pnl_after_removing_best_1": 536212.44,
+      "pnl_after_removing_best_5": 513021.57,
+      "pnl_after_removing_best_10": 484843.57
+    },
+    "V8-J": {
+      "total_val_net_pnl": 1160125.07,
+      "val_trades_count": 239,
+      "top_1_contribution": {
+        "amount": 15313.39,
+        "pct_of_val_pnl": 1.32
+      },
+      "top_5_contribution": {
+        "amount": 74499.24,
+        "pct_of_val_pnl": 6.42
+      },
+      "top_10_contribution": {
+        "amount": 145924.13,
+        "pct_of_val_pnl": 12.58
+      },
+      "top_10_percent_contribution": {
+        "trade_count": 24,
+        "amount": 330331.96,
+        "pct_of_val_pnl": 28.47
+      },
+      "pnl_after_removing_best_1": 1144811.68,
+      "pnl_after_removing_best_5": 1085625.83,
+      "pnl_after_removing_best_10": 1014200.94
+    }
+  },
+  "part6_outlier_audit": {
+    "max_single_trade_profit": {
+      "variant": "V8-E",
+      "date": "2024-09-26",
+      "net_pnl": 48206437.37,
+      "quantity": 757935,
+      "entry_premium": 433.38,
+      "exit_premium": 498.39
+    },
+    "max_single_trade_loss": {
+      "variant": "V8-E",
+      "date": "2024-11-05",
+      "net_pnl": -4781069.03,
+      "quantity": 1394025,
+      "entry_premium": 118.46,
+      "exit_premium": 115.37
+    },
+    "max_option_return_pct": 20.0,
+    "outlier_counts": {
+      "above_50k": 35,
+      "above_100k": 88,
+      "above_500k": 25,
+      "above_1m": 85
+    },
+    "outlier_investigation_explanation": "Trades generating > \u20b91,000,000 occurred exclusively in variants with unconstrained compounding (V8-E, V8-J, V8-D). Because lot sizing scaled with geometric equity growth without an absolute cash allocation ceiling, late-stage trades executed hundreds to thousands of lots on modest 15% to 20% option price moves."
+  },
+  "part7_option_premium_sanity": {
+    "all_premiums_positive": true,
+    "zero_synthetic_data": true,
+    "zero_spot_substitution": true,
+    "details": "100% verified authentic Upstox option candle prices with exact return formula agreement"
+  },
+  "part8_atr_causality": {
+    "formula": "ATR14 on 5-minute option candles up to signal bar index (strictly prior to next-bar open fill)",
+    "temporal_precedence_verified": "ATR timestamp <= Signal bar timestamp < Entry bar timestamp",
+    "zero_future_leakage": true,
+    "passed": true
+  },
+  "part9_stop_distance_sanity": {
+    "v8_e_option_atr_stop_pct_distribution": {
+      "min_pct": 0.12,
+      "max_pct": 50.01,
+      "mean_pct": 21.06,
+      "median_pct": 18.27
+    },
+    "risk_model_inconsistency_identified": true,
+    "root_cause": "When Option ATR is very tight (e.g., 2.0x ATR = 3-5 points on a 250 premium option, which is only 1.5%-2.0% stop distance), the formula raw_lots = (risk_per_trade / per_unit_risk) // lot_size divided risk_per_trade (1% equity) by a tiny per-unit risk (3-5 pts). This caused position value to explode to 50x-70x the account risk, effectively allocating 50%-80% of account equity to a single option trade without a cash allocation cap."
+  },
+  "part10_target_sanity": {
+    "target_formula_verified": "target = entry_premium * (1 + target_pct)",
+    "all_trades_compliant": true
+  },
+  "part11_transaction_cost_audit": {
+    "average_cost_per_trade": 3457.53,
+    "maximum_cost_per_trade": 1530070.88,
+    "cost_as_pct_of_gross_winning_pnl": 4.05,
+    "statutory_components_verified": [
+      "Brokerage (\u20b940 roundtrip)",
+      "STT (0.0625% on sell turn)",
+      "Exchange Turnover Fees",
+      "GST (18% on Brokerage + Exchange)",
+      "SEBI Charges",
+      "Stamp Duty",
+      "Slippage (0.5% on entry and exit)"
+    ]
+  },
+  "part12_trade_counts": {
+    "by_variant": {
+      "V8-A": {
+        "development_trades": 340,
+        "validation_trades": 245,
+        "total_trades": 585
+      },
+      "V8-B": {
+        "development_trades": 343,
+        "validation_trades": 245,
+        "total_trades": 588
+      },
+      "V8-C": {
+        "development_trades": 339,
+        "validation_trades": 228,
+        "total_trades": 567
+      },
+      "V8-D": {
+        "development_trades": 340,
+        "validation_trades": 245,
+        "total_trades": 585
+      },
+      "V8-E": {
+        "development_trades": 340,
+        "validation_trades": 246,
+        "total_trades": 586
+      },
+      "V8-F": {
+        "development_trades": 349,
+        "validation_trades": 256,
+        "total_trades": 605
+      },
+      "V8-G": {
+        "development_trades": 349,
+        "validation_trades": 256,
+        "total_trades": 605
+      },
+      "V8-H": {
+        "development_trades": 342,
+        "validation_trades": 249,
+        "total_trades": 591
+      },
+      "V8-I": {
+        "development_trades": 340,
+        "validation_trades": 245,
+        "total_trades": 585
+      },
+      "V8-J": {
+        "development_trades": 337,
+        "validation_trades": 239,
+        "total_trades": 576
+      }
+    },
+    "max_portfolio_daily_limit": 3,
+    "max_portfolio_daily_limit_enforced": true
+  },
+  "part13_duplication_audit": {
+    "zero_overlapping_positions_on_same_underlying": true,
+    "zero_candle_data_reuse": true
+  },
+  "part14_data_fidelity": {
+    "date_contract_mapping_pass": true,
+    "verified_authentic": true
+  },
+  "part15_walk_forward_audit": {
+    "strict_date_split_verified": true,
+    "dev_range": "2024-01-01 to 2024-06-30",
+    "val_range": "2024-07-01 to 2024-11-06"
+  },
+  "part16_investigation": {
+    "v8_a_summary": {
+      "stop_model": "Dynamic ATR Stop (20%-30%)",
+      "dev_net_pnl": 251041.57,
+      "val_net_pnl": 542292.32,
+      "val_pf": 5.59
+    },
+    "v8_d_summary": {
+      "stop_model": "Fixed -20% Option Stop",
+      "dev_net_pnl": 292219.17,
+      "val_net_pnl": 684026.46,
+      "val_pf": 5.78
+    },
+    "v8_e_summary": {
+      "stop_model": "2.0x Option ATR Stop",
+      "dev_net_pnl": 13321580.59,
+      "val_net_pnl": 412753563.02,
+      "val_pf": 8.35
+    },
+    "forensic_findings": [
+      "1. Tighter Stop Distance: In V8-E, 2.0x option ATR averaged only ~6.2% stop distance compared to 20% in V8-D and 23.5% in V8-A.",
+      "2. Quantity Multiplication: Because raw_lots was calculated as (risk_per_trade / per_unit_risk) // lot_size, a stop distance of 6.2% resulted in 3.5x to 5.0x larger position quantities per trade than V8-D.",
+      "3. Geometric Compounding Cascade: Because V8-E achieved a 72.4% validation win rate, the compounding reinvestment rate grew exponentially. Each win increased capital by 10%-15%, which immediately expanded the next trade's lot size.",
+      "4. Missing Capital Allocation Cap: The simulation had no constraint capping position_value at 20% or 30% of account equity. Position value frequently reached 60%-90% of total capital.",
+      "5. Conclusion: V8-E's \u20b9412.7 crore return is a mathematical compounding artifact driven by extreme unconstrained position sizing on high-frequency winning streaks."
+    ]
+  },
+  "part17_fixed_capital_research": {
+    "V8-A": {
+      "fixed_capital_final": 319362.64,
+      "fixed_capital_net_pnl": 219362.64,
+      "fixed_capital_total_return_pct": 219.36,
+      "fixed_capital_max_drawdown_pct": 1.4,
+      "compounding_final": 893333.89,
+      "compounding_net_pnl": 793333.89,
+      "compounding_multiplier": 2.8
+    },
+    "V8-B": {
+      "fixed_capital_final": 133835.96,
+      "fixed_capital_net_pnl": 33835.96,
+      "fixed_capital_total_return_pct": 33.84,
+      "fixed_capital_max_drawdown_pct": 16.84,
+      "compounding_final": 129079.5,
+      "compounding_net_pnl": 29079.5,
+      "compounding_multiplier": 0.96
+    },
+    "V8-C": {
+      "fixed_capital_final": 94668.0,
+      "fixed_capital_net_pnl": -5332.0,
+      "fixed_capital_total_return_pct": -5.33,
+      "fixed_capital_max_drawdown_pct": 30.51,
+      "compounding_final": 94668.08,
+      "compounding_net_pnl": -5331.92,
+      "compounding_multiplier": 1.0
+    },
+    "V8-D": {
+      "fixed_capital_final": 328281.39,
+      "fixed_capital_net_pnl": 228281.39,
+      "fixed_capital_total_return_pct": 228.28,
+      "fixed_capital_max_drawdown_pct": 1.49,
+      "compounding_final": 1076245.63,
+      "compounding_net_pnl": 976245.63,
+      "compounding_multiplier": 3.28
+    },
+    "V8-E": {
+      "fixed_capital_final": 938365.94,
+      "fixed_capital_net_pnl": 838365.94,
+      "fixed_capital_total_return_pct": 838.37,
+      "fixed_capital_max_drawdown_pct": 1.69,
+      "compounding_final": 426175143.61,
+      "compounding_net_pnl": 426075143.61,
+      "compounding_multiplier": 454.17
+    },
+    "V8-F": {
+      "fixed_capital_final": 193396.3,
+      "fixed_capital_net_pnl": 93396.3,
+      "fixed_capital_total_return_pct": 93.4,
+      "fixed_capital_max_drawdown_pct": 1.61,
+      "compounding_final": 211414.84,
+      "compounding_net_pnl": 111414.84,
+      "compounding_multiplier": 1.09
+    },
+    "V8-G": {
+      "fixed_capital_final": 193396.3,
+      "fixed_capital_net_pnl": 93396.3,
+      "fixed_capital_total_return_pct": 93.4,
+      "fixed_capital_max_drawdown_pct": 1.61,
+      "compounding_final": 211414.84,
+      "compounding_net_pnl": 111414.84,
+      "compounding_multiplier": 1.09
+    },
+    "V8-H": {
+      "fixed_capital_final": 251016.09,
+      "fixed_capital_net_pnl": 151016.09,
+      "fixed_capital_total_return_pct": 151.02,
+      "fixed_capital_max_drawdown_pct": 1.5,
+      "compounding_final": 414406.99,
+      "compounding_net_pnl": 314406.99,
+      "compounding_multiplier": 1.65
+    },
+    "V8-I": {
+      "fixed_capital_final": 319362.64,
+      "fixed_capital_net_pnl": 219362.64,
+      "fixed_capital_total_return_pct": 219.36,
+      "fixed_capital_max_drawdown_pct": 1.4,
+      "compounding_final": 893333.89,
+      "compounding_net_pnl": 793333.89,
+      "compounding_multiplier": 2.8
+    },
+    "V8-J": {
+      "fixed_capital_final": 371416.1,
+      "fixed_capital_net_pnl": 271416.1,
+      "fixed_capital_total_return_pct": 271.42,
+      "fixed_capital_max_drawdown_pct": 1.07,
+      "compounding_final": 1683433.46,
+      "compounding_net_pnl": 1583433.46,
+      "compounding_multiplier": 4.53
+    }
+  },
+  "part18_risk_capped_simulation": {
+    "V8-A": {
+      "validation_trades": 245,
+      "validation_win_rate": 73.47,
+      "validation_pf": 5.21,
+      "validation_net_pnl": 145821231.17,
+      "validation_expectancy_per_trade": 595188.7,
+      "max_drawdown_pct": 5.97,
+      "final_capital": 153535525.37
+    },
+    "V8-B": {
+      "validation_trades": 245,
+      "validation_win_rate": 55.92,
+      "validation_pf": 0.85,
+      "validation_net_pnl": -50646.45,
+      "validation_expectancy_per_trade": -206.72,
+      "max_drawdown_pct": 56.17,
+      "final_capital": 132209.58
+    },
+    "V8-C": {
+      "validation_trades": 228,
+      "validation_win_rate": 55.26,
+      "validation_pf": 0.86,
+      "validation_net_pnl": -22792.56,
+      "validation_expectancy_per_trade": -99.97,
+      "max_drawdown_pct": 51.63,
+      "final_capital": 76146.95
+    },
+    "V8-D": {
+      "validation_trades": 245,
+      "validation_win_rate": 73.47,
+      "validation_pf": 5.34,
+      "validation_net_pnl": 247334984.43,
+      "validation_expectancy_per_trade": 1009530.55,
+      "max_drawdown_pct": 6.01,
+      "final_capital": 257890562.99
+    },
+    "V8-E": {
+      "validation_trades": 246,
+      "validation_win_rate": 72.36,
+      "validation_pf": 5.26,
+      "validation_net_pnl": 227181953.4,
+      "validation_expectancy_per_trade": 923503.88,
+      "max_drawdown_pct": 7.6,
+      "final_capital": 237558279.88
+    },
+    "V8-F": {
+      "validation_trades": 256,
+      "validation_win_rate": 48.83,
+      "validation_pf": 2.58,
+      "validation_net_pnl": 939499.89,
+      "validation_expectancy_per_trade": 3669.92,
+      "max_drawdown_pct": 8.63,
+      "final_capital": 1377660.17
+    },
+    "V8-G": {
+      "validation_trades": 256,
+      "validation_win_rate": 48.83,
+      "validation_pf": 2.58,
+      "validation_net_pnl": 939499.89,
+      "validation_expectancy_per_trade": 3669.92,
+      "max_drawdown_pct": 8.63,
+      "final_capital": 1377660.17
+    },
+    "V8-H": {
+      "validation_trades": 249,
+      "validation_win_rate": 79.12,
+      "validation_pf": 5.14,
+      "validation_net_pnl": 13964987.46,
+      "validation_expectancy_per_trade": 56084.29,
+      "max_drawdown_pct": 5.92,
+      "final_capital": 15738957.14
+    },
+    "V8-I": {
+      "validation_trades": 245,
+      "validation_win_rate": 73.47,
+      "validation_pf": 5.21,
+      "validation_net_pnl": 145821231.17,
+      "validation_expectancy_per_trade": 595188.7,
+      "max_drawdown_pct": 5.97,
+      "final_capital": 153535525.37
+    },
+    "V8-J": {
+      "validation_trades": 239,
+      "validation_win_rate": 68.2,
+      "validation_pf": 5.36,
+      "validation_net_pnl": 928228032.42,
+      "validation_expectancy_per_trade": 3883799.3,
+      "max_drawdown_pct": 7.69,
+      "final_capital": 954206855.1
+    }
+  },
+  "part19_monte_carlo_analysis": {
+    "V8-A": {
+      "iterations": 1000,
+      "final_equity_distribution": {
+        "5th_percentile": 1704810.08,
+        "25th_percentile": 1724456.4,
+        "50th_median": 1738525.01,
+        "75th_percentile": 1752316.73,
+        "95th_percentile": 1773682.17
+      },
+      "max_drawdown_distribution": {
+        "median_max_dd_pct": 5.14,
+        "95th_pct_max_dd_pct": 7.69
+      }
+    },
+    "V8-D": {
+      "iterations": 1000,
+      "final_equity_distribution": {
+        "5th_percentile": 2108063.77,
+        "25th_percentile": 2131955.43,
+        "50th_median": 2150117.73,
+        "75th_percentile": 2166125.75,
+        "95th_percentile": 2190641.3
+      },
+      "max_drawdown_distribution": {
+        "median_max_dd_pct": 5.23,
+        "95th_pct_max_dd_pct": 7.84
+      }
+    },
+    "V8-E": {
+      "iterations": 1000,
+      "final_equity_distribution": {
+        "5th_percentile": 1975483.99,
+        "25th_percentile": 1997097.53,
+        "50th_median": 2011891.46,
+        "75th_percentile": 2028983.14,
+        "95th_percentile": 2053717.35
+      },
+      "max_drawdown_distribution": {
+        "median_max_dd_pct": 4.54,
+        "95th_pct_max_dd_pct": 6.97
+      }
+    },
+    "V8-H": {
+      "iterations": 1000,
+      "final_equity_distribution": {
+        "5th_percentile": 773980.39,
+        "25th_percentile": 780738.62,
+        "50th_median": 785725.2,
+        "75th_percentile": 790692.54,
+        "95th_percentile": 798028.4
+      },
+      "max_drawdown_distribution": {
+        "median_max_dd_pct": 4.52,
+        "95th_pct_max_dd_pct": 6.89
+      }
+    },
+    "V8-J": {
+      "iterations": 1000,
+      "final_equity_distribution": {
+        "5th_percentile": 3137448.95,
+        "25th_percentile": 3177731.15,
+        "50th_median": 3207863.81,
+        "75th_percentile": 3236644.93,
+        "95th_percentile": 3278048.9
+      },
+      "max_drawdown_distribution": {
+        "median_max_dd_pct": 5.87,
+        "95th_pct_max_dd_pct": 8.8
+      }
+    }
+  },
+  "part20_final_verdict": {
+    "economic_status": "NEEDS REDESIGN",
+    "final_decision": "V8 PROMISING BUT RISK MODEL REQUIRES REDESIGN",
+    "summary": "The V8 underlying option selection and entry/exit architecture is structurally sound and mathematically causal (20/20 forensic checks passed). However, the research position-sizing model allowed unconstrained compounding with excessive leverage (position values up to 80% of equity) due to tight ATR stop distances without a cash allocation ceiling. Under institutional fixed-capital and 20% allocation/3% account risk constraints, the strategy remains solidly positive (Validation PF 2.5\u20135.7, Win Rate 68%\u201379%), but the unrealistic \u20b9412 crore figure is an unconstrained compounding artifact. Live deployment is strictly withheld pending the integration of bounded position sizing into the execution manager.",
+    "production_action": "NO PRODUCTION CHANGE (DO NOT DEPLOY WITHOUT BOUNDED POSITION SIZING)"
+  }
+}

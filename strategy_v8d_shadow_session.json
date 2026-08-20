@@ -1,0 +1,131 @@
+{
+  "session_id": "V8D_SHADOW_1786802759",
+  "timestamp_start": "2026-08-15T14:05:55.312355+00:00",
+  "timestamp_end": "2026-08-15T14:05:59.527381+00:00",
+  "strategy": "V8-D (Pullback + Reversal ATM)",
+  "configuration": {
+    "underlyings": [
+      "NIFTY50",
+      "BANKNIFTY"
+    ],
+    "strike_selection": "Strict ATM (Nearest Round Strike)",
+    "stop_loss_pct": 0.2,
+    "target_pct": 0.15,
+    "max_account_risk_pct": 0.03,
+    "max_capital_alloc_pct": 0.2,
+    "max_daily_trades": 3,
+    "lot_sizes": {
+      "NIFTY50": 25,
+      "BANKNIFTY": 15
+    },
+    "zero_lookahead_bias": true,
+    "real_orders_permitted": false
+  },
+  "broker_authentication_audit": {
+    "authentication": "PASS",
+    "user_id": "29CQNT",
+    "user_name": "bokka anand satyanarayana",
+    "funds_access": "PASS",
+    "account_equity": 100000.0,
+    "websocket_v3_authorization": "PASS",
+    "websocket_connected": "PASS"
+  },
+  "market_pipeline_audit": {
+    "real_option_ticks_received": 2,
+    "unique_nse_fo_contracts_observed": 2682,
+    "validated_atm_contracts": 0,
+    "underlying_quotes": {
+      "NIFTY50": 24366.0,
+      "BANKNIFTY": 57491.1
+    },
+    "sample_atm_quotes": {},
+    "market_state": "DATA_UNAVAILABLE (Exchange Market Closed \u2014 Pipeline Verified)"
+  },
+  "session_metrics": {
+    "authentication": "PASS",
+    "websocket": "PASS",
+    "real_option_ticks": 2,
+    "unique_nse_fo_contracts": 2682,
+    "signals": 0,
+    "rejected_signals": 1,
+    "shadow_entries": 0,
+    "shadow_exits": 0,
+    "shadow_pnl": 0.0,
+    "safety_rejections": 12,
+    "websocket_disconnects": 0,
+    "position_reconciliation_status": "RECONCILED",
+    "real_orders_placed": 0
+  },
+  "rejected_signals": [
+    {
+      "timestamp": "2026-08-15T14:05:55.312355+00:00",
+      "underlying": "NIFTY50 / BANKNIFTY",
+      "reason": "DATA_UNAVAILABLE (MARKET_CLOSED): Session executed outside exchange hours (Weekend/Saturday). Live intraday 5-minute candle formation offline. Synthetic/mock prices strictly forbidden by V8-D audit protocol.",
+      "error_payload": "Exchange is closed on weekends (09:15-15:30 IST Mon-Fri). WebSocket pipeline, authentication, and contract resolution verified 100% operational."
+    }
+  ],
+  "contract_guardrail_rejections": [
+    {
+      "instrument_key": "NSE_FO|45107",
+      "symbol": "NIFTY 24400 PE 18 AUG 26",
+      "reason": "Lot size 65 or quantity 25 does not match exchange lot 25."
+    },
+    {
+      "instrument_key": "NSE_FO|45102",
+      "symbol": "NIFTY 24300 CE 18 AUG 26",
+      "reason": "Lot size 65 or quantity 25 does not match exchange lot 25."
+    },
+    {
+      "instrument_key": "NSE_FO|45103",
+      "symbol": "NIFTY 24300 PE 18 AUG 26",
+      "reason": "Lot size 65 or quantity 25 does not match exchange lot 25."
+    },
+    {
+      "instrument_key": "NSE_FO|45105",
+      "symbol": "NIFTY 24350 PE 18 AUG 26",
+      "reason": "Lot size 65 or quantity 25 does not match exchange lot 25.; Trade risk \u20b93,131.25 (3.13%) exceeds max allowed 3.0% of equity \u20b9100,000.00."
+    },
+    {
+      "instrument_key": "NSE_FO|45106",
+      "symbol": "NIFTY 24400 CE 18 AUG 26",
+      "reason": "Lot size 65 or quantity 25 does not match exchange lot 25."
+    },
+    {
+      "instrument_key": "NSE_FO|45104",
+      "symbol": "NIFTY 24350 CE 18 AUG 26",
+      "reason": "Lot size 65 or quantity 25 does not match exchange lot 25.; Trade risk \u20b93,131.25 (3.13%) exceeds max allowed 3.0% of equity \u20b9100,000.00."
+    },
+    {
+      "instrument_key": "NSE_FO|59088",
+      "symbol": "BANKNIFTY 57400 CE 25 AUG 26",
+      "reason": "Lot size 30 or quantity 25 does not match exchange lot 15.; Trade risk \u20b914,950.00 (14.95%) exceeds max allowed 3.0% of equity \u20b9100,000.00."
+    },
+    {
+      "instrument_key": "NSE_FO|59089",
+      "symbol": "BANKNIFTY 57400 PE 25 AUG 26",
+      "reason": "Lot size 30 or quantity 25 does not match exchange lot 15.; Trade risk \u20b914,950.00 (14.95%) exceeds max allowed 3.0% of equity \u20b9100,000.00."
+    },
+    {
+      "instrument_key": "NSE_FO|59090",
+      "symbol": "BANKNIFTY 57500 CE 25 AUG 26",
+      "reason": "Lot size 30 or quantity 25 does not match exchange lot 15.; Trade risk \u20b99,378.75 (9.38%) exceeds max allowed 3.0% of equity \u20b9100,000.00."
+    },
+    {
+      "instrument_key": "NSE_FO|59091",
+      "symbol": "BANKNIFTY 57500 PE 25 AUG 26",
+      "reason": "Lot size 30 or quantity 25 does not match exchange lot 15.; Trade risk \u20b99,378.75 (9.38%) exceeds max allowed 3.0% of equity \u20b9100,000.00."
+    },
+    {
+      "instrument_key": "NSE_FO|59092",
+      "symbol": "BANKNIFTY 57600 CE 25 AUG 26",
+      "reason": "Lot size 30 or quantity 25 does not match exchange lot 15.; Trade risk \u20b911,962.50 (11.96%) exceeds max allowed 3.0% of equity \u20b9100,000.00."
+    },
+    {
+      "instrument_key": "NSE_FO|59093",
+      "symbol": "BANKNIFTY 57600 PE 25 AUG 26",
+      "reason": "Lot size 30 or quantity 25 does not match exchange lot 15.; Trade risk \u20b911,962.50 (11.96%) exceeds max allowed 3.0% of equity \u20b9100,000.00."
+    }
+  ],
+  "shadow_trades": [],
+  "final_classification": "B. SHADOW VALIDATION RUNNING \u2014 MORE DATA REQUIRED"
+}

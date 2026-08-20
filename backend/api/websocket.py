@@ -1,0 +1,226 @@
+"""WebSocket connection manager — pushes live prices and bot state to frontend."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Set
+from zoneinfo import ZoneInfo
+
+from fastapi import WebSocket
+
+from backend.config.settings import load_settings
+
+logger = logging.getLogger(__name__)
+settings = load_settings()
+IST = ZoneInfo("Asia/Kolkata")
+
+
+class ConnectionManager:
+    """Thread-safe WebSocket connection manager."""
+
+    def __init__(self) -> None:
+        self.active_connections: Set[WebSocket] = set()
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.active_connections.add(websocket)
+        logger.debug("WS client connected. Total: %d", len(self.active_connections))
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        self.active_connections.discard(websocket)
+        logger.debug("WS client disconnected. Total: %d", len(self.active_connections))
+
+    async def send_to(self, websocket: WebSocket, data: Dict[str, Any]) -> None:
+        try:
+            await websocket.send_json(data)
+        except Exception:
+            self.disconnect(websocket)
+
+    async def broadcast(self, data: Dict[str, Any]) -> None:
+        if not self.active_connections:
+            return
+        dead = set()
+        for ws in list(self.active_connections):
+            try:
+                await ws.send_json(data)
+            except Exception:
+                dead.add(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+
+manager = ConnectionManager()
+
+# Price cache populated by the broker's Upstox v3 WebSocket client.
+# Keyed by index and option instrument keys (for example, "NSE_INDEX|Nifty 50").
+#
+# Thread-safety note: the Upstox SDK runs its WebSocket callback on its OWN
+# thread (not the asyncio event loop thread), while FastAPI request
+# handlers and the LiveScanner's asyncio.to_thread() calls read this same
+# dict from other threads. Mutating and iterating a plain dict from
+# different threads without a lock can raise a rare
+# "dictionary changed size during iteration" RuntimeError under real
+# concurrent load — this lock closes that race.
+_price_cache: Dict[str, Any] = {}
+_price_cache_lock = threading.Lock()
+
+# instrument_key -> friendly index symbol, populated
+# lazily from backend.broker.upstox_client.ALL_INSTRUMENTS so the cache below
+# can also be looked up/broadcast by symbol for the frontend.
+_key_to_symbol: Dict[str, str] = {}
+
+
+def _ensure_symbol_map() -> None:
+    if _key_to_symbol:
+        return
+    try:
+        from backend.broker.upstox_client import ALL_INSTRUMENTS
+        for symbol, key in ALL_INSTRUMENTS.items():
+            _key_to_symbol[key] = symbol
+    except Exception:
+        pass
+
+
+def update_price_cache(prices: Dict[str, Any]) -> None:
+    """Called by the broker's Upstox v3 WebSocket client on every tick batch
+    — from the SDK's own thread, not the asyncio event loop. `prices` is
+    keyed by instrument_key; we mirror it into a by-symbol view too so
+    REST/WS consumers can look either up."""
+    _ensure_symbol_map()
+    with _price_cache_lock:
+        _price_cache.update(prices)
+
+
+def get_prices_by_symbol() -> Dict[str, Any]:
+    _ensure_symbol_map()
+    with _price_cache_lock:
+        # Snapshot under the lock, then build the by-symbol view outside
+        # it — keeps the locked section as short as possible.
+        snapshot = dict(_price_cache)
+    return {
+        _key_to_symbol.get(k, k): v
+        for k, v in snapshot.items()
+    }
+
+
+def get_broker_ws_status() -> Dict[str, Any]:
+    """Real connection status of the Upstox v3 feed (not the frontend push
+    channel). Populated via the app-level ws_client if available."""
+    try:
+        import backend.api.main as main_mod  # avoid circular import at module load
+        client = getattr(getattr(main_mod, "app", None), "state", None)
+        client = getattr(client, "ws_client", None)
+        if client is not None:
+            return client.status_report()
+    except Exception:
+        pass
+    return {"connection_status": "unknown", "is_connected": False}
+
+
+def subscribe_option_contract(instrument_key: str) -> None:
+    """Subscribe to live ticks for an option contract via the broker WS.
+    Called when a new option position is opened."""
+    try:
+        import backend.api.main as main_mod
+        ws_client = getattr(getattr(main_mod, "app", None), "state", None)
+        ws_client = getattr(ws_client, "ws_client", None)
+        if ws_client is not None:
+            ws_client.subscribe([instrument_key])
+    except Exception:
+        pass
+
+
+def unsubscribe_option_contract(instrument_key: str) -> None:
+    """Unsubscribe from an option contract when no longer needed.
+    Called when an option position is closed."""
+    try:
+        import backend.api.main as main_mod
+        ws_client = getattr(getattr(main_mod, "app", None), "state", None)
+        ws_client = getattr(ws_client, "ws_client", None)
+        if ws_client is not None:
+            ws_client.unsubscribe([instrument_key])
+    except Exception:
+        pass
+
+
+def _is_market_open() -> bool:
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    open_t  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
+    close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return open_t <= now <= close_t
+
+
+def _get_bot_state() -> Dict[str, Any]:
+    try:
+        from backend.strategy.trading_engine import BotState
+        return BotState.status()
+    except Exception:
+        return {"running": False, "kill_switch_active": False}
+
+
+def _get_positions() -> list:
+    try:
+        from backend.database.db_manager import DatabaseManager
+        db = DatabaseManager(db_path=settings.database.path)
+        rows = db.list_positions()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def build_price_update() -> Dict[str, Any]:
+    bot_state = _get_bot_state()
+    broker_status = get_broker_ws_status()
+    return {
+        "type": "price_update",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "payload": {
+            "market_open": _is_market_open(),
+            "mode": settings.mode,
+            # Real Upstox v3 feed status — NOT the frontend push channel.
+            "websocket_connected": broker_status.get("is_connected", False),
+            "websocket_status": broker_status.get("connection_status", "unknown"),
+            "last_tick_age_seconds": broker_status.get("last_tick_age_seconds"),
+            "active_frontend_connections": len(manager.active_connections),
+            "positions": _get_positions(),
+            "prices": get_prices_by_symbol(),
+            "bot_running": bot_state.get("running", False),
+            "kill_switch_active": bot_state.get("kill_switch_active", False),
+        },
+    }
+
+
+def build_initial_state() -> Dict[str, Any]:
+    bot_state = _get_bot_state()
+    broker_status = get_broker_ws_status()
+    return {
+        "type": "initial_state",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "payload": {
+            "mode": settings.mode,
+            "market_open": _is_market_open(),
+            "websocket_connected": broker_status.get("is_connected", False),
+            "websocket_status": broker_status.get("connection_status", "unknown"),
+            "last_tick_age_seconds": broker_status.get("last_tick_age_seconds"),
+            "active_frontend_connections": len(manager.active_connections),
+            "positions": _get_positions(),
+            "prices": get_prices_by_symbol(),
+            "bot_running": bot_state.get("running", False),
+            "kill_switch_active": bot_state.get("kill_switch_active", False),
+        },
+    }
+
+
+async def broadcast_price_update() -> None:
+    """Called by APScheduler every 5 seconds to push state to all clients."""
+    if not manager.active_connections:
+        return
+    try:
+        data = build_price_update()
+        await manager.broadcast(data)
+    except Exception as e:
+        logger.debug("Broadcast error: %s", e)

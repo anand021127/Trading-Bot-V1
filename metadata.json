@@ -1,0 +1,6 @@
+{
+  "name": "Upstox Trading Bot",
+  "description": "Production algorithmic trading bot and dashboard for index options with live scanner, options chain, backtesting, and risk management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

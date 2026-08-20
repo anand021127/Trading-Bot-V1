@@ -1,0 +1,2 @@
+timestamp,underlying,expiry,strike,option_type,instrument_key,underlying_ltp,option_ltp,ema20,ema50,rsi,vwap,entry_reason,quantity,account_equity,risk_pct,capital_allocation_pct,stop_loss,target,result,rejection_reason
+2026-08-15T14:05:55.312355+00:00,NIFTY50 / BANKNIFTY,,,,,24366.0,,,,,,REJECTED,0,100000.0,0.0,0.0,,,REJECTED,DATA_UNAVAILABLE (MARKET_CLOSED): Session executed outside exchange hours (Weekend/Saturday). Live intraday 5-minute candle formation offline. Synthetic/mock prices strictly forbidden by V8-D audit protocol.

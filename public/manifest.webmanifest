@@ -1,0 +1,73 @@
+{
+  "name": "Upstox Options Bot",
+  "short_name": "Options Bot",
+  "description": "Professional Upstox Algorithmic Options Trading Bot and Real-Time Derivatives Dashboard",
+  "start_url": "/",
+  "id": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait-primary",
+  "background_color": "#0a0e1a",
+  "theme_color": "#0d1424",
+  "lang": "en-US",
+  "dir": "ltr",
+  "categories": ["finance", "productivity", "utilities"],
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Option Chain",
+      "short_name": "Chain",
+      "description": "View live index Option Chain and market Greeks",
+      "url": "/option-chain",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Dashboard Overview",
+      "short_name": "Overview",
+      "description": "Monitor live PnL and active trading positions",
+      "url": "/",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Option Scanner",
+      "short_name": "Scanner",
+      "description": "Check live momentum breakouts and ORB triggers",
+      "url": "/scanner",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Paper Trading",
+      "short_name": "Paper Mode",
+      "description": "Monitor simulated execution and paper portfolio",
+      "url": "/paper-trading",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}
