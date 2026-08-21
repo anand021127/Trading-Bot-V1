@@ -22,7 +22,9 @@ import random
 from datetime import datetime
 from typing import Dict, List, Any, Tuple
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from backend.backtest.engine import CostConfig
 
@@ -566,7 +568,7 @@ def run_full_reconciliation_audit():
     print("STRATEGY V8 — CAPITAL ACCOUNTING RECONCILIATION AUDIT")
     print("=" * 80)
 
-    csv_path = "strategy_v8_execution_research.csv"
+    csv_path = os.path.join(ROOT_DIR, "strategy_v8_execution_research.csv")
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Missing source file: {csv_path}")
 
@@ -632,8 +634,6 @@ def run_full_reconciliation_audit():
                 "accounting_valid": m_res["capital_accounting_identity_valid"],
             })
 
-    reconciliation_results["validation_period_reconciliation"] = val_model_results
-
     # =========================================================================
     # 2. FULL-PERIOD (DEV + VAL) 4-MODEL SIMULATIONS
     # =========================================================================
@@ -677,7 +677,20 @@ def run_full_reconciliation_audit():
                 "accounting_valid": m_res["capital_accounting_identity_valid"],
             })
 
-    reconciliation_results["full_period_reconciliation"] = full_model_results
+    def strip_raw_records(model_dict: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: v for k, v in model_dict.items() if k != "trade_records"}
+
+    val_model_results_clean = {
+        var: {m_k: strip_raw_records(m_v) for m_k, m_v in models.items()}
+        for var, models in val_model_results.items()
+    }
+    full_model_results_clean = {
+        var: {m_k: strip_raw_records(m_v) for m_k, m_v in models.items()}
+        for var, models in full_model_results.items()
+    }
+
+    reconciliation_results["validation_period_reconciliation"] = val_model_results_clean
+    reconciliation_results["full_period_reconciliation"] = full_model_results_clean
 
     # =========================================================================
     # 3. ROOT-CAUSE DISCREPANCY INVESTIGATION & MONTE CARLO RECONCILIATION
@@ -818,9 +831,10 @@ def run_full_reconciliation_audit():
     # =========================================================================
     # WRITE OUTPUT ARTIFACTS
     # =========================================================================
-    with open("strategy_v8_capital_reconciliation.json", "w") as fp:
+    json_out_path = os.path.join(ROOT_DIR, "strategy_v8_capital_reconciliation.json")
+    with open(json_out_path, "w") as fp:
         json.dump(reconciliation_results, fp, indent=2)
-    print("Written strategy_v8_capital_reconciliation.json")
+    print(f"Written {json_out_path}")
 
     # CSV Summary Table
     csv_fieldnames = [
@@ -829,15 +843,15 @@ def run_full_reconciliation_audit():
         "profit_factor", "expectancy_per_trade", "max_position_value", "max_quantity",
         "max_lots", "max_allocation_pct", "max_account_risk_pct", "accounting_valid"
     ]
-    with open("strategy_v8_capital_reconciliation.csv", "w", newline="") as fp:
+    csv_out_path = os.path.join(ROOT_DIR, "strategy_v8_capital_reconciliation.csv")
+    with open(csv_out_path, "w", newline="") as fp:
         writer = csv.DictWriter(fp, fieldnames=csv_fieldnames)
         writer.writeheader()
         writer.writerows(all_reconciliation_csv_rows)
-    print("Written strategy_v8_capital_reconciliation.csv")
+    print(f"Written {csv_out_path}")
 
     # Write Markdown Report
     write_markdown_report(reconciliation_results)
-    print("Written strategy_v8_capital_reconciliation.md")
 
 
 def write_markdown_report(res: Dict[str, Any]):
@@ -965,8 +979,10 @@ def write_markdown_report(res: Dict[str, Any]):
         f"**Decision:** {gov['rationale']}",
     ])
 
-    with open("strategy_v8_capital_reconciliation.md", "w") as fp:
+    md_out_path = os.path.join(ROOT_DIR, "strategy_v8_capital_reconciliation.md")
+    with open(md_out_path, "w") as fp:
         fp.write("\n".join(md_lines))
+    print(f"Written {md_out_path}")
 
 
 if __name__ == "__main__":

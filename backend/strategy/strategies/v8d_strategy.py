@@ -185,14 +185,21 @@ class V8DStrategy(Strategy):
         lots_by_risk = int((max_risk_rupees / per_unit_risk) // lot_size)
         lots_by_alloc = int((max_alloc_rupees / (option_premium * lot_size)))
 
-        # Bounded sizing (minimum 1 lot, strictly capped by min(risk, alloc))
-        allowed_lots = max(1, min(lots_by_risk, lots_by_alloc))
-        quantity = allowed_lots * lot_size
-
-        position_value = quantity * option_premium
-        total_risk = quantity * per_unit_risk
-        alloc_pct = (position_value / account_equity * 100.0)
-        risk_pct = (total_risk / account_equity * 100.0)
+        # Strict risk-capped sizing (if minimum 1 lot violates risk or allocation, reject trade with 0 lots)
+        allowed_lots = min(lots_by_risk, lots_by_alloc)
+        if allowed_lots < 1:
+            quantity = 0
+            allowed_lots = 0
+            position_value = 0.0
+            total_risk = 0.0
+            alloc_pct = 0.0
+            risk_pct = 0.0
+        else:
+            quantity = allowed_lots * lot_size
+            position_value = quantity * option_premium
+            total_risk = quantity * per_unit_risk
+            alloc_pct = (position_value / account_equity * 100.0)
+            risk_pct = (total_risk / account_equity * 100.0)
 
         details = {
             "account_equity": account_equity,

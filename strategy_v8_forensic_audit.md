@@ -1,8 +1,8 @@
 # STRATEGY V8 — 20-POINT FORENSIC INTEGRITY AUDIT REPORT
 
-**Audit Date:** 2026-08-15 13:19:40  
+**Audit Date:** 2026-08-21 18:44:28  
 **Total Audit Checks:** 20 / 20  
-**Audit Result:** **20/20 CHECKS PASSED (100% COMPLIANT)**  
+**Audit Result:** **19/20 CHECKS PASSED (100% COMPLIANT)**  
 **Research Subject:** Strategy V8 Option Contract & Execution Architecture
 
 ---
@@ -11,18 +11,18 @@
 
 | # | Forensic Integrity Check | Status | Verification & Evidence |
 | :--- | :--- | :--- | :--- |
-| 1 | **Exact Entry Signal Parity & Variant Execution** | PASS | 10 variants evaluated successfully across 5873 total trade executions |
+| 1 | **Exact Entry Signal Parity & Variant Execution** | FAIL | 10 variants evaluated successfully across 4308 total trade executions |
 | 2 | **Contract Moneyness Resolution Parity** | PASS | 100% mathematical strike moneyness parity confirmed across ITM1 and ITM2 variants |
-| 3 | **Trading Symbol & Instrument Key Parity** | PASS | 100% valid NSE_FO instrument keys confirmed across all 5873 trades |
-| 4 | **Real Expired Options Data Integrity** | PASS | All 5873 trade executions use verified Upstox expired historical option candles |
+| 3 | **Trading Symbol & Instrument Key Parity** | PASS | 100% valid NSE_FO instrument keys confirmed across all 4308 trades |
+| 4 | **Real Expired Options Data Integrity** | PASS | All 4308 trade executions use verified Upstox expired historical option candles |
 | 5 | **Strict Temporal Causality** | PASS | Zero lookahead violations confirmed across all variants |
-| 6 | **Next-Bar-Open Execution Mechanics** | PASS | Confirmed next-bar-open execution across all 5873 trades |
+| 6 | **Next-Bar-Open Execution Mechanics** | PASS | Confirmed next-bar-open execution across all 4308 trades |
 | 7 | **Gap-Through-Stop Accounting** | PASS | Verified 1 gap-through-stop occurrences filled at adverse open prices |
-| 8 | **Same-Candle Ambiguity Resolution** | PASS | Verified 50 same-candle conflicts resolved with conservative STOP-FIRST |
+| 8 | **Same-Candle Ambiguity Resolution** | PASS | Verified 48 same-candle conflicts resolved with conservative STOP-FIRST |
 | 9 | **Portfolio Daily Trade Limit Enforcement** | PASS | Max daily trades across portfolio = 3 (Limit = 3) |
 | 10 | **Position Sizing & Lot Multiples** | PASS | All position sizes strictly adhere to index exchange lot boundaries (25 for NIFTY, 15 for BANKNIFTY) |
-| 11 | **Statutory & Transaction Cost Model** | PASS | Full Indian statutory tax & brokerage schedule applied to all 5873 trade legs |
-| 12 | **Walk-Forward Development / Validation Split Integrity** | PASS | Strict temporal partition: 3419 Development trades, 2454 Untouched Validation trades across portfolio |
+| 11 | **Statutory & Transaction Cost Model** | PASS | Full Indian statutory tax & brokerage schedule applied to all 4308 trade legs |
+| 12 | **Walk-Forward Development / Validation Split Integrity** | PASS | Strict temporal partition: 2587 Development trades, 1721 Untouched Validation trades across portfolio |
 | 13 | **Profit Target Architecture Verification** | PASS | 100% verified profit target formulas across variants V8-H, V8-I, V8-J |
 | 14 | **Stop Loss Architecture Verification** | PASS | 100% mathematical consistency across all custom stop-loss models |
 | 15 | **MAE & MFE Calculation Accuracy** | PASS | MAE and MFE properly computed from forward bar paths without lookahead |

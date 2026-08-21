@@ -1,18 +1,18 @@
 {
   "metadata": {
-    "timestamp": "2026-08-15T13:19:40.038527",
+    "timestamp": "2026-08-21T18:44:28.856484",
     "audit_type": "20-Point Exhaustive Forensic Integrity Audit for Strategy V8",
     "total_checks": 20,
-    "passed_checks": 20,
-    "all_passed": true
+    "passed_checks": 19,
+    "all_passed": false
   },
   "checks": [
     {
       "check_id": 1,
       "name": "Exact Entry Signal Parity & Variant Execution",
       "description": "All 10 variants evaluated using the fixed V7-G pullback retest entry architecture",
-      "passed": true,
-      "details": "10 variants evaluated successfully across 5873 total trade executions"
+      "passed": false,
+      "details": "10 variants evaluated successfully across 4308 total trade executions"
     },
     {
       "check_id": 2,
@@ -26,14 +26,14 @@
       "name": "Trading Symbol & Instrument Key Parity",
       "description": "All traded contracts map to valid NSE_FO instrument keys matching standard Upstox naming convention",
       "passed": true,
-      "details": "100% valid NSE_FO instrument keys confirmed across all 5873 trades"
+      "details": "100% valid NSE_FO instrument keys confirmed across all 4308 trades"
     },
     {
       "check_id": 4,
       "name": "Real Expired Options Data Integrity",
       "description": "require_real_options=True, zero synthetic premiums, zero spot-price substitution",
       "passed": true,
-      "details": "All 5873 trade executions use verified Upstox expired historical option candles"
+      "details": "All 4308 trade executions use verified Upstox expired historical option candles"
     },
     {
       "check_id": 5,
@@ -47,7 +47,7 @@
       "name": "Next-Bar-Open Execution Mechanics",
       "description": "Model B execution fills entry strictly at next 5-minute bar open price",
       "passed": true,
-      "details": "Confirmed next-bar-open execution across all 5873 trades"
+      "details": "Confirmed next-bar-open execution across all 4308 trades"
     },
     {
       "check_id": 7,
@@ -61,7 +61,7 @@
       "name": "Same-Candle Ambiguity Resolution",
       "description": "When high >= target and low <= stop in the same candle, STOP-FIRST rule applies",
       "passed": true,
-      "details": "Verified 50 same-candle conflicts resolved with conservative STOP-FIRST"
+      "details": "Verified 48 same-candle conflicts resolved with conservative STOP-FIRST"
     },
     {
       "check_id": 9,
@@ -82,14 +82,14 @@
       "name": "Statutory & Transaction Cost Model",
       "description": "Every trade incorporates Brokerage, STT, Exchange Turnover, GST, SEBI, Stamp Duty, and Slippage",
       "passed": true,
-      "details": "Full Indian statutory tax & brokerage schedule applied to all 5873 trade legs"
+      "details": "Full Indian statutory tax & brokerage schedule applied to all 4308 trade legs"
     },
     {
       "check_id": 12,
       "name": "Walk-Forward Development / Validation Split Integrity",
       "description": "Development <= 2024-06-30 and Validation >= 2024-07-01 strictly partitioned",
       "passed": true,
-      "details": "Strict temporal partition: 3419 Development trades, 2454 Untouched Validation trades across portfolio"
+      "details": "Strict temporal partition: 2587 Development trades, 1721 Untouched Validation trades across portfolio"
     },
     {
       "check_id": 13,

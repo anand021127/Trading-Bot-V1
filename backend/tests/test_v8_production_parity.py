@@ -97,6 +97,42 @@ class TestV8ProductionParity(unittest.TestCase):
         self.assertLessEqual(details["actual_allocation_pct"], 20.0)
         self.assertLessEqual(details["actual_risk_pct"], 3.0)
 
+    def test_05b_no_trade_when_one_lot_exceeds_allocation_limit(self):
+        """Verify trade rejection (qty=0) when 1 lot exceeds 20% max allocation limit."""
+        account_equity = 10000.0  # Max allocation = 2,000
+        premium = 100.0           # 1 lot NIFTY (25) = 2,500 > 2,000
+        stop_loss = 80.0
+        lot_size = 25
+
+        qty, details = self.strategy.calculate_position_size(
+            account_equity=account_equity,
+            option_premium=premium,
+            lot_size=lot_size,
+            stop_loss_premium=stop_loss,
+        )
+        self.assertEqual(qty, 0)
+        self.assertEqual(details["allowed_lots"], 0)
+        self.assertEqual(details["actual_allocation_pct"], 0.0)
+        self.assertEqual(details["actual_risk_pct"], 0.0)
+
+    def test_05c_no_trade_when_one_lot_exceeds_risk_limit(self):
+        """Verify trade rejection (qty=0) when 1 lot exceeds 3% max account risk limit."""
+        account_equity = 10000.0  # Max risk = 300
+        premium = 200.0
+        stop_loss = 160.0         # Risk per unit = 40; 1 lot (25) risk = 1,000 > 300
+        lot_size = 25
+
+        qty, details = self.strategy.calculate_position_size(
+            account_equity=account_equity,
+            option_premium=premium,
+            lot_size=lot_size,
+            stop_loss_premium=stop_loss,
+        )
+        self.assertEqual(qty, 0)
+        self.assertEqual(details["allowed_lots"], 0)
+        self.assertEqual(details["actual_allocation_pct"], 0.0)
+        self.assertEqual(details["actual_risk_pct"], 0.0)
+
     def test_06_pullback_signal_generation_bullish(self):
         """Verify bullish pullback signal generates CE signal on underlying candles."""
         # Construct synthetic candle series with upward trend, pullback to EMA20, and green reversal

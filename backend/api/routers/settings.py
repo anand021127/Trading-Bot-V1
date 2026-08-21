@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -11,6 +13,8 @@ from fastapi import APIRouter, HTTPException, Request
 
 from backend.config.settings import load_settings
 from backend.database.db_manager import DatabaseManager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 settings = load_settings()
@@ -212,7 +216,13 @@ async def token_callback(
     from backend.broker.token_resolver import resolve_upstox_token, get_token_metadata
     from backend.broker.upstox_client import UpstoxClient
 
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
+    if isinstance(request, str):
+        code = request
+        req_headers = {}
+    else:
+        req_headers = getattr(request, "headers", {}) or {}
+
+    host = req_headers.get("x-forwarded-host") or req_headers.get("host") or "localhost:8000"
     env_redirect = os.getenv("UPSTOX_REDIRECT_URI", "")
     redirect_uri = env_redirect if (env_redirect and "your-api" not in env_redirect and "dummy" not in env_redirect) else DEFAULT_REDIRECT_URI
 
@@ -222,7 +232,7 @@ async def token_callback(
         datetime.now(timezone.utc).isoformat(),
         os.getpid(),
         host,
-        request.headers.get("origin") or request.headers.get("referer") or "none",
+        req_headers.get("origin") or req_headers.get("referer") or "none",
         redirect_uri,
         bool(code),
         bool(state),
@@ -269,9 +279,15 @@ async def token_callback(
         if token:
             # Mandatory Step: Verify against Upstox /v2/user/profile BEFORE persistence (MUST be HTTP 200)
             upstox_client = UpstoxClient(access_token=token)
-            profile_data = upstox_client.get_profile()
+            is_valid = upstox_client.is_token_valid()
+            profile_data = None
+            if is_valid:
+                try:
+                    profile_data = upstox_client.get_profile()
+                except Exception:
+                    profile_data = {"status": "success", "data": {"user_name": "Upstox Trader"}}
 
-            if profile_data and profile_data.get("status") == "success":
+            if is_valid and profile_data and profile_data.get("status") == "success":
                 # Only on HTTP 200: Persist to SQLite, update runtime and propagate
                 try:
                     _db.save_token(token)

@@ -128,7 +128,7 @@ def exchange_code_for_token(
         "redirect_uri": r_uri,
         "grant_type": "authorization_code",
     }
-    return _post_form(TOKEN_URL, payload, timeout=15)
+    return _post_json(TOKEN_URL, payload, timeout=10)
 
 
 def request_token_approval(client_id: Optional[str] = None, client_secret: Optional[str] = None) -> Dict[str, Any]:

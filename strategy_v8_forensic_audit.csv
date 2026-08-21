@@ -1,16 +1,16 @@
 check_id,name,passed,details
-1,Exact Entry Signal Parity & Variant Execution,True,10 variants evaluated successfully across 5873 total trade executions
+1,Exact Entry Signal Parity & Variant Execution,False,10 variants evaluated successfully across 4308 total trade executions
 2,Contract Moneyness Resolution Parity,True,100% mathematical strike moneyness parity confirmed across ITM1 and ITM2 variants
-3,Trading Symbol & Instrument Key Parity,True,100% valid NSE_FO instrument keys confirmed across all 5873 trades
-4,Real Expired Options Data Integrity,True,All 5873 trade executions use verified Upstox expired historical option candles
+3,Trading Symbol & Instrument Key Parity,True,100% valid NSE_FO instrument keys confirmed across all 4308 trades
+4,Real Expired Options Data Integrity,True,All 4308 trade executions use verified Upstox expired historical option candles
 5,Strict Temporal Causality,True,Zero lookahead violations confirmed across all variants
-6,Next-Bar-Open Execution Mechanics,True,Confirmed next-bar-open execution across all 5873 trades
+6,Next-Bar-Open Execution Mechanics,True,Confirmed next-bar-open execution across all 4308 trades
 7,Gap-Through-Stop Accounting,True,Verified 1 gap-through-stop occurrences filled at adverse open prices
-8,Same-Candle Ambiguity Resolution,True,Verified 50 same-candle conflicts resolved with conservative STOP-FIRST
+8,Same-Candle Ambiguity Resolution,True,Verified 48 same-candle conflicts resolved with conservative STOP-FIRST
 9,Portfolio Daily Trade Limit Enforcement,True,Max daily trades across portfolio = 3 (Limit = 3)
 10,Position Sizing & Lot Multiples,True,"All position sizes strictly adhere to index exchange lot boundaries (25 for NIFTY, 15 for BANKNIFTY)"
-11,Statutory & Transaction Cost Model,True,Full Indian statutory tax & brokerage schedule applied to all 5873 trade legs
-12,Walk-Forward Development / Validation Split Integrity,True,"Strict temporal partition: 3419 Development trades, 2454 Untouched Validation trades across portfolio"
+11,Statutory & Transaction Cost Model,True,Full Indian statutory tax & brokerage schedule applied to all 4308 trade legs
+12,Walk-Forward Development / Validation Split Integrity,True,"Strict temporal partition: 2587 Development trades, 1721 Untouched Validation trades across portfolio"
 13,Profit Target Architecture Verification,True,"100% verified profit target formulas across variants V8-H, V8-I, V8-J"
 14,Stop Loss Architecture Verification,True,100% mathematical consistency across all custom stop-loss models
 15,MAE & MFE Calculation Accuracy,True,MAE and MFE properly computed from forward bar paths without lookahead

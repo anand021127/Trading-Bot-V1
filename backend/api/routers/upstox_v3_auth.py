@@ -114,7 +114,7 @@ def _is_token_present() -> bool:
 
 @router.post("/api/upstox/auth/request")
 @router.post("/upstox/auth/request")
-async def request_upstox_approval(request: Optional[Request] = None) -> Dict[str, Any]:
+async def request_upstox_approval() -> Dict[str, Any]:
     """Dispatch an Upstox API v3 token approval push notification.
     
     Calls POST https://api.upstox.com/v3/login/auth/token/request/{client_id}

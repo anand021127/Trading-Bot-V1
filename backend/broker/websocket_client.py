@@ -88,7 +88,7 @@ class UpstoxWebSocketClient:
         on_price_update: Optional[Callable[[Dict[str, Any]], None]] = None,
         mode: str = "full",
     ) -> None:
-        self.access_token = access_token or os.getenv("UPSTOX_ACCESS_TOKEN", "")
+        self.access_token = access_token if access_token is not None else os.getenv("UPSTOX_ACCESS_TOKEN", "")
         self._instrument_keys: List[str] = list(instrument_keys or [])
         self._on_price_update = on_price_update
         self.mode = mode

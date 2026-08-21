@@ -9,6 +9,7 @@ Verifies:
 """
 import unittest
 import shutil
+from datetime import date, timedelta
 from pathlib import Path
 from backend.orders.contract_validator import validate_option_contract
 from backend.paper.v8d_shadow_mode import V8DShadowEngine
@@ -18,6 +19,7 @@ class TestV8OptionExecutionSafety(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.test_log_dir = "logs/test_v8_shadow"
+        cls.valid_expiry = (date.today() + timedelta(days=7)).strftime("%Y-%m-%d")
 
     @classmethod
     def tearDownClass(cls):
@@ -31,7 +33,7 @@ class TestV8OptionExecutionSafety(unittest.TestCase):
             instrument_key="NSE_FO|52341",
             strike=24100.0,
             option_type="CE",
-            expiry_date="2026-08-20",
+            expiry_date=self.valid_expiry,
             lot_size=25,
             option_ltp=145.50,
             underlying_spot=24115.0,
@@ -50,7 +52,7 @@ class TestV8OptionExecutionSafety(unittest.TestCase):
             instrument_key="NSE_FO|52341",
             strike=24100.0,
             option_type="CE",
-            expiry_date="2026-08-20",
+            expiry_date=self.valid_expiry,
             lot_size=25,
             option_ltp=24115.0,  # Corrupted: 24,115 passed as option premium
             underlying_spot=24115.0,
@@ -69,7 +71,7 @@ class TestV8OptionExecutionSafety(unittest.TestCase):
             instrument_key="NSE_FO|52341",
             strike=24100.0,
             option_type="CE",
-            expiry_date="2026-08-20",
+            expiry_date=self.valid_expiry,
             lot_size=25,
             option_ltp=145.50,
             underlying_spot=24115.0,
@@ -88,7 +90,7 @@ class TestV8OptionExecutionSafety(unittest.TestCase):
             instrument_key="NSE_FO|52341",
             strike=24123.0,  # Invalid strike for NIFTY (must be step 50)
             option_type="CE",
-            expiry_date="2026-08-20",
+            expiry_date=self.valid_expiry,
             lot_size=50,     # Wrong lot size (must be 25)
             option_ltp=145.50,
             underlying_spot=24115.0,
@@ -117,7 +119,7 @@ class TestV8OptionExecutionSafety(unittest.TestCase):
             "option_type": "CE",
             "instrument_key": "NSE_FO|99999",
             "ltp": 150.0,
-            "expiry": "2026-08-20",
+            "expiry": self.valid_expiry,
             "oi": 50000,
         }]
 
