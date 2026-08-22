@@ -231,18 +231,62 @@ app = FastAPI(
 settings = load_settings()
 
 # ─── CORS ────────────────────────────────────────────────────────────────────
-_frontend_url = os.getenv("FRONTEND_URL", "https://trading-bot-v1-snowy.vercel.app")
+# Explicit allowed origins for production Vercel frontend, local dev, and environment overrides
+ALLOWED_ORIGINS = [
+    # Production Vercel domains
+    "https://trading-bot-v1-egi204u8k-anand0211277s-projects.vercel.app",
+    "https://trading-bot-v1-snowy.vercel.app",
+    "https://trading-bot-v1.vercel.app",
+    # Local development URLs
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+
+_frontend_url_env = os.getenv("FRONTEND_URL")
+if _frontend_url_env:
+    for origin in _frontend_url_env.split(","):
+        origin_clean = origin.strip().rstrip("/")
+        if origin_clean and origin_clean not in ALLOWED_ORIGINS:
+            ALLOWED_ORIGINS.append(origin_clean)
+
+_cors_origins_env = os.getenv("CORS_ORIGINS")
+if _cors_origins_env:
+    for origin in _cors_origins_env.split(","):
+        origin_clean = origin.strip().rstrip("/")
+        if origin_clean and origin_clean not in ALLOWED_ORIGINS:
+            ALLOWED_ORIGINS.append(origin_clean)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        _frontend_url,
-        "http://localhost:5173",
-        "http://localhost:3000",
-    ],
-    allow_origin_regex=r"https?://.*\.vercel\.app",
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https://trading-bot-v1.*\.vercel\.app$",
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "User-Agent",
+        "DNT",
+        "Cache-Control",
+        "X-Mx-ReqToken",
+        "Keep-Alive",
+        "X-Requested-With",
+        "If-Modified-Since",
+        "X-CSRF-Token",
+        "Range",
+        "*",
+    ],
+    expose_headers=[
+        "Content-Length",
+        "Content-Range",
+        "Content-Disposition",
+        "X-Request-ID",
+    ],
+    max_age=86400,
 )
 
 # ─── Routers ──────────────────────────────────────────────────────────────────

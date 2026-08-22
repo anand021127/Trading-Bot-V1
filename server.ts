@@ -12,7 +12,52 @@ const app = express();
 const server = http.createServer(app);
 const PORT = 3000;
 
-app.use(cors());
+const ALLOWED_ORIGINS = [
+  'https://trading-bot-v1-egi204u8k-anand0211277s-projects.vercel.app',
+  'https://trading-bot-v1-snowy.vercel.app',
+  'https://trading-bot-v1.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (
+        ALLOWED_ORIGINS.includes(origin) ||
+        origin.endsWith('.vercel.app') ||
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1')
+      ) {
+        return callback(null, true);
+      }
+      return callback(null, true);
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
+    allowedHeaders: [
+      'Authorization',
+      'Content-Type',
+      'Accept',
+      'Origin',
+      'User-Agent',
+      'DNT',
+      'Cache-Control',
+      'X-Mx-ReqToken',
+      'Keep-Alive',
+      'X-Requested-With',
+      'If-Modified-Since',
+      'X-CSRF-Token',
+      'Range',
+    ],
+    exposedHeaders: ['Content-Length', 'Content-Range', 'Content-Disposition', 'X-Request-ID'],
+    maxAge: 86400,
+  })
+);
+app.options('*', cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
