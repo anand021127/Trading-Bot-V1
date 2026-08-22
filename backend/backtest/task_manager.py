@@ -64,18 +64,41 @@ class BacktestTask:
     progress: Dict[str, Any] = field(default_factory=dict)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    error_details: Optional[Dict[str, Any]] = None
     created_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.monotonic)
     _download_files: Dict[str, str] = field(default_factory=dict)
 
     def to_status_dict(self) -> Dict[str, Any]:
-        return {
+        prog = dict(self.progress) if isinstance(self.progress, dict) else {}
+        
+        # Enforce strict terminal state invariants on status representation
+        if self.status == STATUS_COMPLETED:
+            if prog.get("phase") != "completed":
+                prog["phase"] = "completed"
+            total_bars = (
+                prog.get("total_bars")
+                or prog.get("expected_bars")
+                or (self.result.get("total_candles_scanned", 0) if isinstance(self.result, dict) else 0)
+            )
+            if total_bars:
+                prog["total_bars"] = total_bars
+                prog["expected_bars"] = total_bars
+                prog["bar_index"] = total_bars
+                prog["processed_bars"] = total_bars
+        elif self.status == STATUS_FAILED:
+            prog["phase"] = "failed"
+
+        out = {
             "task_id": self.task_id,
             "status": self.status,
-            "progress": self.progress,
+            "progress": prog,
             "error": self.error,
             "elapsed_seconds": round(time.monotonic() - self.created_at, 1),
         }
+        if self.error_details:
+            out["error_details"] = self.error_details
+        return out
 
     # ── download file generation ────────────────────────────────────────
 
@@ -266,34 +289,87 @@ class BacktestTaskManager:
             task.status = status
         task.updated_at = time.monotonic()
 
-    def complete(self, task_id: str, result: Dict[str, Any], progress: Optional[Dict[str, Any]] = None) -> None:
+    def complete(
+        self,
+        task_id: str,
+        result: Dict[str, Any],
+        progress: Optional[Dict[str, Any]] = None,
+        expected_bars: Optional[int] = None,
+        processed_bars: Optional[int] = None,
+    ) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
+
+        total_scanned = result.get("total_candles_scanned", 0) if isinstance(result, dict) else 0
+        exp = expected_bars if expected_bars is not None else total_scanned
+        proc = processed_bars if processed_bars is not None else total_scanned
+        skipped = result.get("skipped_symbols", []) if isinstance(result, dict) else []
+
+        if (exp > 0 and proc < exp) or len(skipped) > 0:
+            self.fail(
+                task_id,
+                error={
+                    "code": "BACKTEST_INCOMPLETE",
+                    "message": f"Backtest incomplete: processed {proc} of {exp} expected bars.",
+                    "processed_bars": proc,
+                    "expected_bars": exp,
+                    "total_candles_scanned": total_scanned,
+                    "skipped_symbols": skipped,
+                    "symbol": progress.get("symbol", "") if progress else "",
+                    "reason": f"Invariant failed: processed_bars ({proc}) < expected_bars ({exp}) or skipped_symbols={skipped}",
+                },
+                progress={
+                    "phase": "failed",
+                    "processed_bars": proc,
+                    "expected_bars": exp,
+                    "total_bars": exp,
+                    "bar_index": proc,
+                },
+            )
+            return
+
         task.status = STATUS_COMPLETED
         task.result = result
+        task.error = None
         if progress:
-            task.progress = progress
+            task.progress = dict(progress)
+            task.progress["phase"] = "completed"
+            task.progress["bar_index"] = exp
+            task.progress["total_bars"] = exp
+            task.progress["processed_bars"] = exp
+            task.progress["expected_bars"] = exp
         else:
-            total_bars = result.get("total_candles_scanned", 0)
             task.progress = {
                 "phase": "completed",
-                "bar_index": total_bars,
-                "total_bars": total_bars,
-                "processed_bars": total_bars,
-                "expected_bars": total_bars,
-                "trades_so_far": result.get("total_trades", len(result.get("trades", []))),
+                "bar_index": exp,
+                "total_bars": exp,
+                "processed_bars": exp,
+                "expected_bars": exp,
+                "trades_so_far": result.get("trades_taken", len(result.get("trades", []))) if isinstance(result, dict) else 0,
             }
         task.updated_at = time.monotonic()
 
-    def fail(self, task_id: str, error: str, progress: Optional[Dict[str, Any]] = None) -> None:
+    def fail(self, task_id: str, error: Any, progress: Optional[Dict[str, Any]] = None) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
         task.status = STATUS_FAILED
-        task.error = error
+        if isinstance(error, dict):
+            task.error_details = error
+            task.error = error.get("message") or error.get("code") or str(error)
+        else:
+            task.error = str(error)
+            task.error_details = {"code": "BACKTEST_INCOMPLETE", "message": str(error)}
+
+        task.result = None
         if progress:
-            task.progress = progress
+            task.progress = dict(progress)
+            task.progress["phase"] = "failed"
+        elif task.progress:
+            task.progress["phase"] = "failed"
+        else:
+            task.progress = {"phase": "failed"}
         task.updated_at = time.monotonic()
 
 
@@ -318,6 +394,10 @@ async def run_backtest_in_background(
     3. Position execution and exit rules use verified historical option premium candles.
     4. If option data is not available, signals are strictly marked DATA_UNAVAILABLE.
     """
+    last_progress_bar = [0]
+    last_progress_symbol = [symbols[0] if symbols else ""]
+    total_expected_bars = 0
+
     try:
         task_manager.update_progress(
             task_id, {"phase": "fetching_data", "symbols_fetched": 0, "total_symbols": len(symbols)},
@@ -423,9 +503,25 @@ async def run_backtest_in_background(
         if missing_symbols or not symbol_candles:
             task_manager.fail(
                 task_id,
-                f"DATA_UNAVAILABLE: Failed to load complete historical candles for requested symbols {symbols}. "
-                f"Missing or incomplete: {missing_symbols}. Errors: {fetch_errors}. "
-                f"Refusing to fabricate or mark partial run as completed.",
+                error={
+                    "code": "DATA_UNAVAILABLE",
+                    "message": f"DATA_UNAVAILABLE: Failed to load complete historical candles for requested symbols {symbols}. "
+                               f"Missing or incomplete: {missing_symbols}. Errors: {fetch_errors}. "
+                               f"Refusing to fabricate or mark partial run as completed.",
+                    "processed_bars": 0,
+                    "expected_bars": 0,
+                    "total_candles_scanned": 0,
+                    "skipped_symbols": missing_symbols,
+                    "symbol": missing_symbols[0] if missing_symbols else (symbols[0] if symbols else ""),
+                    "reason": f"Missing or incomplete historical data: {fetch_errors}",
+                },
+                progress={
+                    "phase": "failed",
+                    "processed_bars": 0,
+                    "expected_bars": 0,
+                    "total_bars": 0,
+                    "bar_index": 0,
+                },
             )
             return
 
@@ -434,10 +530,14 @@ async def run_backtest_in_background(
             status=STATUS_RUNNING,
         )
 
-        def progress_callback(p: Dict[str, Any]) -> None:
-            task_manager.update_progress(task_id, {"phase": "processing", **p})
-
         total_expected_bars = sum(len(c) for c in symbol_candles.values())
+
+        def progress_callback(p: Dict[str, Any]) -> None:
+            if "bar_index" in p:
+                last_progress_bar[0] = p["bar_index"]
+            if "symbol" in p:
+                last_progress_symbol[0] = p["symbol"]
+            task_manager.update_progress(task_id, {"phase": "processing", **p})
 
         # Run engine with historical options data loader and real options mode
         backtest_result = await asyncio.to_thread(
@@ -466,12 +566,22 @@ async def run_backtest_in_background(
         if backtest_result is None or (total_expected_bars > 0 and candles_scanned == 0):
             task_manager.fail(
                 task_id,
-                f"BACKTEST_INCOMPLETE: Simulation processed 0 candles across symbols {list(symbol_candles.keys())}. "
-                f"Total requested bars were not processed.",
+                error={
+                    "code": "BACKTEST_INCOMPLETE",
+                    "message": f"BACKTEST_INCOMPLETE: Simulation processed 0 candles across symbols {list(symbol_candles.keys())}. Total requested bars were not processed.",
+                    "processed_bars": 0,
+                    "expected_bars": total_expected_bars,
+                    "total_candles_scanned": candles_scanned,
+                    "skipped_symbols": skipped_symbols,
+                    "symbol": symbols[0] if symbols else "",
+                    "reason": "Zero candles scanned by simulation engine",
+                },
                 progress={
                     "phase": "failed",
                     "processed_bars": 0,
                     "expected_bars": total_expected_bars,
+                    "total_bars": total_expected_bars,
+                    "bar_index": 0,
                     "symbols": symbols,
                     "requested_start": start_date,
                     "requested_end": end_date,
@@ -479,16 +589,27 @@ async def run_backtest_in_background(
             )
             return
 
-        if candles_scanned < total_expected_bars or (skipped_symbols and len(symbols) == len(skipped_symbols)):
+        if candles_scanned < total_expected_bars or len(skipped_symbols) > 0:
             task_manager.fail(
                 task_id,
-                f"BACKTEST_INCOMPLETE: processed_bars={candles_scanned}, expected_bars={total_expected_bars}, "
-                f"symbols={symbols}, requested_start='{start_date}', requested_end='{end_date}'. "
-                f"Skipped symbols / errors: {skipped_symbols}",
+                error={
+                    "code": "BACKTEST_INCOMPLETE",
+                    "message": f"BACKTEST_INCOMPLETE: processed_bars={candles_scanned}, expected_bars={total_expected_bars}, "
+                               f"symbols={symbols}, requested_start='{start_date}', requested_end='{end_date}'. "
+                               f"Skipped symbols / errors: {skipped_symbols}",
+                    "processed_bars": candles_scanned,
+                    "expected_bars": total_expected_bars,
+                    "total_candles_scanned": candles_scanned,
+                    "skipped_symbols": skipped_symbols,
+                    "symbol": symbols[0] if symbols else "",
+                    "reason": f"Incomplete bars scanned ({candles_scanned}/{total_expected_bars}) or skipped symbols: {skipped_symbols}",
+                },
                 progress={
                     "phase": "failed",
                     "processed_bars": candles_scanned,
                     "expected_bars": total_expected_bars,
+                    "total_bars": total_expected_bars,
+                    "bar_index": candles_scanned,
                     "symbols": symbols,
                     "requested_start": start_date,
                     "requested_end": end_date,
@@ -532,8 +653,33 @@ async def run_backtest_in_background(
             "trades_so_far": trades_count,
         }
 
-        task_manager.complete(task_id, payload, progress=final_progress)
+        task_manager.complete(
+            task_id,
+            payload,
+            progress=final_progress,
+            expected_bars=total_expected_bars,
+            processed_bars=total_expected_bars,
+        )
 
     except Exception as e:
         logger.exception("Background backtest task %s failed", task_id)
-        task_manager.fail(task_id, str(e))
+        task_manager.fail(
+            task_id,
+            error={
+                "code": "BACKTEST_INCOMPLETE",
+                "message": str(e),
+                "processed_bars": last_progress_bar[0],
+                "expected_bars": total_expected_bars,
+                "total_candles_scanned": last_progress_bar[0],
+                "skipped_symbols": [],
+                "symbol": last_progress_symbol[0],
+                "reason": f"Unhandled exception during backtest: {e}",
+            },
+            progress={
+                "phase": "failed",
+                "processed_bars": last_progress_bar[0],
+                "expected_bars": total_expected_bars,
+                "total_bars": total_expected_bars,
+                "bar_index": last_progress_bar[0],
+            },
+        )

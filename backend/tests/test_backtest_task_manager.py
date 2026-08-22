@@ -201,3 +201,255 @@ class TestRunBacktestInBackground:
         # Final state should be completed — progress along the way isn't
         # asserted in detail here, just that it reaches a clean end state.
         assert mgr.get(task.task_id).status == STATUS_COMPLETED
+
+    def test_regression_a_400_of_600_bars_fails(self) -> None:
+        """Regression Test A: 400/600 bars scanned must fail with BACKTEST_INCOMPLETE."""
+        mgr = BacktestTaskManager()
+        task = mgr.create_task()
+
+        candles = [{"open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100 + i,
+                    "volume": 1000, "timestamp": f"2024-01-0{i % 8 + 1}T09:15:00"} for i in range(600)]
+        client = self._fake_client({"NIFTY50": candles})
+
+        engine = MagicMock()
+        fake_result = MagicMock()
+        fake_result.total_candles_scanned = 400
+        fake_result.trades_taken = 0
+        fake_result.skipped_symbols = []
+        fake_result.to_dict.return_value = {"total_candles_scanned": 400, "trades_taken": 0, "skipped_symbols": []}
+        engine.run.return_value = fake_result
+
+        import backend.backtest.task_manager as tm_module
+        original = tm_module.task_manager
+        tm_module.task_manager = mgr
+        try:
+            asyncio.run(run_backtest_in_background(
+                task.task_id, client, engine, ["NIFTY50"], "5minute",
+                "2024-01-01", "2024-01-10", None,
+            ))
+        finally:
+            tm_module.task_manager = original
+
+        updated = mgr.get(task.task_id)
+        assert updated.status == STATUS_FAILED
+        assert updated.progress["phase"] == "failed"
+        assert updated.progress["processed_bars"] == 400
+        assert updated.progress["expected_bars"] == 600
+        assert "BACKTEST_INCOMPLETE" in updated.error
+        assert updated.error_details["code"] == "BACKTEST_INCOMPLETE"
+        assert updated.error_details["processed_bars"] == 400
+        assert updated.error_details["expected_bars"] == 600
+
+    def test_regression_b_4400_of_4596_bars_fails(self) -> None:
+        """Regression Test B: 4400/4596 bars scanned must fail with BACKTEST_INCOMPLETE."""
+        mgr = BacktestTaskManager()
+        task = mgr.create_task()
+
+        candles = [{"open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100 + i,
+                    "volume": 1000, "timestamp": f"2024-02-01T09:15:00"} for i in range(4596)]
+        client = self._fake_client({"NIFTY50": candles})
+
+        engine = MagicMock()
+        fake_result = MagicMock()
+        fake_result.total_candles_scanned = 4400
+        fake_result.trades_taken = 0
+        fake_result.skipped_symbols = []
+        fake_result.to_dict.return_value = {"total_candles_scanned": 4400, "trades_taken": 0, "skipped_symbols": []}
+        engine.run.return_value = fake_result
+
+        import backend.backtest.task_manager as tm_module
+        original = tm_module.task_manager
+        tm_module.task_manager = mgr
+        try:
+            asyncio.run(run_backtest_in_background(
+                task.task_id, client, engine, ["NIFTY50"], "5minute",
+                "2024-01-01", "2024-03-31", None,
+            ))
+        finally:
+            tm_module.task_manager = original
+
+        updated = mgr.get(task.task_id)
+        assert updated.status == STATUS_FAILED
+        assert updated.progress["phase"] == "failed"
+        assert updated.progress["processed_bars"] == 4400
+        assert updated.progress["expected_bars"] == 4596
+        assert "BACKTEST_INCOMPLETE" in updated.error
+        assert updated.error_details["code"] == "BACKTEST_INCOMPLETE"
+        assert updated.error_details["processed_bars"] == 4400
+        assert updated.error_details["expected_bars"] == 4596
+
+    def test_regression_c_600_of_600_bars_completed(self) -> None:
+        """Regression Test C: 600/600 bars scanned completes cleanly with consistent progress."""
+        mgr = BacktestTaskManager()
+        task = mgr.create_task()
+
+        candles = [{"open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100 + i,
+                    "volume": 1000, "timestamp": f"2024-01-0{i % 8 + 1}T09:15:00"} for i in range(600)]
+        client = self._fake_client({"NIFTY50": candles})
+
+        engine = MagicMock()
+        fake_result = MagicMock()
+        fake_result.total_candles_scanned = 600
+        fake_result.trades_taken = 3
+        fake_result.skipped_symbols = []
+        fake_result.to_dict.return_value = {"total_candles_scanned": 600, "trades_taken": 3, "skipped_symbols": []}
+        engine.run.return_value = fake_result
+
+        import backend.backtest.task_manager as tm_module
+        original = tm_module.task_manager
+        tm_module.task_manager = mgr
+        try:
+            asyncio.run(run_backtest_in_background(
+                task.task_id, client, engine, ["NIFTY50"], "5minute",
+                "2024-01-01", "2024-01-10", None,
+            ))
+        finally:
+            tm_module.task_manager = original
+
+        updated = mgr.get(task.task_id)
+        assert updated.status == STATUS_COMPLETED
+        assert updated.error is None
+        assert updated.progress["phase"] == "completed"
+        assert updated.progress["bar_index"] == 600
+        assert updated.progress["total_bars"] == 600
+        assert updated.progress["processed_bars"] == 600
+        assert updated.progress["expected_bars"] == 600
+
+        status_dict = updated.to_status_dict()
+        assert status_dict["status"] == STATUS_COMPLETED
+        assert status_dict["progress"]["phase"] == "completed"
+        assert status_dict["progress"]["bar_index"] == 600
+        assert status_dict["progress"]["total_bars"] == 600
+
+    def test_regression_d_multiple_symbols_one_incomplete_fails(self) -> None:
+        """Regression Test D: Multiple symbols where one symbol is skipped or incomplete fails."""
+        mgr = BacktestTaskManager()
+        task = mgr.create_task()
+
+        nifty_candles = [{"open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100 + i,
+                          "volume": 1000, "timestamp": f"bar-{i:04d}"} for i in range(100)]
+        bank_candles = [{"open": 200 + i, "high": 201 + i, "low": 199 + i, "close": 200 + i,
+                         "volume": 1000, "timestamp": f"bar-{i:04d}"} for i in range(100)]
+        client = self._fake_client({"NIFTY50": nifty_candles, "BANKNIFTY": bank_candles})
+
+        engine = MagicMock()
+        fake_result = MagicMock()
+        fake_result.total_candles_scanned = 100
+        fake_result.skipped_symbols = [{"symbol": "BANKNIFTY", "reason": "Corrupt or insufficient candles"}]
+        fake_result.to_dict.return_value = {"total_candles_scanned": 100, "skipped_symbols": [{"symbol": "BANKNIFTY"}]}
+        engine.run.return_value = fake_result
+
+        import backend.backtest.task_manager as tm_module
+        original = tm_module.task_manager
+        tm_module.task_manager = mgr
+        try:
+            asyncio.run(run_backtest_in_background(
+                task.task_id, client, engine, ["NIFTY50", "BANKNIFTY"], "5minute",
+                "2024-01-01", "2024-01-10", None,
+            ))
+        finally:
+            tm_module.task_manager = original
+
+        updated = mgr.get(task.task_id)
+        assert updated.status == STATUS_FAILED
+        assert updated.progress["phase"] == "failed"
+        assert "BACKTEST_INCOMPLETE" in updated.error
+        assert len(updated.error_details["skipped_symbols"]) > 0
+
+    def test_regression_e_engine_exception_after_partial_processing_fails(self) -> None:
+        """Regression Test E: Unhandled engine exception after partial progress fails with failed phase."""
+        mgr = BacktestTaskManager()
+        task = mgr.create_task()
+
+        candles = [{"open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100 + i,
+                    "volume": 1000, "timestamp": f"bar-{i:04d}"} for i in range(100)]
+        client = self._fake_client({"NIFTY50": candles})
+
+        engine = MagicMock()
+        def crash_midway(*args, **kwargs):
+            cb = kwargs.get("progress_callback")
+            if cb:
+                cb({"bar_index": 50, "total_bars": 100, "symbol": "NIFTY50"})
+            raise RuntimeError("Engine segmentation fault simulation")
+        engine.run.side_effect = crash_midway
+
+        import backend.backtest.task_manager as tm_module
+        original = tm_module.task_manager
+        tm_module.task_manager = mgr
+        try:
+            asyncio.run(run_backtest_in_background(
+                task.task_id, client, engine, ["NIFTY50"], "5minute",
+                "2024-01-01", "2024-01-10", None,
+            ))
+        finally:
+            tm_module.task_manager = original
+
+        updated = mgr.get(task.task_id)
+        assert updated.status == STATUS_FAILED
+        assert updated.progress["phase"] == "failed"
+        assert updated.progress["bar_index"] == 50
+        assert "Engine segmentation fault" in updated.error
+
+    def test_regression_f_missing_or_incomplete_dataset_fails(self) -> None:
+        """Regression Test F: Missing historical dataset fails with DATA_UNAVAILABLE."""
+        mgr = BacktestTaskManager()
+        task = mgr.create_task()
+
+        client = MagicMock()
+        client.get_historical_candles_full_range.return_value = []
+        engine = MagicMock()
+
+        import backend.backtest.task_manager as tm_module
+        original = tm_module.task_manager
+        tm_module.task_manager = mgr
+        try:
+            asyncio.run(run_backtest_in_background(
+                task.task_id, client, engine, ["UNKNOWN_INDEX_ABC"], "5minute",
+                "2024-01-01", "2024-01-10", None,
+            ))
+        finally:
+            tm_module.task_manager = original
+
+        updated = mgr.get(task.task_id)
+        assert updated.status == STATUS_FAILED
+        assert updated.progress["phase"] == "failed"
+        assert "DATA_UNAVAILABLE" in updated.error
+        assert updated.error_details["code"] == "DATA_UNAVAILABLE"
+
+    def test_regression_g_normal_full_execution_completes(self) -> None:
+        """Regression Test G: Full 4596/4596 normal backtest execution completes with all invariants."""
+        mgr = BacktestTaskManager()
+        task = mgr.create_task()
+
+        candles = [{"open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100 + i,
+                    "volume": 1000, "timestamp": f"bar-{i:04d}"} for i in range(4596)]
+        client = self._fake_client({"NIFTY50": candles})
+
+        engine = MagicMock()
+        fake_result = MagicMock()
+        fake_result.total_candles_scanned = 4596
+        fake_result.trades_taken = 12
+        fake_result.skipped_symbols = []
+        fake_result.to_dict.return_value = {"total_candles_scanned": 4596, "trades_taken": 12, "skipped_symbols": []}
+        engine.run.return_value = fake_result
+
+        import backend.backtest.task_manager as tm_module
+        original = tm_module.task_manager
+        tm_module.task_manager = mgr
+        try:
+            asyncio.run(run_backtest_in_background(
+                task.task_id, client, engine, ["NIFTY50"], "5minute",
+                "2024-01-01", "2024-03-31", None,
+            ))
+        finally:
+            tm_module.task_manager = original
+
+        updated = mgr.get(task.task_id)
+        assert updated.status == STATUS_COMPLETED
+        assert updated.error is None
+        assert updated.progress["phase"] == "completed"
+        assert updated.progress["bar_index"] == 4596
+        assert updated.progress["total_bars"] == 4596
+        assert updated.progress["processed_bars"] == 4596
+        assert updated.progress["expected_bars"] == 4596
+        assert updated.result["trades_taken"] == 12
