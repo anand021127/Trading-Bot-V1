@@ -57,6 +57,7 @@ class CostConfig:
     equity_delivery_stt_pct: float = 0.001
     stt_pct: Optional[float] = None
     brokerage_pct: Optional[float] = None
+    commission_pct: Optional[float] = None
     option_exchange_turnover_pct: float = 0.0005
     equity_exchange_turnover_pct: float = 0.0000325
     gst_pct: float = 0.18
@@ -65,6 +66,8 @@ class CostConfig:
     slippage_pct: float = 0.0001
 
     def __post_init__(self) -> None:
+        if self.commission_pct is not None and self.brokerage_pct is None:
+            self.brokerage_pct = self.commission_pct
         if self.stt_pct is not None:
             self.equity_intraday_stt_pct = self.stt_pct
         if self.brokerage_pct is not None:

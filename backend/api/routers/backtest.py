@@ -94,6 +94,7 @@ async def start_backtest(request: BacktestRequest) -> Dict[str, Any]:
 
     costs = CostConfig(
         commission_pct=request.commission_pct if request.commission_pct is not None else settings.backtest.commission_pct,
+        brokerage_pct=request.commission_pct if request.commission_pct is not None else settings.backtest.commission_pct,
         slippage_pct=request.slippage_pct if request.slippage_pct is not None else settings.backtest.slippage_pct,
         stt_pct=request.stt_pct if request.stt_pct is not None else settings.backtest.stt_pct,
     )
