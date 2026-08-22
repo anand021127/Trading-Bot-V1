@@ -312,7 +312,35 @@ async def run_backtest_in_background(
 
         from backend.broker.upstox_expired_options import UpstoxExpiredOptionsClient
         from backend.backtest.options_data_layer import HistoricalOptionsDataLoader
-        from backend.strategy.trading_engine import build_trend_series
+        from backend.backtest.historical_data_io import load_dataset_safe, HistoricalDataError
+        from backend.indicators.ema import calculate_ema
+        from backend.indicators.choppiness import choppiness_index
+
+        def _build_trend_series(candles: List[Dict[str, Any]], ema_fast: int = 20, ema_slow: int = 50, ci_period: int = 14) -> Dict[str, str]:
+            if len(candles) < ema_slow:
+                return {}
+            closes = [float(c["close"]) for c in candles]
+            highs = [float(c["high"]) for c in candles]
+            lows = [float(c["low"]) for c in candles]
+            ema_fast_vals = calculate_ema(closes, ema_fast)
+            ema_slow_vals = calculate_ema(closes, ema_slow)
+            ci_vals = choppiness_index(highs, lows, closes, ci_period)
+            ci_offset = len(closes) - len(ci_vals)
+            series: Dict[str, str] = {}
+            for i in range(ema_slow - 1, len(closes)):
+                ts = candles[i].get("timestamp")
+                if not ts:
+                    continue
+                ci_idx = i - ci_offset
+                if 0 <= ci_idx < len(ci_vals) and ci_vals[ci_idx] > 61.8:
+                    series[ts] = "NEUTRAL"
+                elif ema_fast_vals[i] > ema_slow_vals[i] and closes[i] > ema_fast_vals[i]:
+                    series[ts] = "BULLISH"
+                elif ema_fast_vals[i] < ema_slow_vals[i]:
+                    series[ts] = "BEARISH"
+                else:
+                    series[ts] = "NEUTRAL"
+            return series
 
         access_token = getattr(client, "access_token", None) or os.getenv("UPSTOX_ACCESS_TOKEN", "")
         expired_client = UpstoxExpiredOptionsClient(access_token=access_token)
@@ -324,7 +352,7 @@ async def run_backtest_in_background(
 
         for i, sym in enumerate(symbols):
             try:
-                # 1. Check local preloaded real_data first
+                # 1. Check local preloaded real_data first with safe loader
                 local_file = os.path.join(
                     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
                     "real_data",
@@ -333,15 +361,17 @@ async def run_backtest_in_background(
                 underlying_candles: List[Dict[str, Any]] = []
                 if os.path.exists(local_file):
                     try:
-                        with open(local_file, "r", encoding="utf-8") as fp:
-                            raw_data = json.load(fp)
-                        if isinstance(raw_data, list):
-                            underlying_candles = [
-                                c for c in raw_data
-                                if start_date <= c.get("timestamp", "")[:10] <= end_date
-                            ]
+                        raw_data = load_dataset_safe(local_file, auto_repair=True)
+                        underlying_candles = [
+                            c for c in raw_data
+                            if start_date <= c.get("timestamp", "")[:10] <= end_date
+                        ]
+                    except HistoricalDataError as hde:
+                        logger.warning("Historical data error on %s: %s", local_file, hde)
+                        fetch_errors.append({"symbol": sym, "error": f"Corrupted dataset {local_file}: {hde}"})
                     except Exception as e:
                         logger.warning("Could not read local data file %s: %s", local_file, e)
+                        fetch_errors.append({"symbol": sym, "error": f"Error reading {local_file}: {e}"})
 
                 # 2. If not enough local candles, fetch from Upstox client
                 if len(underlying_candles) < 60 and client is not None:
@@ -353,6 +383,7 @@ async def run_backtest_in_background(
                             underlying_candles = fetched
                     except Exception as e:
                         logger.warning("API fetch failed for %s: %s", sym, e)
+                        fetch_errors.append({"symbol": sym, "error": f"API fetch failed: {e}"})
 
                 if not underlying_candles:
                     raise ValueError(f"No historical candles available for {sym} between {start_date} and {end_date}")
@@ -360,7 +391,7 @@ async def run_backtest_in_background(
                 underlying_candles.sort(key=lambda x: x.get("timestamp", ""))
                 symbol_candles[sym] = underlying_candles
 
-                trend_series = build_trend_series(underlying_candles)
+                trend_series = _build_trend_series(underlying_candles)
                 option_contexts[sym] = {
                     "underlying_trend_series": trend_series,
                     "symbol": sym,
@@ -373,11 +404,14 @@ async def run_backtest_in_background(
                 "phase": "fetching_data", "symbols_fetched": i + 1, "total_symbols": len(symbols),
             })
 
-        if not symbol_candles or all(len(c) == 0 for c in symbol_candles.values()):
+        # Strict validation: All requested symbols must be loaded, and candle data must not be empty
+        missing_symbols = [s for s in symbols if s not in symbol_candles or len(symbol_candles[s]) == 0]
+        if missing_symbols or not symbol_candles:
             task_manager.fail(
                 task_id,
-                f"Could not fetch or load real historical candles for {symbols}. "
-                f"Errors: {fetch_errors}. Refusing to fabricate results.",
+                f"DATA_UNAVAILABLE: Failed to load complete historical candles for requested symbols {symbols}. "
+                f"Missing or incomplete: {missing_symbols}. Errors: {fetch_errors}. "
+                f"Refusing to fabricate or mark partial run as completed.",
             )
             return
 
@@ -399,6 +433,14 @@ async def run_backtest_in_background(
             options_data_loader=options_data_loader,
             require_real_options=True,
         )
+
+        if backtest_result is None or getattr(backtest_result, "total_candles_scanned", 0) == 0:
+            task_manager.fail(
+                task_id,
+                f"BACKTEST_INCOMPLETE: Simulation processed 0 candles across symbols {list(symbol_candles.keys())}. "
+                f"Total requested bars were not processed.",
+            )
+            return
 
         payload = backtest_result.to_dict()
         payload["fetch_errors"] = fetch_errors

@@ -18,14 +18,10 @@ from backend.backtest.historical_contract_resolver import (
     DataQualityReport,
 )
 
+from backend.backtest.historical_data_io import load_dataset_safe
+
 def load_candles(path):
-    with open(path, 'r') as f:
-        content = f.read()
-    last_brace = content.rfind('}')
-    if last_brace == -1:
-        return []
-    valid_content = content[:last_brace+1] + ']'
-    return json.loads(valid_content)
+    return load_dataset_safe(path, auto_repair=True)
 
 def build_trend_series(candles, ema_fast=20, ema_slow=50, ci_period=14):
     if len(candles) < ema_slow:

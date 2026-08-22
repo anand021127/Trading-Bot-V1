@@ -207,6 +207,8 @@ class HistoricalOptionsDataLoader:
         loaded_count = 0
         json_files = glob.glob(os.path.join(dir_path, "**/*.json"), recursive=True)
         
+        from backend.backtest.historical_data_io import load_dataset_safe, salvage_truncated_json
+
         for file_path in json_files:
             filename = os.path.basename(file_path)
             # Spot files in real_data/ only contain index spot candles
@@ -214,8 +216,17 @@ class HistoricalOptionsDataLoader:
                 continue
             
             try:
-                with open(file_path, "r") as fp:
-                    data = json.load(fp)
+                data = None
+                try:
+                    with open(file_path, "r", encoding="utf-8") as fp:
+                        data = json.load(fp)
+                except json.JSONDecodeError:
+                    with open(file_path, "r", encoding="utf-8") as fp:
+                        raw_text = fp.read()
+                    data = salvage_truncated_json(raw_text)
+                    if not data:
+                        raise
+
                 if isinstance(data, dict) and "contract" in data and "candles" in data:
                     c_info = data["contract"]
                     candles = data["candles"]
@@ -228,7 +239,7 @@ class HistoricalOptionsDataLoader:
                         candles=candles,
                     )
                     loaded_count += len(candles)
-                elif isinstance(data, list) and len(data) > 0 and "strike" in data[0] and "option_type" in data[0]:
+                elif isinstance(data, list) and len(data) > 0 and ("strike" in data[0] or "option_type" in data[0]):
                     for c in data:
                         rec = HistoricalOptionRecord(
                             date=c.get("date", c.get("timestamp", "")[:10]),

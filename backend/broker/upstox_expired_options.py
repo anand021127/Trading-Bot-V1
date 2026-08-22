@@ -200,7 +200,8 @@ class OptionsDataCache:
             return None
 
     def save(self, filename: str, contract_info: Dict[str, Any], candles: List[Dict[str, Any]]) -> str:
-        """Atomically persist option data to cache."""
+        """Atomically persist option data to cache using robust atomic validation."""
+        from backend.backtest.historical_data_io import save_dataset_atomic
         path = os.path.join(self.cache_dir, filename)
         payload = {
             "cached_at": datetime.now().isoformat(),
@@ -208,11 +209,7 @@ class OptionsDataCache:
             "candles_count": len(candles),
             "candles": candles,
         }
-        tmp_path = f"{path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as fp:
-            json.dump(payload, fp, indent=2)
-        os.replace(tmp_path, path)
-        return path
+        return save_dataset_atomic(path, payload, min_records=1 if candles else 0)
 
 
 class UpstoxExpiredOptionsClient:
