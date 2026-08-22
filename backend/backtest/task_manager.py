@@ -266,20 +266,34 @@ class BacktestTaskManager:
             task.status = status
         task.updated_at = time.monotonic()
 
-    def complete(self, task_id: str, result: Dict[str, Any]) -> None:
+    def complete(self, task_id: str, result: Dict[str, Any], progress: Optional[Dict[str, Any]] = None) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
         task.status = STATUS_COMPLETED
         task.result = result
+        if progress:
+            task.progress = progress
+        else:
+            total_bars = result.get("total_candles_scanned", 0)
+            task.progress = {
+                "phase": "completed",
+                "bar_index": total_bars,
+                "total_bars": total_bars,
+                "processed_bars": total_bars,
+                "expected_bars": total_bars,
+                "trades_so_far": result.get("total_trades", len(result.get("trades", []))),
+            }
         task.updated_at = time.monotonic()
 
-    def fail(self, task_id: str, error: str) -> None:
+    def fail(self, task_id: str, error: str, progress: Optional[Dict[str, Any]] = None) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
         task.status = STATUS_FAILED
         task.error = error
+        if progress:
+            task.progress = progress
         task.updated_at = time.monotonic()
 
 
@@ -423,6 +437,8 @@ async def run_backtest_in_background(
         def progress_callback(p: Dict[str, Any]) -> None:
             task_manager.update_progress(task_id, {"phase": "processing", **p})
 
+        total_expected_bars = sum(len(c) for c in symbol_candles.values())
+
         # Run engine with historical options data loader and real options mode
         backtest_result = await asyncio.to_thread(
             engine.run,
@@ -434,11 +450,38 @@ async def run_backtest_in_background(
             require_real_options=True,
         )
 
-        if backtest_result is None or getattr(backtest_result, "total_candles_scanned", 0) == 0:
+        candles_scanned = getattr(backtest_result, "total_candles_scanned", 0) if backtest_result else 0
+
+        if backtest_result is None or candles_scanned == 0:
             task_manager.fail(
                 task_id,
                 f"BACKTEST_INCOMPLETE: Simulation processed 0 candles across symbols {list(symbol_candles.keys())}. "
                 f"Total requested bars were not processed.",
+                progress={
+                    "phase": "failed",
+                    "processed_bars": 0,
+                    "expected_bars": total_expected_bars,
+                    "symbols": symbols,
+                    "requested_start": start_date,
+                    "requested_end": end_date,
+                },
+            )
+            return
+
+        if candles_scanned < total_expected_bars or (backtest_result.skipped_symbols and len(symbols) == len(backtest_result.skipped_symbols)):
+            task_manager.fail(
+                task_id,
+                f"BACKTEST_INCOMPLETE: processed_bars={candles_scanned}, expected_bars={total_expected_bars}, "
+                f"symbols={symbols}, requested_start='{start_date}', requested_end='{end_date}'. "
+                f"Skipped symbols / errors: {backtest_result.skipped_symbols}",
+                progress={
+                    "phase": "failed",
+                    "processed_bars": candles_scanned,
+                    "expected_bars": total_expected_bars,
+                    "symbols": symbols,
+                    "requested_start": start_date,
+                    "requested_end": end_date,
+                },
             )
             return
 
@@ -455,7 +498,19 @@ async def run_backtest_in_background(
                 "This is a genuine result, not an error."
             )
 
-        task_manager.complete(task_id, payload)
+        final_progress = {
+            "phase": "completed",
+            "symbol": symbols[-1] if symbols else "",
+            "symbol_index": len(symbols),
+            "total_symbols": len(symbols),
+            "bar_index": total_expected_bars,
+            "total_bars": total_expected_bars,
+            "processed_bars": total_expected_bars,
+            "expected_bars": total_expected_bars,
+            "trades_so_far": backtest_result.trades_taken,
+        }
+
+        task_manager.complete(task_id, payload, progress=final_progress)
 
     except Exception as e:
         logger.exception("Background backtest task %s failed", task_id)

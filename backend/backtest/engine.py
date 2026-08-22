@@ -307,14 +307,14 @@ class BacktestEngine:
             trend_series_keys = sorted(trend_series.keys()) if trend_series else []
 
             for i in range(self.min_candles_required, len(candles)):
-                if progress_callback and i % 200 == 0:
+                if progress_callback and (i % 200 == 0 or i == len(candles) - 1):
                     try:
                         progress_callback({
                             "phase": "processing",
                             "symbol": symbol,
                             "symbol_index": symbol_index + 1,
                             "total_symbols": total_symbols,
-                            "bar_index": i,
+                            "bar_index": total_bars if i == len(candles) - 1 else i,
                             "total_bars": total_bars,
                             "trades_so_far": len(all_trades),
                         })

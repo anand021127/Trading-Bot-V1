@@ -202,6 +202,87 @@ class TestHistoricalDataPipeline(unittest.TestCase):
         self.assertIsNone(updated_task.result, "Failed task must not have result payload")
         print(f"\n[Test 6] Backtest failure propagated cleanly with error: {updated_task.error}")
 
+    def test_7_tier_b_structural_validation_catches_errors(self) -> None:
+        """Test Tier B catches price inconsistency, duplicate timestamps, and out-of-order candles."""
+        candles = generate_synthetic_candles(10)
+
+        # 1. Price inconsistency: low > high
+        bad_candles = [dict(c) for c in candles]
+        bad_candles[3]["low"] = 25000.0
+        bad_candles[3]["high"] = 24000.0
+        valid, msg = validate_dataset(bad_candles)
+        self.assertFalse(valid)
+        self.assertIn("low", msg)
+
+        # 2. Duplicate timestamp
+        dup_candles = [dict(c) for c in candles]
+        dup_candles[4]["timestamp"] = dup_candles[3]["timestamp"]
+        valid, msg = validate_dataset(dup_candles)
+        self.assertFalse(valid)
+        self.assertIn("Duplicate timestamp", msg)
+
+        # 3. Out of order timestamp
+        rev_candles = list(reversed(candles))
+        valid, msg = validate_dataset(rev_candles)
+        self.assertFalse(valid)
+        self.assertIn("Chronological ordering violation", msg)
+
+    def test_8_tier_c_declared_dataset_rejects_early_truncated_data(self) -> None:
+        """Test Tier C rejects a 12,735-record dataset ending in September 2024 for NIFTY50_2024_5min.json."""
+        from backend.backtest.historical_data_io import validate_declared_dataset, HistoricalDataIncompleteError
+
+        # Generate 12,735 candles ending on 2024-09-09
+        truncated_candles = generate_synthetic_candles(12735, start_time="2024-01-01T09:15:00+05:30")
+        
+        valid, msg = validate_declared_dataset("NIFTY50_2024_5min.json", truncated_candles)
+        self.assertFalse(valid)
+        self.assertIn("truncated or incomplete", msg)
+        print(f"\n[Test 8] Declared annual validator correctly rejected incomplete dataset: {msg}")
+
+        # Attempt to save to declared filename with enforce_declared_specs=True
+        target_file = os.path.join(self.test_dir, "NIFTY50_2024_5min.json")
+        with self.assertRaises(HistoricalDataIncompleteError):
+            save_dataset_atomic(target_file, truncated_candles, enforce_declared_specs=True)
+
+    def test_9_task_manager_progress_reports_exact_total_bars_on_completion(self) -> None:
+        """Test completed backtest reports exact total expected bars (e.g. 600/600), not stalling at intermediate step."""
+        from backend.backtest.task_manager import task_manager
+        task = task_manager.create_task()
+        task_id = task.task_id
+
+        # Use real NIFTY50 data from 2024-01-01 to 2024-01-10 (600 bars)
+        engine = BacktestEngine(
+            strategy_engine=MultiStrategyEngine([EMATrendStrategy()]),
+            costs=CostConfig(),
+            capital=100000.0,
+        )
+
+        asyncio.run(
+            run_backtest_in_background(
+                task_id=task_id,
+                client=None,
+                engine=engine,
+                symbols=["NIFTY50"],
+                interval="5minute",
+                start_date="2024-01-01",
+                end_date="2024-01-10",
+                strategy_names=["EMA_TREND"],
+            )
+        )
+
+        completed_task = task_manager.get(task_id)
+        self.assertIsNotNone(completed_task)
+        self.assertEqual(completed_task.status, STATUS_COMPLETED)
+        self.assertIsNotNone(completed_task.progress)
+
+        progress = completed_task.progress
+        print(f"\n[Test 9] Completed task progress payload: {progress}")
+        self.assertEqual(progress.get("phase"), "completed")
+        self.assertEqual(progress.get("bar_index"), 600)
+        self.assertEqual(progress.get("total_bars"), 600)
+        self.assertEqual(progress.get("processed_bars"), 600)
+        self.assertEqual(progress.get("expected_bars"), 600)
+
 
 if __name__ == "__main__":
     unittest.main()
