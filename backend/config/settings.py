@@ -95,12 +95,12 @@ class DatabaseSettings(BaseModel):
 
 
 class NotificationSettings(BaseModel):
-    email_enabled: bool
-    telegram_enabled: bool
-    smtp_server: str
-    smtp_port: int
-    sender_email: str
-    recipient_email: str
+    email_enabled: bool = True
+    telegram_enabled: bool = True
+    smtp_server: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    sender_email: str = ""
+    recipient_email: str = ""
 
 
 class BacktestSettings(BaseModel):
