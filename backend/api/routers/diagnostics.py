@@ -486,35 +486,59 @@ async def instrument_master_refresh() -> Dict[str, Any]:
 
 @router.get("/token-status")
 async def get_token_diagnostics() -> Dict[str, Any]:
-    """Authoritative token diagnostics report."""
-    from backend.broker.token_resolver import get_token_metadata, resolve_upstox_token
-    token, source = resolve_upstox_token()
-    token_present = bool(token and not token.startswith("your_") and len(token) > 20)
+    """Authoritative token diagnostics report. Never exposes raw tokens and always returns HTTP 200."""
+    try:
+        from backend.broker.token_resolver import get_token_metadata, resolve_upstox_token
+        token = resolve_upstox_token()
+        meta = get_token_metadata()
+        source = meta.get("source", "none")
+        token_present = meta.get("present", False) and bool(token and not token.startswith("your_") and len(token) > 20)
 
-    broker_verified = False
-    profile_status = None
-    fingerprint = "none"
-    if token_present:
-        fingerprint = f"{token[:6]}...{token[-6:]}" if len(token) >= 12 else "masked"
-        try:
-            from backend.broker.upstox_client import UpstoxClient
-            client = UpstoxClient(access_token=token)
-            profile_data = client.get_profile()
-            if profile_data and profile_data.get("status") == "success":
-                broker_verified = True
-                profile_status = 200
-            else:
+        broker_verified = False
+        profile_status = None
+        fingerprint = meta.get("fingerprint", "none")
+
+        if token_present and token:
+            try:
+                from backend.broker.upstox_client import UpstoxClient, UpstoxAPIError
+                client = UpstoxClient(access_token=token)
+                try:
+                    profile_data = client.get_profile()
+                    if profile_data and (profile_data.get("status") == "success" or "data" in profile_data):
+                        broker_verified = True
+                        profile_status = 200
+                    else:
+                        profile_status = 401
+                except UpstoxAPIError as api_err:
+                    profile_status = getattr(api_err, "status_code", 401)
+                    broker_verified = False
+                except Exception:
+                    profile_status = 401
+                    broker_verified = False
+            except Exception:
                 profile_status = 401
-        except Exception:
-            profile_status = 500
+                broker_verified = False
 
-    return {
-        "token_present": token_present,
-        "token_source": source or "none",
-        "fingerprint": fingerprint,
-        "length": len(token) if token else 0,
-        "persisted": source in ["sqlite_database", "persistent_file"],
-        "broker_verified": broker_verified,
-        "profile_status": profile_status,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
+        return {
+            "token_present": token_present,
+            "token_source": source,
+            "fingerprint": fingerprint,
+            "length": meta.get("length", 0),
+            "persisted": source in ["database", "runtime"],
+            "broker_verified": broker_verified,
+            "profile_status": profile_status,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        # Failsafe fallback ensuring HTTP 200 diagnostic output
+        return {
+            "token_present": False,
+            "token_source": "none",
+            "fingerprint": "NONE",
+            "length": 0,
+            "persisted": False,
+            "broker_verified": False,
+            "profile_status": None,
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
