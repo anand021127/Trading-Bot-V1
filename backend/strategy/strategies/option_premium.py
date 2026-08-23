@@ -190,14 +190,99 @@ class OptionPremiumStrategy(Strategy):
         context: Optional[Dict[str, Any]] = None,
     ) -> StrategySignal:
         context = context or {}
-        contract = self.select_contract(context)
-
         sig = StrategySignal(strategy_name=self.name, symbol=symbol)
 
-        if contract is None:
-            sig.conditions = {"contract_resolved": False}
-            sig.rejected_reasons = [REASON_TEXT["contract_resolved"]]
-            sig.entry_reason = "NO TRADE — " + build_condition_summary(sig.conditions)
+        # 1. If a live option chain is explicitly supplied in context, use contract selection logic
+        if context.get("option_chain"):
+            contract = self.select_contract(context)
+            if contract is None:
+                sig.conditions = {"contract_resolved": False}
+                sig.rejected_reasons = [REASON_TEXT["contract_resolved"]]
+                sig.entry_reason = "NO TRADE — " + build_condition_summary(sig.conditions)
+                return sig
+
+            is_expiry_day = self._is_expiry_day(context, candles)
+            expiry_ok = self.allow_expiry_day_entries or not is_expiry_day
+
+            if len(candles) < self.min_candles:
+                insufficient = self._insufficient_data(symbol, len(candles))
+                insufficient.indicators["selected_contract"] = contract
+                insufficient.indicators["expiry_date"] = context.get("expiry_date")
+                insufficient.conditions = {"contract_resolved": True, "not_expiry_day": expiry_ok}
+                if not expiry_ok:
+                    insufficient.rejected_reasons.append(REASON_TEXT["not_expiry_day"])
+                return insufficient
+
+            closes = [float(c["close"]) for c in candles]
+            highs = [float(c["high"]) for c in candles]
+            lows = [float(c["low"]) for c in candles]
+            volumes = [float(c.get("volume", 0)) for c in candles]
+
+            lb = min(self.momentum_lookback, len(closes) - 1)
+            momentum_pct = (
+                (closes[-1] - closes[-1 - lb]) / closes[-1 - lb] * 100.0
+                if lb > 0 and closes[-1 - lb] > 0 else 0.0
+            )
+
+            vwap_vals = calc_vwap(highs, lows, closes, volumes)
+            atr_vals = calc_atr(highs, lows, closes, self.atr_period)
+            current_vwap = vwap_vals[-1] if vwap_vals else closes[-1]
+            current_atr = atr_vals[-1] if atr_vals else 0.0
+
+            conditions: Dict[str, bool] = {
+                "contract_resolved": True,
+                "not_expiry_day": expiry_ok,
+                "momentum_ok": momentum_pct >= self.min_momentum_pct,
+                "vwap_confirmed": closes[-1] > current_vwap,
+            }
+            confidence = 100.0 * sum(conditions.values()) / len(conditions)
+
+            sig.confidence = confidence
+            sig.conditions = conditions
+            sig.indicators = {
+                "selected_contract": contract,
+                "directional_intent": contract.get("option_type", "CE"),
+                "option_type": contract.get("option_type", "CE"),
+                "premium_ltp": closes[-1],
+                "premium_momentum_pct": round(momentum_pct, 2),
+                "premium_vwap": round(current_vwap, 2),
+                "premium_atr": round(current_atr, 4),
+                "open_interest": contract.get("oi"),
+                "delta": contract.get("delta"),
+                "theta": contract.get("theta"),
+                "iv": contract.get("iv"),
+                "is_expiry_day": is_expiry_day,
+                "expiry_date": context.get("expiry_date"),
+            }
+            sig.rejected_reasons = [
+                REASON_TEXT[name] for name, passed in conditions.items() if not passed and name in REASON_TEXT
+            ]
+
+            if current_atr > 0:
+                sig.entry_price = closes[-1]
+                sig.stop_loss = round(max(0.05, closes[-1] - self.atr_multiplier * current_atr), 2)
+                risk = sig.entry_price - sig.stop_loss
+                sig.target = round(sig.entry_price + self.target_r_multiple * risk, 2) if risk > 0 else sig.entry_price
+
+            if confidence >= self.min_confidence_to_trade and all(conditions.values()):
+                sig.signal = SignalType.BUY
+                sig.entry_reason = (
+                    f"ALL CONDITIONS PASSED — {contract.get('option_type')} {contract.get('strike')} "
+                    f"(OI {contract.get('oi', 'n/a')}) premium momentum {momentum_pct:.1f}% over {lb} bars, "
+                    f"above VWAP. BUY SIGNAL GENERATED."
+                )
+            else:
+                sig.entry_reason = "NO TRADE — " + build_condition_summary(conditions)
+
+            return sig
+
+        # 2. Pure underlying evaluation flow (Backtests / Technical Directional Intent)
+        # Does not require a live option chain to establish directional intent.
+        trend = context.get("underlying_trend")
+        if not trend or trend not in ("BULLISH", "BEARISH"):
+            sig.conditions = {"trend_confirmed": False}
+            sig.rejected_reasons = ["Underlying trend is NEUTRAL/UNCONFIRMED — no directional option intent"]
+            sig.entry_reason = "NO TRADE — underlying trend not directional"
             return sig
 
         is_expiry_day = self._is_expiry_day(context, candles)
@@ -205,9 +290,12 @@ class OptionPremiumStrategy(Strategy):
 
         if len(candles) < self.min_candles:
             insufficient = self._insufficient_data(symbol, len(candles))
-            insufficient.indicators["selected_contract"] = contract
-            insufficient.indicators["expiry_date"] = context.get("expiry_date")
-            insufficient.conditions = {"contract_resolved": True, "not_expiry_day": expiry_ok}
+            insufficient.conditions = {"trend_confirmed": True, "not_expiry_day": expiry_ok}
+            insufficient.indicators = {
+                "underlying_trend": trend,
+                "directional_intent": "CE" if trend == "BULLISH" else "PE",
+                "option_type": "CE" if trend == "BULLISH" else "PE",
+            }
             if not expiry_ok:
                 insufficient.rejected_reasons.append(REASON_TEXT["not_expiry_day"])
             return insufficient
@@ -228,50 +316,69 @@ class OptionPremiumStrategy(Strategy):
         current_vwap = vwap_vals[-1] if vwap_vals else closes[-1]
         current_atr = atr_vals[-1] if atr_vals else 0.0
 
-        conditions: Dict[str, bool] = {
-            "contract_resolved": True,
+        if trend == "BULLISH":
+            opt_type = "CE"
+            momentum_ok = momentum_pct >= self.min_momentum_pct
+            vwap_confirmed = closes[-1] > current_vwap
+        else:  # BEARISH
+            opt_type = "PE"
+            momentum_ok = momentum_pct <= -self.min_momentum_pct
+            vwap_confirmed = closes[-1] < current_vwap
+
+        conditions = {
+            "trend_confirmed": True,
             "not_expiry_day": expiry_ok,
-            "momentum_ok": momentum_pct >= self.min_momentum_pct,
-            "vwap_confirmed": closes[-1] > current_vwap,
+            "momentum_ok": momentum_ok,
+            "vwap_confirmed": vwap_confirmed,
         }
         confidence = 100.0 * sum(conditions.values()) / len(conditions)
 
         sig.confidence = confidence
         sig.conditions = conditions
         sig.indicators = {
-            "selected_contract": contract,
-            "premium_ltp": closes[-1],
-            "premium_momentum_pct": round(momentum_pct, 2),
-            "premium_vwap": round(current_vwap, 2),
-            "premium_atr": round(current_atr, 4),
-            "open_interest": contract.get("oi"),
-            "delta": contract.get("delta"),
-            "theta": contract.get("theta"),
-            "iv": contract.get("iv"),
+            "directional_intent": opt_type,
+            "option_type": opt_type,
+            "spot_price": closes[-1],
+            "underlying_trend": trend,
+            "momentum_pct": round(momentum_pct, 2),
+            "vwap": round(current_vwap, 2),
+            "atr": round(current_atr, 4),
             "is_expiry_day": is_expiry_day,
             "expiry_date": context.get("expiry_date"),
         }
-        sig.rejected_reasons = [
-            REASON_TEXT[name] for name, passed in conditions.items() if not passed and name in REASON_TEXT
-        ]
 
-        # Entry/stop/target computed whenever we have a valid contract,
-        # regardless of whether the signal clears the trade threshold —
-        # real numbers for a relaxed/"daily floor" check to act on, not zeros.
+        sig.rejected_reasons = []
+        if not expiry_ok:
+            sig.rejected_reasons.append(REASON_TEXT["not_expiry_day"])
+        if not momentum_ok:
+            sig.rejected_reasons.append(
+                f"Underlying momentum ({momentum_pct:.2f}%) did not meet "
+                f"{'positive' if opt_type == 'CE' else 'negative'} threshold ({self.min_momentum_pct}%)"
+            )
+        if not vwap_confirmed:
+            sig.rejected_reasons.append(
+                f"Underlying close ({closes[-1]:.2f}) failed VWAP confirmation ({current_vwap:.2f})"
+            )
+
         if current_atr > 0:
             sig.entry_price = closes[-1]
-            sig.stop_loss = round(max(0.05, closes[-1] - self.atr_multiplier * current_atr), 2)
-            risk = sig.entry_price - sig.stop_loss
-            sig.target = round(sig.entry_price + self.target_r_multiple * risk, 2) if risk > 0 else sig.entry_price
+            if opt_type == "CE":
+                sig.stop_loss = round(max(0.05, closes[-1] - self.atr_multiplier * current_atr), 2)
+                risk = sig.entry_price - sig.stop_loss
+                sig.target = round(sig.entry_price + self.target_r_multiple * risk, 2) if risk > 0 else sig.entry_price
+            else:
+                sig.stop_loss = round(closes[-1] + self.atr_multiplier * current_atr, 2)
+                risk = sig.stop_loss - sig.entry_price
+                sig.target = round(max(0.05, sig.entry_price - self.target_r_multiple * risk), 2) if risk > 0 else sig.entry_price
 
         if confidence >= self.min_confidence_to_trade and all(conditions.values()):
             sig.signal = SignalType.BUY
             sig.entry_reason = (
-                f"ALL CONDITIONS PASSED — {contract.get('option_type')} {contract.get('strike')} "
-                f"(OI {contract.get('oi', 'n/a')}) premium momentum {momentum_pct:.1f}% over {lb} bars, "
-                f"above VWAP. BUY SIGNAL GENERATED."
+                f"DIRECTIONAL INTENT {opt_type} CONFIRMED — {trend} trend, "
+                f"momentum {momentum_pct:.1f}% over {lb} bars, VWAP confirmed."
             )
         else:
+            sig.signal = SignalType.NONE
             sig.entry_reason = "NO TRADE — " + build_condition_summary(conditions)
 
         return sig

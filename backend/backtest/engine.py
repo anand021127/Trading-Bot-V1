@@ -205,6 +205,28 @@ class BacktestResult:
     execution_resolution_mode: str = "CONSERVATIVE_STOP_FIRST"
     # V21-FINAL: data quality report for backtest transparency
     data_quality: Optional[DataQualityReport] = None
+    # Detailed diagnostic counters for auditability
+    candles_loaded: int = 0
+    warmup_bars: int = 0
+    candles_evaluated: int = 0
+    trend_bullish: int = 0
+    trend_bearish: int = 0
+    trend_neutral: int = 0
+    directional_signals: int = 0
+    ce_intents: int = 0
+    pe_intents: int = 0
+    contract_resolution_attempts: int = 0
+    contracts_resolved: int = 0
+    contract_resolution_failures: int = 0
+    contract_resolution_failures_breakdown: Dict[str, int] = field(default_factory=dict)
+    option_premium_lookup_attempts: int = 0
+    option_premiums_found: int = 0
+    option_premium_missing: int = 0
+    risk_rejections: int = 0
+    risk_rejections_breakdown: Dict[str, int] = field(default_factory=dict)
+    orders_created: int = 0
+    trades_opened: int = 0
+    trades_closed: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -228,6 +250,28 @@ class BacktestResult:
             "data_source": self.data_source,
             "execution_resolution_mode": self.execution_resolution_mode,
             "data_quality": self.data_quality.to_dict() if self.data_quality else None,
+            # Diagnostic counters
+            "candles_loaded": self.candles_loaded,
+            "warmup_bars": self.warmup_bars,
+            "candles_evaluated": self.candles_evaluated,
+            "trend_bullish": self.trend_bullish,
+            "trend_bearish": self.trend_bearish,
+            "trend_neutral": self.trend_neutral,
+            "directional_signals": self.directional_signals,
+            "ce_intents": self.ce_intents,
+            "pe_intents": self.pe_intents,
+            "contract_resolution_attempts": self.contract_resolution_attempts,
+            "contracts_resolved": self.contracts_resolved,
+            "contract_resolution_failures": self.contract_resolution_failures,
+            "contract_resolution_failures_breakdown": self.contract_resolution_failures_breakdown,
+            "option_premium_lookup_attempts": self.option_premium_lookup_attempts,
+            "option_premiums_found": self.option_premiums_found,
+            "option_premium_missing": self.option_premium_missing,
+            "risk_rejections": self.risk_rejections,
+            "risk_rejections_breakdown": self.risk_rejections_breakdown,
+            "orders_created": self.orders_created,
+            "trades_opened": self.trades_opened,
+            "trades_closed": self.trades_closed,
         }
         return d
 
@@ -274,6 +318,7 @@ class BacktestEngine:
         year of 5-minute NIFTY data) can report real progress to a polling
         client instead of the caller just waiting on a single request."""
         result = BacktestResult()
+        result.candles_loaded = sum(len(c) for c in symbol_candles.values())
         equity = self.capital
         peak = self.capital
         equity_curve: List[Dict[str, Any]] = [{"timestamp": "start", "equity": round(equity, 2)}]
@@ -298,6 +343,7 @@ class BacktestEngine:
                 })
                 continue
 
+            result.warmup_bars += self.min_candles_required
             candles_scanned += len(candles)
             position: Optional[Dict[str, Any]] = None
             total_bars = len(candles)
@@ -307,6 +353,7 @@ class BacktestEngine:
             trend_series_keys = sorted(trend_series.keys()) if trend_series else []
 
             for i in range(self.min_candles_required, len(candles)):
+                result.candles_evaluated += 1
                 if progress_callback and (i % 200 == 0 or i == len(candles) - 1):
                     try:
                         progress_callback({
@@ -325,12 +372,29 @@ class BacktestEngine:
                 bar = candles[i]
                 bar_timestamp = bar.get("timestamp", "")
                 bar_date = bar_timestamp[:10] if bar_timestamp else ""
+                spot_close = float(bar["close"])
 
-                bar_context = {**symbol_context, "current_bar_date": bar_date}
+                bar_context = {
+                    **symbol_context,
+                    "symbol": symbol,
+                    "current_bar_date": bar_date,
+                    "evaluation_date": bar_date,
+                    "spot_price": spot_close,
+                }
                 if trend_series:
-                    bar_context["underlying_trend"] = self._trend_at(
+                    trend = self._trend_at(
                         trend_series, trend_series_keys, bar_timestamp,
                     )
+                else:
+                    trend = "NEUTRAL"
+                bar_context["underlying_trend"] = trend
+
+                if trend == "BULLISH":
+                    result.trend_bullish += 1
+                elif trend == "BEARISH":
+                    result.trend_bearish += 1
+                else:
+                    result.trend_neutral += 1
 
                 if position is not None:
                     # In real options mode, check exit on option contract candles if available
@@ -374,6 +438,7 @@ class BacktestEngine:
                             total_cost=costs["total_cost"],
                         )
                         all_trades.append(trade)
+                        result.trades_closed += 1
                         equity += costs["net_pnl"]
                         peak = max(peak, equity)
                         dd = (peak - equity) / peak * 100 if peak > 0 else 0
@@ -402,16 +467,28 @@ class BacktestEngine:
 
                 if best is not None:
                     signals_generated += 1
+                    result.directional_signals += 1
+                    opt_type_intent = best.indicators.get("directional_intent") or best.indicators.get("option_type")
+                    if not opt_type_intent:
+                        opt_type_intent = "PE" if best.signal in (SignalType.SELL, getattr(SignalType, "BUY_PUT", SignalType.SELL)) else "CE"
+                    if opt_type_intent == "CE":
+                        result.ce_intents += 1
+                    else:
+                        result.pe_intents += 1
                     
                     # ── Strict Real Options Execution Handling ──
                     if require_real_options:
                         # Signal must resolve to a real historical option contract candle
-                        option_type = "PE" if best.signal in (SignalType.SELL, getattr(SignalType, "BUY_PUT", SignalType.SELL)) else "CE"
+                        result.contract_resolution_attempts += 1
+                        option_type = opt_type_intent
                         bar_dt = datetime.fromisoformat(bar_date).date() if bar_date else date.today()
-                        spot_close = bar["close"]
                         
                         if options_data_loader is None or not options_data_loader.is_data_available():
                             # Strictly flag DATA_UNAVAILABLE — Never create trade, never substitute spot
+                            result.contract_resolution_failures += 1
+                            result.contract_resolution_failures_breakdown["missing_option_data"] = (
+                                result.contract_resolution_failures_breakdown.get("missing_option_data", 0) + 1
+                            )
                             unavail_reason = f"DATA_UNAVAILABLE — No verified historical option contract dataset loaded for {symbol}"
                             rejected_total += 1
                             reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
@@ -424,6 +501,10 @@ class BacktestEngine:
 
                         contract_res = options_data_loader.resolve_contract(symbol, bar_dt, spot_close, option_type)
                         if contract_res is None:
+                            result.contract_resolution_failures += 1
+                            result.contract_resolution_failures_breakdown["no_matching_contract"] = (
+                                result.contract_resolution_failures_breakdown.get("no_matching_contract", 0) + 1
+                            )
                             unavail_reason = f"DATA_UNAVAILABLE — Cannot resolve historical contract for {symbol} on {bar_date}"
                             rejected_total += 1
                             reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
@@ -434,9 +515,13 @@ class BacktestEngine:
                                 ))
                             continue
 
+                        result.contracts_resolved += 1
                         c_key, exp_str, strike_val, opt_type = contract_res
+                        
+                        result.option_premium_lookup_attempts += 1
                         opt_candle = options_data_loader.get_candle_at(c_key, bar_timestamp)
                         if opt_candle is None:
+                            result.option_premium_missing += 1
                             unavail_reason = f"DATA_UNAVAILABLE — Missing historical option candle for {c_key} at {bar_timestamp}"
                             rejected_total += 1
                             reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
@@ -447,9 +532,17 @@ class BacktestEngine:
                                 ))
                             continue
 
+                        result.option_premiums_found += 1
                         # Real Option entry execution using verified historical option premium
-                        opt_entry_price = opt_candle.close
-                        # 20% stop loss on option premium or based on option candle low
+                        opt_entry_price = float(opt_candle.close)
+                        if opt_entry_price <= 0.0:
+                            result.option_premium_missing += 1
+                            unavail_reason = f"DATA_UNAVAILABLE — Invalid non-positive option premium for {c_key} at {bar_timestamp}"
+                            rejected_total += 1
+                            reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
+                            continue
+
+                        # 20% stop loss on option premium
                         opt_stop_loss = round(max(1.0, opt_entry_price * 0.8), 2)
                         opt_target = round(opt_entry_price + 2 * (opt_entry_price - opt_stop_loss), 2)
                         
@@ -461,11 +554,27 @@ class BacktestEngine:
                         
                         max_affordable_qty = int(equity / opt_entry_price) if opt_entry_price > 0 else 0
                         if max_affordable_qty < lot_size:
+                            result.risk_rejections += 1
+                            result.risk_rejections_breakdown["insufficient_capital_for_lot"] = (
+                                result.risk_rejections_breakdown.get("insufficient_capital_for_lot", 0) + 1
+                            )
+                            rej_reason = f"RISK_REJECTED — Insufficient equity (₹{equity:.2f}) for 1 lot ({lot_size}) of {c_key} @ ₹{opt_entry_price:.2f}"
+                            rejected_total += 1
+                            reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
                             continue
                         opt_qty = min(opt_qty, (max_affordable_qty // lot_size) * lot_size)
                         if opt_qty <= 0:
+                            result.risk_rejections += 1
+                            result.risk_rejections_breakdown["zero_quantity_sized"] = (
+                                result.risk_rejections_breakdown.get("zero_quantity_sized", 0) + 1
+                            )
+                            rej_reason = "RISK_REJECTED — Sized quantity is 0 lots"
+                            rejected_total += 1
+                            reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
                             continue
 
+                        result.orders_created += 1
+                        result.trades_opened += 1
                         position = {
                             "strategy": best.strategy_name,
                             "symbol": symbol,
@@ -493,10 +602,16 @@ class BacktestEngine:
 
                         max_affordable_qty = int(equity / best.entry_price) if best.entry_price > 0 else 0
                         if max_affordable_qty < 1:
+                            result.risk_rejections += 1
+                            result.risk_rejections_breakdown["insufficient_capital"] = (
+                                result.risk_rejections_breakdown.get("insufficient_capital", 0) + 1
+                            )
                             position = None
                             continue
                         qty = min(qty, max_affordable_qty)
 
+                        result.orders_created += 1
+                        result.trades_opened += 1
                         position = {
                             "strategy": best.strategy_name,
                             "entry_time": bar.get("timestamp", ""),
@@ -546,6 +661,7 @@ class BacktestEngine:
                     total_cost=costs["total_cost"],
                 )
                 all_trades.append(trade)
+                result.trades_closed += 1
                 equity += costs["net_pnl"]
                 peak = max(peak, equity)
 
@@ -593,7 +709,9 @@ class BacktestEngine:
         dq.rejection_reasons = result.rejection_reason_counts
         if require_real_options and options_data_loader:
             dq.historical_contract_data = options_data_loader.is_data_available()
-            dq.bars_with_real_data = min(candles_scanned, options_data_loader.available_candles_count())
+            avail_cnt = options_data_loader.available_candles_count() if callable(getattr(options_data_loader, "available_candles_count", None)) else 0
+            avail_int = avail_cnt if isinstance(avail_cnt, int) else candles_scanned
+            dq.bars_with_real_data = min(candles_scanned, avail_int)
             dq.contracts_resolved = len(all_trades)
             dq.contracts_unavailable = sum(
                 count for r_name, count in result.rejection_reason_counts.items() if "DATA_UNAVAILABLE" in r_name
