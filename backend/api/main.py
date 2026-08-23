@@ -92,12 +92,8 @@ async def lifespan(app: FastAPI):
         from backend.broker.upstox_client import ALL_INSTRUMENTS
         from backend.api.websocket import update_price_cache
 
-        token = os.getenv("UPSTOX_ACCESS_TOKEN", "")
-        if not token:
-            try:
-                token = db.load_token()
-            except Exception:
-                token = ""
+        from backend.broker.token_resolver import resolve_upstox_token
+        token = resolve_upstox_token()
 
         ws_client = UpstoxWebSocketClient(
             access_token=token,

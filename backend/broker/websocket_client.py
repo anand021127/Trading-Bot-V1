@@ -40,18 +40,51 @@ def _extract_ltpc(feed: Dict[str, Any]) -> Dict[str, Any]:
     entry, regardless of which sub-message it arrived in (ltpc / fullFeed.
     marketFF / fullFeed.indexFF / firstLevelWithGreeks).
     """
-    if "ltpc" in feed:
+    if not isinstance(feed, dict):
+        try:
+            from google.protobuf.json_format import MessageToDict
+            feed = MessageToDict(feed)
+        except Exception:
+            if hasattr(feed, "__dict__"):
+                feed = feed.__dict__
+            else:
+                return {}
+
+    if "ltpc" in feed and isinstance(feed.get("ltpc"), dict):
         return feed.get("ltpc") or {}
-    full = feed.get("fullFeed") or {}
-    market_ff = full.get("marketFF")
-    index_ff = full.get("indexFF")
-    if market_ff:
-        return market_ff.get("ltpc") or {}
-    if index_ff:
-        return index_ff.get("ltpc") or {}
-    flwg = feed.get("firstLevelWithGreeks") or {}
-    if flwg:
-        return flwg.get("ltpc") or {}
+    if "ltp" in feed:
+        return feed
+    full = feed.get("fullFeed") or feed.get("ff") or {}
+    if isinstance(full, dict):
+        market_ff = full.get("marketFF") or full.get("market_ff")
+        index_ff = full.get("indexFF") or full.get("index_ff")
+        if isinstance(market_ff, dict):
+            if "ltpc" in market_ff and isinstance(market_ff.get("ltpc"), dict):
+                return market_ff.get("ltpc") or {}
+            if "ltp" in market_ff:
+                return market_ff
+            e_feed = market_ff.get("eFeed") or market_ff.get("e_feed")
+            if isinstance(e_feed, dict) and "ltpc" in e_feed:
+                return e_feed.get("ltpc") or {}
+        if isinstance(index_ff, dict):
+            if "ltpc" in index_ff and isinstance(index_ff.get("ltpc"), dict):
+                return index_ff.get("ltpc") or {}
+            if "ltp" in index_ff:
+                return index_ff
+    flwg = feed.get("firstLevelWithGreeks") or feed.get("first_level_with_greeks") or {}
+    if isinstance(flwg, dict):
+        if "ltpc" in flwg and isinstance(flwg.get("ltpc"), dict):
+            return flwg.get("ltpc") or {}
+        if "ltp" in flwg:
+            return flwg
+    opt_greeks = (feed.get("optionGreeks") or feed.get("option_greeks") or
+                  (full.get("optionGreeks") if isinstance(full, dict) else None) or
+                  (full.get("option_greeks") if isinstance(full, dict) else None) or {})
+    if isinstance(opt_greeks, dict):
+        if "ltpc" in opt_greeks and isinstance(opt_greeks.get("ltpc"), dict):
+            return opt_greeks.get("ltpc") or {}
+        if "ltp" in opt_greeks:
+            return opt_greeks
     return {}
 
 
@@ -88,7 +121,11 @@ class UpstoxWebSocketClient:
         on_price_update: Optional[Callable[[Dict[str, Any]], None]] = None,
         mode: str = "full",
     ) -> None:
-        self.access_token = access_token if access_token is not None else os.getenv("UPSTOX_ACCESS_TOKEN", "")
+        if access_token is not None:
+            self.access_token = access_token
+        else:
+            from backend.broker.token_resolver import resolve_upstox_token
+            self.access_token = resolve_upstox_token()
         self._instrument_keys: List[str] = list(instrument_keys or [])
         self._on_price_update = on_price_update
         self.mode = mode
@@ -194,8 +231,13 @@ class UpstoxWebSocketClient:
         }
 
     def start(self) -> None:
+        if self.access_token is None:
+            from backend.broker.token_resolver import resolve_upstox_token
+            self.access_token = resolve_upstox_token()
+
         if not self.access_token:
             self.connection_status = "auth_failed"
+            self.is_connected = False
             self._last_error = "No Upstox access token configured"
             logger.warning("WebSocket not started — no access token")
             return
@@ -207,6 +249,7 @@ class UpstoxWebSocketClient:
             import upstox_client  # noqa: F401
         except ImportError:
             self.connection_status = "disconnected"
+            self.is_connected = False
             self._last_error = "upstox-python-sdk not installed"
             logger.error(
                 "upstox-python-sdk is not installed. "
@@ -216,6 +259,7 @@ class UpstoxWebSocketClient:
 
         self._should_run = True
         self.connection_status = "connecting"
+        self.is_connected = False
         logger.info(
             "Starting Upstox v3 WebSocket client — %d instruments, mode=%s",
             len(self._instrument_keys), self.mode,
@@ -260,7 +304,7 @@ class UpstoxWebSocketClient:
         self._streamer = streamer
         streamer.connect()  # non-blocking — SDK runs the socket in a thread
 
-    def _on_open(self, *_args: Any) -> None:
+    def _on_open(self, *args: Any, **kwargs: Any) -> None:
         self.is_connected = True
         self.connection_status = "connected"
         self._reconnect_attempts = 0
@@ -286,28 +330,77 @@ class UpstoxWebSocketClient:
         if self._instrument_keys and self._streamer is not None:
             try:
                 self._streamer.subscribe(self._instrument_keys, self.mode)
-                logger.info("Re-subscribed %d instruments after reconnect", len(self._instrument_keys))
+                logger.info("Re-subscribed %d instruments after connect/reconnect", len(self._instrument_keys))
             except Exception as e:
-                logger.warning("Re-subscribe on reconnect failed: %s", e)
+                logger.warning("Re-subscribe on connect failed: %s", e)
 
-    def _on_message(self, _ws: Any, data: Dict[str, Any]) -> None:
-        """`data` is the already protobuf-decoded FeedResponse as a dict:
+    def _on_message(self, *args: Any, **kwargs: Any) -> None:
+        """`data` is either protobuf bytes, JSON string, or decoded FeedResponse dict:
         {"type": "...", "feeds": {instrument_key: {...}}, "currentTs": "..."}
+        Handles both 1-arg `_on_message(data)` and 2-arg `_on_message(ws, data)`
+        callback signatures seamlessly.
         """
+        data: Any = None
+        if args:
+            if len(args) == 1:
+                data = args[0]
+            else:
+                data = args[1]
+        elif "data" in kwargs:
+            data = kwargs["data"]
+        elif "message" in kwargs:
+            data = kwargs["message"]
+
+        if data is None:
+            return
+
         self._last_message_time = time.monotonic()
         self._total_messages += 1
-        msg_type = data.get("type")
+
+        # If data is bytes (raw protobuf), decode using FeedResponse
+        if isinstance(data, bytes):
+            try:
+                from upstox_client.feeder.MarketDataFeedV3_pb2 import FeedResponse
+                from google.protobuf.json_format import MessageToDict
+                feed_response = FeedResponse()
+                feed_response.ParseFromString(data)
+                data = MessageToDict(feed_response)
+            except Exception as e:
+                logger.debug("Failed to decode protobuf bytes: %s", e)
+                return
+        elif isinstance(data, str):
+            try:
+                import json
+                data = json.loads(data)
+            except Exception:
+                return
+        elif not isinstance(data, dict):
+            try:
+                from google.protobuf.json_format import MessageToDict
+                data = MessageToDict(data)
+            except Exception:
+                if hasattr(data, "__dict__"):
+                    data = data.__dict__
+                else:
+                    return
+
+        msg_type = data.get("type") if isinstance(data, dict) else None
         if msg_type == "market_info":
             logger.debug("WS market_info tick: %s", data.get("marketInfo"))
             return
 
-        feeds = data.get("feeds") or {}
+        feeds = data.get("feeds") if isinstance(data, dict) else None
+        if not isinstance(feeds, dict):
+            feeds = data if isinstance(data, dict) else {}
+
         if not feeds:
             return
 
         updated: List[str] = []
         with self._prices_lock:
             for instrument_key, feed in feeds.items():
+                if not isinstance(feed, dict):
+                    continue
                 ltpc = _extract_ltpc(feed)
                 if not ltpc or "ltp" not in ltpc:
                     continue
@@ -339,7 +432,8 @@ class UpstoxWebSocketClient:
             except Exception as e:
                 logger.warning("on_price_update callback error: %s", e)
 
-    def _on_error(self, _ws: Any, error: Any) -> None:
+    def _on_error(self, *args: Any, **kwargs: Any) -> None:
+        error = args[1] if len(args) >= 2 else (args[0] if args else kwargs.get("error", "Unknown error"))
         self._last_error = str(error)
         logger.warning("Upstox v3 WebSocket ERROR: %s", error)
         try:
@@ -355,7 +449,18 @@ class UpstoxWebSocketClient:
                 "Generate a new token in Settings."
             )
 
-    def _on_close(self, _ws: Any, code: Any, msg: Any) -> None:
+    def _on_close(self, *args: Any, **kwargs: Any) -> None:
+        code = None
+        msg = None
+        if len(args) >= 3:
+            code = args[1]
+            msg = args[2]
+        elif len(args) == 2:
+            code = args[0]
+            msg = args[1]
+        elif len(args) == 1:
+            msg = args[0]
+
         self.is_connected = False
         if self._should_run:
             self.connection_status = "reconnecting"
@@ -374,7 +479,8 @@ class UpstoxWebSocketClient:
         except Exception:
             pass
 
-    def _on_reconnecting(self, message: Any) -> None:
+    def _on_reconnecting(self, *args: Any, **kwargs: Any) -> None:
+        message = args[-1] if args else kwargs.get("message", "reconnecting")
         self._reconnect_attempts += 1
         self._last_reconnect_time = time.monotonic()
         self.connection_status = "reconnecting"
@@ -391,6 +497,8 @@ class UpstoxWebSocketClient:
         except Exception:
             pass
 
-    def _on_reconnect_stopped(self, message: Any) -> None:
+    def _on_reconnect_stopped(self, *args: Any, **kwargs: Any) -> None:
+        message = args[-1] if args else kwargs.get("message", "auto-reconnect stopped")
         self.connection_status = "disconnected"
+        self.is_connected = False
         logger.error("WebSocket auto-reconnect stopped: %s", message)
