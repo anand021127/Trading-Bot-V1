@@ -283,6 +283,80 @@ class TestHistoricalDataPipeline(unittest.TestCase):
         self.assertEqual(progress.get("processed_bars"), 600)
         self.assertEqual(progress.get("expected_bars"), 600)
 
+    def test_10_incomplete_400_of_600_fails_lifecycle(self) -> None:
+        """Test incomplete execution (e.g. 400 processed out of 600 expected) triggers STATUS_FAILED."""
+        from backend.backtest.task_manager import task_manager
+        from unittest.mock import MagicMock
+
+        task = task_manager.create_task()
+        task_id = task.task_id
+
+        engine = MagicMock(spec=BacktestEngine)
+        # Mock engine.run to simulate an incomplete run (returning only 400 scanned candles when 600 were expected)
+        mock_result = MagicMock()
+        mock_result.total_candles_scanned = 400
+        mock_result.skipped_symbols = ["NIFTY50"]
+        mock_result.to_dict.return_value = {}
+        engine.run.return_value = mock_result
+
+        asyncio.run(
+            run_backtest_in_background(
+                task_id=task_id,
+                client=None,
+                engine=engine,
+                symbols=["NIFTY50"],
+                interval="5minute",
+                start_date="2024-01-01",
+                end_date="2024-01-10",
+                strategy_names=["EMA_TREND"],
+            )
+        )
+
+        failed_task = task_manager.get(task_id)
+        self.assertIsNotNone(failed_task)
+        self.assertEqual(failed_task.status, STATUS_FAILED)
+        self.assertIn("BACKTEST_INCOMPLETE", failed_task.error)
+        print(f"\n[Test 10] Incomplete 400/600 backtest correctly failed with error: {failed_task.error}")
+
+    def test_11_complete_full_available_nifty50_run(self) -> None:
+        """Test full available NIFTY50 historical run (12,735 candles) processes 100% of candles to completion."""
+        from backend.backtest.task_manager import task_manager
+        task = task_manager.create_task()
+        task_id = task.task_id
+
+        engine = BacktestEngine(
+            strategy_engine=MultiStrategyEngine([EMATrendStrategy()]),
+            costs=CostConfig(),
+            capital=100000.0,
+        )
+
+        # Full available date range in real_data/NIFTY50_2024_5min.json: 2024-01-01 to 2024-09-09 (12,735 bars)
+        asyncio.run(
+            run_backtest_in_background(
+                task_id=task_id,
+                client=None,
+                engine=engine,
+                symbols=["NIFTY50"],
+                interval="5minute",
+                start_date="2024-01-01",
+                end_date="2024-09-09",
+                strategy_names=["EMA_TREND"],
+            )
+        )
+
+        full_task = task_manager.get(task_id)
+        self.assertIsNotNone(full_task)
+        self.assertEqual(full_task.status, STATUS_COMPLETED)
+        self.assertIsNotNone(full_task.progress)
+
+        progress = full_task.progress
+        print(f"\n[Test 11] Full available NIFTY50 progress: {progress}")
+        self.assertEqual(progress.get("phase"), "completed")
+        self.assertEqual(progress.get("bar_index"), 12735)
+        self.assertEqual(progress.get("total_bars"), 12735)
+        self.assertEqual(progress.get("processed_bars"), 12735)
+        self.assertEqual(progress.get("expected_bars"), 12735)
+
 
 if __name__ == "__main__":
     unittest.main()

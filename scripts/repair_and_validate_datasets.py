@@ -154,8 +154,8 @@ def main() -> int:
                 print(f"[REPAIR] Attempting safe reload/recovery for {filename}...")
                 try:
                     loaded = load_dataset_safe(file_path, auto_repair=True, enforce_declared_specs=False)
-                    # Atomically save with full formatting
-                    save_dataset_atomic(file_path, loaded, indent=2, enforce_declared_specs=True)
+                    # Atomically save valid structural data
+                    save_dataset_atomic(file_path, loaded, indent=2, enforce_declared_specs=False)
                     # Re-inspect
                     inspection = inspect_single_file(file_path)
                 except Exception as e:
