@@ -52,6 +52,24 @@ INDEX_LOT_SIZES: Dict[str, int] = {
 }
 
 
+def normalize_underlying(symbol: str) -> str:
+    """Normalize underlying index name to standard canonical key."""
+    s = symbol.upper().replace(" ", "").replace("_", "").replace("-", "")
+    if s in ("NIFTY", "NIFTY50", "NIFTY50INDEX", "NSEINDEXNIFTY50"):
+        return "NIFTY50"
+    if s in ("BANKNIFTY", "NIFTYBANK", "BANKNIFTYINDEX", "NSEINDEXNIFTYBANK"):
+        return "BANKNIFTY"
+    if s in ("FINNIFTY", "NIFTYFINSERVICE", "FINNIFTYINDEX", "NSEINDEXNIFTYFINSERVICE"):
+        return "FINNIFTY"
+    if s in ("MIDCPNIFTY", "NIFTYMIDSELECT", "MIDCPNIFTYINDEX", "NSEINDEXNIFTYMIDSELECT"):
+        return "MIDCPNIFTY"
+    if s in ("SENSEX", "BSEINDEXSENSEX", "BSESENSEX"):
+        return "SENSEX"
+    if s in ("BANKEX", "BSEINDEXBANKEX", "BSEBANKEX"):
+        return "BANKEX"
+    return symbol.upper()
+
+
 @dataclass
 class HistoricalOptionRecord:
     """A verified historical option candle record."""
@@ -141,8 +159,9 @@ class HistoricalOptionsDataLoader:
 
     def register_option_candle(self, record: HistoricalOptionRecord) -> None:
         """Register a single verified historical option candle."""
+        norm_und = normalize_underlying(record.underlying)
         contract_key = record.instrument_key or build_trading_symbol(
-            record.underlying,
+            norm_und,
             datetime.fromisoformat(record.expiry).date() if isinstance(record.expiry, str) and "-" in record.expiry else date.today(),
             record.strike,
             record.option_type,
@@ -151,7 +170,7 @@ class HistoricalOptionsDataLoader:
         if contract_key not in self._contracts_data:
             self._contracts_data[contract_key] = []
             lookup_tuple = (
-                record.underlying.upper(),
+                norm_und,
                 record.expiry,
                 float(record.strike),
                 record.option_type.upper(),
@@ -160,6 +179,9 @@ class HistoricalOptionsDataLoader:
             
         self._contracts_data[contract_key].append(record)
         self._timestamp_index[(contract_key, record.timestamp)] = record
+        norm_ts = record.timestamp.replace(" ", "T")
+        if norm_ts != record.timestamp:
+            self._timestamp_index[(contract_key, norm_ts)] = record
 
     def load_contract_candles(
         self,
@@ -276,7 +298,7 @@ class HistoricalOptionsDataLoader:
         Returns:
             (contract_key, expiry_str, atm_strike, option_type) if resolvable, else None (DATA_UNAVAILABLE).
         """
-        und_key = underlying.upper()
+        und_key = normalize_underlying(underlying)
         opt_type = option_type.upper()
         step = strike_interval or INDEX_STRIKE_INTERVALS.get(und_key, 50.0)
         atm_strike = float(round(spot_price / step) * step)
@@ -347,4 +369,8 @@ class HistoricalOptionsDataLoader:
         
         Returns None (DATA_UNAVAILABLE) if candle is not present.
         """
-        return self._timestamp_index.get((contract_key, timestamp))
+        rec = self._timestamp_index.get((contract_key, timestamp))
+        if rec:
+            return rec
+        norm_ts = timestamp.replace(" ", "T")
+        return self._timestamp_index.get((contract_key, norm_ts))
