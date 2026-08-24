@@ -278,13 +278,69 @@ export default function Backtest() {
             </div>
           )}
 
+          {/* Signals & Rejections Overview Card */}
+          <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-center">
+              <div className="bg-[#0f1628] border border-[#1e2d45] rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-widest mb-0.5">Signals Generated</div>
+                <div className="text-xl font-bold text-blue-400">{signalsGenerated}</div>
+              </div>
+              <div className="bg-[#0f1628] border border-[#1e2d45] rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-widest mb-0.5">Trades Executed</div>
+                <div className="text-xl font-bold text-emerald-400">{tradesTaken}</div>
+              </div>
+              <div className="bg-[#0f1628] border border-[#1e2d45] rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-widest mb-0.5">Rejected</div>
+                <div className="text-xl font-bold text-amber-400">{rejectedTotal}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Rejection Breakdown Panel */}
+          {Object.keys(rejectionReasons).length > 0 && (
+            <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-5">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <AlertTriangle size={14} className="text-amber-400" />
+                  Rejection Breakdown
+                </h2>
+                <span className="text-xs text-slate-500 font-medium">
+                  {rejectedTotal} total rejection evaluation(s)
+                </span>
+              </div>
+              <div className="space-y-2">
+                {Object.entries(rejectionReasons)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([reason, count]) => {
+                    const pct = rejectedTotal > 0 ? ((count / rejectedTotal) * 100).toFixed(1) : '0.0'
+                    return (
+                      <div key={reason} className="bg-[#0f1628] border border-[#1e2d45] rounded-lg p-2.5">
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="text-slate-300 font-medium">{reason}</span>
+                          <span className="text-slate-400 font-semibold ml-2 whitespace-nowrap">
+                            {count} ({pct}%)
+                          </span>
+                        </div>
+                        <div className="h-1.5 bg-[#141b2d] rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-amber-500/70 rounded-full"
+                            style={{ width: `${Math.min(100, Math.max(2, parseFloat(pct)))}%` }}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
+              </div>
+            </div>
+          )}
+
           {tradesTaken === 0 ? (
             <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-8 text-center">
               <BarChart2 size={28} className="mx-auto mb-2 text-slate-600" />
               <div className="text-sm text-slate-400 font-medium">No trades taken in this window</div>
               <div className="text-xs text-slate-600 mt-1">
                 {signalsGenerated > 0
-                  ? `${signalsGenerated} signal(s) were generated but not all conditions passed — see rejection reasons below.`
+                  ? `${signalsGenerated} signal(s) were generated but not all conditions passed — see rejection reasons above.`
                   : 'No strategy conditions were fully met. Try a longer date range, a different interval, or a trending symbol.'}
               </div>
             </div>
@@ -342,22 +398,6 @@ export default function Backtest() {
                   <div className="flex justify-between text-[10px] text-slate-600 mt-1">
                     <span>{formatCurrency(equityCurve[0]?.equity)}</span>
                     <span>{formatCurrency(equityCurve[equityCurve.length - 1]?.equity)}</span>
-                  </div>
-                </div>
-              )}
-
-              {Object.keys(rejectionReasons).length > 0 && (
-                <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-5">
-                  <h2 className="text-sm font-semibold text-white mb-3">
-                    Why signals were rejected ({rejectedTotal} total)
-                  </h2>
-                  <div className="space-y-1.5">
-                    {Object.entries(rejectionReasons).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([reason, count]) => (
-                      <div key={reason} className="flex items-center justify-between text-xs">
-                        <span className="text-slate-400">{reason}</span>
-                        <span className="text-slate-500 font-medium">{count}</span>
-                      </div>
-                    ))}
                   </div>
                 </div>
               )}

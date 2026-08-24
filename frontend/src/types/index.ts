@@ -303,6 +303,8 @@ export interface BacktestResponse {
   total_candles_scanned?: number
   signals_generated?: number
   trades_taken?: number
+  trades_executed?: number
+  total_rejected?: number
   winning_trades?: number
   losing_trades?: number
   accuracy_pct?: number

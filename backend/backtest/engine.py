@@ -245,6 +245,8 @@ class BacktestResult:
             "trade_log": self.trade_log,
             "rejected_signals_sample": self.rejected_signals_sample,
             "rejected_signals_total_count": self.rejected_signals_total_count,
+            "total_rejected": self.rejected_signals_total_count,
+            "trades_executed": self.trades_taken,
             "rejection_reason_counts": self.rejection_reason_counts,
             "skipped_symbols": self.skipped_symbols,
             "data_source": self.data_source,
