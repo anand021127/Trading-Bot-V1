@@ -28,11 +28,24 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
 V3_FEED_URL = "wss://api.upstox.com/v3/feed/market-data-feed"
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def is_nse_market_open() -> bool:
+    """Check if NSE/BSE market session is currently active (09:15 to 15:30 IST on weekdays)."""
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    return market_open <= now_ist <= market_close
 
 
 def _extract_ltpc(feed: Dict[str, Any]) -> Dict[str, Any]:
@@ -136,9 +149,13 @@ class UpstoxWebSocketClient:
         self.connection_status = "disconnected"
         self.is_connected = False
         self._last_message_time: float = 0.0
+        self._last_tick_time: float = 0.0
         self._last_error: Optional[str] = None
         self._reconnect_attempts = 0
         self._total_messages: int = 0
+        self._ticks_received: int = 0
+        self._ignored_messages: int = 0
+        self._parse_errors: int = 0
         self._last_reconnect_time: float = 0.0
 
         self._streamer: Any = None
@@ -177,9 +194,15 @@ class UpstoxWebSocketClient:
             return self._prices.get(instrument_key)
 
     def is_data_stale(self, max_age_seconds: float = 30.0) -> bool:
-        if self._last_message_time == 0:
+        """Check if market feed is stale.
+        During market hours: returns True if no valid price tick has arrived within max_age_seconds.
+        Outside market hours: feed is legitimately idle (returns False).
+        """
+        if not is_nse_market_open():
+            return False
+        if self._last_tick_time == 0:
             return True
-        return time.monotonic() - self._last_message_time > max_age_seconds
+        return (time.monotonic() - self._last_tick_time) > max_age_seconds
 
     def get_tick_age(self, instrument_key: str) -> Optional[float]:
         """Return the age of the last tick for a specific instrument in seconds.
@@ -196,33 +219,51 @@ class UpstoxWebSocketClient:
     @property
     def market_data_status(self) -> str:
         """Separate from connection_status — the WebSocket can be CONNECTED
-        but NOT RECEIVING DATA (stale). This property distinguishes:
-          LIVE         — connected and recent data received
-          STALE        — connected but no data within the staleness window
-          UNAVAILABLE  — not connected at all
+        but NOT RECEIVING DATA (stale / market closed). This property distinguishes:
+          LIVE           — connected and recent ticks received
+          STALE          — connected during market hours but no recent ticks received
+          MARKET_CLOSED  — connected outside regular market hours (feed legitimately idle)
+          UNAVAILABLE    — not connected at all
         """
         if not self.is_connected:
             return "UNAVAILABLE"
-        if self.is_data_stale():
+        if is_nse_market_open():
+            if self._last_tick_time > 0 and (time.monotonic() - self._last_tick_time) <= 30.0:
+                return "LIVE"
             return "STALE"
-        return "LIVE"
+        else:
+            if self._last_tick_time > 0 and (time.monotonic() - self._last_tick_time) <= 30.0:
+                return "LIVE"
+            return "MARKET_CLOSED"
 
     def status_report(self) -> Dict[str, Any]:
         """Everything the diagnostics/dashboard UI needs to show honestly."""
         now = time.monotonic()
+        market_open = is_nse_market_open()
+        tick_age = (
+            round(now - self._last_tick_time, 1)
+            if self._last_tick_time else None
+        )
+        msg_age = (
+            round(now - self._last_message_time, 1)
+            if self._last_message_time else None
+        )
         return {
             "connection_status": self.connection_status,
             "is_connected": self.is_connected,
+            "market_open": market_open,
             "market_data_status": self.market_data_status,
             "subscribed_instruments": len(self._instrument_keys),
-            "last_tick_age_seconds": (
-                round(now - self._last_message_time, 1)
-                if self._last_message_time else None
-            ),
+            "instrument_keys": list(self._instrument_keys),
+            "last_tick_age_seconds": tick_age,
+            "last_message_age_seconds": msg_age,
             "is_stale": self.is_data_stale(),
             "last_error": self._last_error,
             "reconnect_attempts": self._reconnect_attempts,
             "total_messages_received": self._total_messages,
+            "ticks_received": self._ticks_received,
+            "ignored_messages_count": self._ignored_messages,
+            "parse_errors_count": self._parse_errors,
             "last_reconnect_seconds_ago": (
                 round(now - self._last_reconnect_time, 1)
                 if self._last_reconnect_time else None
@@ -366,6 +407,7 @@ class UpstoxWebSocketClient:
                 feed_response.ParseFromString(data)
                 data = MessageToDict(feed_response)
             except Exception as e:
+                self._parse_errors += 1
                 logger.debug("Failed to decode protobuf bytes: %s", e)
                 return
         elif isinstance(data, str):
@@ -373,6 +415,7 @@ class UpstoxWebSocketClient:
                 import json
                 data = json.loads(data)
             except Exception:
+                self._parse_errors += 1
                 return
         elif not isinstance(data, dict):
             try:
@@ -382,10 +425,12 @@ class UpstoxWebSocketClient:
                 if hasattr(data, "__dict__"):
                     data = data.__dict__
                 else:
+                    self._parse_errors += 1
                     return
 
         msg_type = data.get("type") if isinstance(data, dict) else None
         if msg_type == "market_info":
+            self._ignored_messages += 1
             logger.debug("WS market_info tick: %s", data.get("marketInfo"))
             return
 
@@ -394,6 +439,7 @@ class UpstoxWebSocketClient:
             feeds = data if isinstance(data, dict) else {}
 
         if not feeds:
+            self._ignored_messages += 1
             return
 
         updated: List[str] = []
@@ -425,7 +471,11 @@ class UpstoxWebSocketClient:
                 updated.append(instrument_key)
 
         if updated:
+            self._ticks_received += len(updated)
+            self._last_tick_time = time.monotonic()
             logger.debug("WS tick batch: %d instruments updated", len(updated))
+        else:
+            self._ignored_messages += 1
         if self._on_price_update and updated:
             try:
                 self._on_price_update(self.get_latest_prices())

@@ -26,20 +26,12 @@ def _result(name: str, status: str, ms: float, details: str = "", error: str = "
 
 async def _test_authentication() -> Dict[str, Any]:
     t0 = time.monotonic()
-    token = os.getenv("UPSTOX_ACCESS_TOKEN", "")
-    if not token:
-        try:
-            from backend.database.db_manager import DatabaseManager
-            db = DatabaseManager(db_path=settings.database.path)
-            token = db.load_token()
-            if token:
-                os.environ["UPSTOX_ACCESS_TOKEN"] = token
-        except Exception:
-            pass
+    from backend.broker.token_resolver import resolve_upstox_token
+    token = resolve_upstox_token()
     if not token or len(token) < 20:
         ms = (time.monotonic() - t0) * 1000
         return _result("authentication", "FAIL", ms, "",
-                        "UPSTOX_ACCESS_TOKEN not set. Go to Settings → Generate Token.")
+                        "Upstox access token not set. Go to Settings → Generate Token.")
     try:
         from backend.broker.upstox_client import UpstoxClient
         client = UpstoxClient(access_token=token)
@@ -134,19 +126,13 @@ async def _test_websocket() -> Dict[str, Any]:
     connection, so the result reflects what the dashboard is really seeing.
     """
     t0 = time.monotonic()
-    token = os.getenv("UPSTOX_ACCESS_TOKEN", "")
-    if not token:
-        try:
-            from backend.database.db_manager import DatabaseManager
-            db = DatabaseManager(db_path=settings.database.path)
-            token = db.load_token()
-        except Exception:
-            pass
+    from backend.broker.token_resolver import resolve_upstox_token
+    token = resolve_upstox_token()
 
     if not token or len(token) < 20:
         ms = (time.monotonic() - t0) * 1000
         return _result("websocket", "FAIL", ms, "",
-                        "UPSTOX_ACCESS_TOKEN not set. WebSocket requires a valid token.")
+                        "Upstox access token not set. WebSocket requires a valid token.")
 
     try:
         from backend.api.websocket import get_broker_ws_status
