@@ -193,13 +193,8 @@ class UpstoxWebSocketClient:
         with self._prices_lock:
             return self._prices.get(instrument_key)
 
-    def is_data_stale(self, max_age_seconds: float = 30.0, ignore_market_hours: bool = False) -> bool:
-        """Check if market feed is stale.
-        During market hours: returns True if no valid price tick has arrived within max_age_seconds.
-        Outside market hours: feed is legitimately idle (returns False, unless ignore_market_hours=True).
-        """
-        if not ignore_market_hours and not is_nse_market_open():
-            return False
+    def is_data_stale(self, max_age_seconds: float = 30.0) -> bool:
+        """Check if market feed has not received a valid price tick within max_age_seconds."""
         if self._last_tick_time == 0:
             return True
         return (time.monotonic() - self._last_tick_time) > max_age_seconds
