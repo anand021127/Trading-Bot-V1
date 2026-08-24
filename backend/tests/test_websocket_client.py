@@ -121,7 +121,7 @@ def test_on_close_sets_reconnecting_when_should_run() -> None:
 
 def test_is_data_stale_true_before_any_tick() -> None:
     client = UpstoxWebSocketClient(access_token="fake-token-for-unit-test-only")
-    assert client.is_data_stale() is True
+    assert client.is_data_stale(ignore_market_hours=True) is True
 
 
 def test_status_report_shape() -> None:
