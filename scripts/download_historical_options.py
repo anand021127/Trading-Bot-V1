@@ -203,15 +203,19 @@ def discover_required_contracts_from_signals(
                     atm_strike = float(round(spot_price / step) * step)
                     target_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).date()
                     
-                    # Determine expiry date from pre-fetched list
+                    # Determine expiry date from pre-fetched list (enforce <= 10 day proximity)
                     expiry_date_str = ""
                     if symbol_expiries:
-                        future_exp = [e for e in symbol_expiries if e >= target_dt.isoformat()]
+                        max_expiry_date = (target_dt + timedelta(days=10)).isoformat()
+                        future_exp = [
+                            e for e in symbol_expiries
+                            if target_dt.isoformat() <= e <= max_expiry_date
+                        ]
                         if future_exp:
                             expiry_date_str = future_exp[0]
 
                     if not expiry_date_str:
-                        # Fallback calculation using standard expiry weekday
+                        # Fallback calculation using calendar weekly expiry date
                         from backend.backtest.historical_contract_resolver import get_nearest_expiry_for_date
                         expiry_dt = get_nearest_expiry_for_date(sym, target_dt)
                         expiry_date_str = expiry_dt.isoformat()

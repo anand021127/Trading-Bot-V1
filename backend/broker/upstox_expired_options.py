@@ -457,13 +457,21 @@ class UpstoxExpiredOptionsClient:
             expiries = []
 
         target_date_str = target_date.isoformat()
-        future_expiries = [e for e in expiries if e >= target_date_str]
+        # Enforce maximum proximity threshold: nearest weekly expiry must be within 10 calendar days
+        # This prevents distant expiries (e.g. Oct 2024 for a June 2024 trade) from being paired incorrectly
+        valid_expiries = [
+            e for e in expiries
+            if target_date_str <= e <= (target_date + timedelta(days=10)).isoformat()
+        ]
         
-        if not future_expiries:
-            logger.warning("No historical expiry >= %s found for %s in Upstox", target_date_str, und_key)
+        if not valid_expiries:
+            logger.warning(
+                "No historical expiry within 10 days of %s found for %s in Upstox (available range: %s to %s)",
+                target_date_str, und_key, expiries[0] if expiries else "none", expiries[-1] if expiries else "none"
+            )
             return None
 
-        nearest_expiry = future_expiries[0]
+        nearest_expiry = valid_expiries[0]
 
         try:
             contracts = self.get_option_contracts(und_key, nearest_expiry)
