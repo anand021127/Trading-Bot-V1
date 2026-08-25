@@ -40,6 +40,6 @@
   ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "https://upstoxbot-anand.duckdns.org/api/$1" },
-    { "source": "/(.*)", "destination": "/index.html" }
+    { "source": "/((?!api/|sw\\.js|manifest\\.json|manifest\\.webmanifest|favicon\\.svg|icons/|assets/).*)", "destination": "/index.html" }
   ]
 }
