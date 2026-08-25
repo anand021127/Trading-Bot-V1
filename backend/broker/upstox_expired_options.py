@@ -360,12 +360,16 @@ class UpstoxExpiredOptionsClient:
             return self._expiries_cache[und_key]
 
         inst_key = INDEX_INSTRUMENT_KEYS.get(und_key, f"NSE_INDEX|{underlying}")
-        data = self._get("/expired-instruments/expiries", params={"instrument_key": inst_key})
-        expiries = data.get("data", [])
-        clean_expiries = sorted([str(e) for e in expiries])
-        if clean_expiries:
+        try:
+            data = self._get("/expired-instruments/expiries", params={"instrument_key": inst_key})
+            expiries = data.get("data", [])
+            clean_expiries = sorted([str(e) for e in expiries])
             self._expiries_cache[und_key] = clean_expiries
-        return clean_expiries
+            return clean_expiries
+        except Exception as e:
+            logger.warning("Could not fetch expired expiries for %s: %s", und_key, e)
+            self._expiries_cache[und_key] = []
+            return []
 
     def get_option_contracts(self, underlying: str, expiry_date: str) -> List[Dict[str, Any]]:
         """Fetch expired option contracts for an underlying and specific expiry date."""
