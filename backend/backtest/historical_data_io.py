@@ -466,3 +466,7 @@ def load_dataset_safe(
             raise
         raise HistoricalDataCorruptedError(f"Failed to load dataset from {file_path}: {e}") from e
 
+
+# Compatibility alias
+save_dataset_safe = save_dataset_atomic
+

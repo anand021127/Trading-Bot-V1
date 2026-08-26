@@ -25,9 +25,14 @@ import io
 import json
 import logging
 import time
+import urllib.error
+import urllib.request
 from typing import Any, Dict, Optional
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +59,19 @@ class InstrumentMaster:
         return (time.monotonic() - self._fetched_at) > REFRESH_TTL_SECONDS
 
     def _fetch_and_parse(self) -> Dict[str, str]:
-        resp = requests.get(INSTRUMENT_MASTER_URL, timeout=self.timeout)
-        resp.raise_for_status()
-        with gzip.GzipFile(fileobj=io.BytesIO(resp.content)) as gz:
+        if requests is not None:
+            resp = requests.get(INSTRUMENT_MASTER_URL, timeout=self.timeout)
+            resp.raise_for_status()
+            content = resp.content
+        else:
+            req = urllib.request.Request(
+                INSTRUMENT_MASTER_URL,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; InstrumentMaster/1.0)"},
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                content = resp.read()
+
+        with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
             data: Any = json.load(gz)
 
         mapping: Dict[str, str] = {}

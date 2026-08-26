@@ -1,9 +1,13 @@
 """Upstox REST API v2 client — production grade with retry and error handling."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,7 +40,9 @@ V3_INTERVAL_MAP: Dict[str, Tuple[str, int]] = {
     "month": ("months", 1),
 }
 
-def _build_session() -> requests.Session:
+def _build_session() -> Any:
+    if requests is None:
+        return None
     session = requests.Session()
     retry = Retry(
         total=3, read=3, connect=3,
@@ -71,7 +77,11 @@ class UpstoxClient:
         self._session = _build_session()
 
     def _headers(self) -> Dict[str, str]:
-        h = {"Accept": "application/json", "Content-Type": "application/json"}
+        h = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
         if self.access_token:
             h["Authorization"] = f"Bearer {self.access_token}"
         return h
@@ -99,35 +109,84 @@ class UpstoxClient:
         return self._get_url(f"{self.base_url}{path}", params)
 
     def _get_url(self, url: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+        if self._session is not None and requests is not None:
+            try:
+                r = self._session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
+            except requests.Timeout:
+                raise UpstoxAPIError(408, f"Timeout for {url}")
+            except requests.ConnectionError as e:
+                raise UpstoxAPIError(503, f"Connection error: {e}")
+
+            if r.status_code == 401:
+                raise UpstoxAPIError(401, "Token invalid or expired — go to Settings and generate a new token.")
+            if r.status_code == 410:
+                raise UpstoxAPIError(410, "This API endpoint is deprecated. Update to Upstox API v2.")
+            if r.status_code == 429:
+                raise UpstoxAPIError(429, "Rate limit hit.")
+            if r.status_code == 403:
+                raise UpstoxAPIError(403, "Access forbidden — check API permissions in Upstox developer portal.")
+
+            try:
+                data = r.json()
+            except ValueError:
+                raise UpstoxAPIError(r.status_code, f"Invalid JSON: {r.text[:200]}")
+
+            if r.status_code >= 400:
+                # Extract Upstox error message
+                err = data.get("message") or data.get("errors") or str(data)
+                if isinstance(err, list):
+                    err = "; ".join(str(e) for e in err)
+                raise UpstoxAPIError(r.status_code, str(err))
+
+            return data
+
+        # Fallback to standard library urllib for zero-dependency runtime
+        full_url = url
+        if params:
+            query_str = urllib.parse.urlencode(params)
+            full_url = f"{full_url}?{query_str}"
+
+        req = urllib.request.Request(full_url, headers=self._headers(), method="GET")
         try:
-            r = self._session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
-        except requests.Timeout:
-            raise UpstoxAPIError(408, f"Timeout for {url}")
-        except requests.ConnectionError as e:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                status = resp.status
+                body = resp.read().decode("utf-8")
+                try:
+                    data = json.loads(body)
+                except ValueError:
+                    raise UpstoxAPIError(status, f"Invalid JSON: {body[:200]}")
+
+                if status >= 400 or data.get("status") == "error":
+                    err = data.get("message") or data.get("errors") or str(data)
+                    if isinstance(err, list):
+                        err = "; ".join(str(e) for e in err)
+                    raise UpstoxAPIError(status, str(err))
+
+                return data
+        except urllib.error.HTTPError as e:
+            status = e.code
+            try:
+                body = e.read().decode("utf-8")
+                parsed = json.loads(body)
+                err = parsed.get("message") or parsed.get("errors") or body[:200]
+                if isinstance(err, list):
+                    err = "; ".join(str(item) for item in err)
+            except Exception:
+                err = str(e)
+
+            if status == 401:
+                raise UpstoxAPIError(401, "Token invalid or expired — go to Settings and generate a new token.")
+            if status == 403:
+                raise UpstoxAPIError(403, "Access forbidden — check API permissions in Upstox developer portal.")
+            if status == 429:
+                raise UpstoxAPIError(429, "Rate limit hit.")
+            raise UpstoxAPIError(status, str(err))
+        except urllib.error.URLError as e:
             raise UpstoxAPIError(503, f"Connection error: {e}")
-
-        if r.status_code == 401:
-            raise UpstoxAPIError(401, "Token invalid or expired — go to Settings and generate a new token.")
-        if r.status_code == 410:
-            raise UpstoxAPIError(410, "This API endpoint is deprecated. Update to Upstox API v2.")
-        if r.status_code == 429:
-            raise UpstoxAPIError(429, "Rate limit hit.")
-        if r.status_code == 403:
-            raise UpstoxAPIError(403, "Access forbidden — check API permissions in Upstox developer portal.")
-
-        try:
-            data = r.json()
-        except ValueError:
-            raise UpstoxAPIError(r.status_code, f"Invalid JSON: {r.text[:200]}")
-
-        if r.status_code >= 400:
-            # Extract Upstox error message
-            err = data.get("message") or data.get("errors") or str(data)
-            if isinstance(err, list):
-                err = "; ".join(str(e) for e in err)
-            raise UpstoxAPIError(r.status_code, str(err))
-
-        return data
+        except Exception as e:
+            if isinstance(e, UpstoxAPIError):
+                raise
+            raise UpstoxAPIError(500, str(e))
 
     # ─── Auth ─────────────────────────────────────────────────────────────────
 
@@ -261,11 +320,12 @@ class UpstoxClient:
         chunk_days = 25 if unit == "minutes" else (180 if unit == "days" else 3650)
 
         all_rows: List[List[Any]] = []
+        encoded_key = urllib.parse.quote(instrument_key, safe="")
         chunk_end = to_dt
         while chunk_end >= from_dt:
             chunk_start = max(from_dt, chunk_end - timedelta(days=chunk_days))
             path = (
-                f"/historical-candle/{instrument_key}/{unit}/{unit_interval}"
+                f"/historical-candle/{encoded_key}/{unit}/{unit_interval}"
                 f"/{chunk_end.isoformat()}/{chunk_start.isoformat()}"
             )
             try:
