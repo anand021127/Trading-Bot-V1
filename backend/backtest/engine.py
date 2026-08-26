@@ -156,16 +156,44 @@ class BacktestTrade:
     stamp_duty: float = 0.0
     slippage: float = 0.0
     total_cost: float = 0.0
+    underlying: str = ""
+    instrument_key: str = ""
+    option_symbol: str = ""
+    strike: Optional[float] = None
+    option_type: str = ""
+    expiry: str = ""
+    lot_size: int = 25
+    stop_loss: float = 0.0
+    target: float = 0.0
+    trailing_stop: float = 0.0
+    setup_score: float = 0.0
+    r_multiple: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        risk_per_share = (self.entry_price - self.stop_loss) if (self.stop_loss and self.entry_price and self.entry_price > self.stop_loss) else 0.0
+        r_mult = (self.net_pnl / (risk_per_share * self.quantity)) if (risk_per_share > 0 and self.quantity > 0) else None
+        if self.r_multiple is not None:
+            r_mult = self.r_multiple
+
         return {
+            "timestamp": self.entry_time,
             "symbol": self.symbol,
+            "underlying": self.underlying or self.symbol,
+            "instrument_key": self.instrument_key or self.symbol,
+            "option_symbol": self.option_symbol or (self.symbol if self.option_type else ""),
+            "strike": self.strike if self.strike is not None else "",
+            "option_type": self.option_type,
+            "expiry": self.expiry,
             "strategy": self.strategy,
             "entry_time": self.entry_time,
             "exit_time": self.exit_time,
             "entry_price": self.entry_price,
             "exit_price": self.exit_price,
             "quantity": self.quantity,
+            "lot_size": self.lot_size,
+            "stop_loss": self.stop_loss,
+            "target": self.target,
+            "trailing_stop": self.trailing_stop,
             "exit_reason": self.exit_reason,
             "gross_pnl": self.gross_pnl,
             "brokerage": self.brokerage,
@@ -177,8 +205,11 @@ class BacktestTrade:
             "slippage": self.slippage,
             "total_cost": self.total_cost,
             "charges": self.charges,
+            "fees": round(self.charges - self.slippage, 2) if self.charges else 0.0,
             "net_pnl": self.net_pnl,
             "confidence": self.confidence,
+            "setup_score": self.setup_score or self.confidence,
+            "r_multiple": round(r_mult, 2) if isinstance(r_mult, (int, float)) else "",
         }
 
 
@@ -438,6 +469,17 @@ class BacktestEngine:
                             stamp_duty=costs["stamp_duty"],
                             slippage=costs["slippage"],
                             total_cost=costs["total_cost"],
+                            underlying=position.get("underlying", symbol),
+                            instrument_key=position.get("contract_key", position.get("contract_symbol", symbol)),
+                            option_symbol=position.get("option_symbol", position.get("contract_symbol", "")),
+                            strike=position.get("strike"),
+                            option_type=position.get("option_type", ""),
+                            expiry=position.get("expiry", ""),
+                            lot_size=position.get("lot_size", INDEX_LOT_SIZES.get(symbol.upper(), 25)),
+                            stop_loss=position.get("stop_loss", 0.0),
+                            target=position.get("target", 0.0),
+                            trailing_stop=position.get("trailing_stop", 0.0),
+                            setup_score=position.get("confidence", 0.0),
                         )
                         all_trades.append(trade)
                         result.trades_closed += 1
@@ -577,11 +619,21 @@ class BacktestEngine:
 
                         result.orders_created += 1
                         result.trades_opened += 1
+                        
+                        opt_trading_sym = c_key
+                        try:
+                            exp_date_obj = datetime.fromisoformat(exp_str).date() if exp_str and "-" in exp_str else bar_dt
+                            opt_trading_sym = build_trading_symbol(symbol, exp_date_obj, strike_val, opt_type)
+                        except Exception:
+                            opt_trading_sym = c_key
+
                         position = {
                             "strategy": best.strategy_name,
                             "symbol": symbol,
-                            "contract_symbol": c_key,
+                            "underlying": symbol,
+                            "contract_symbol": opt_trading_sym or c_key,
                             "contract_key": c_key,
+                            "option_symbol": opt_trading_sym or c_key,
                             "expiry": exp_str,
                             "strike": strike_val,
                             "option_type": opt_type,
@@ -592,6 +644,7 @@ class BacktestEngine:
                             "trailing_stop": opt_stop_loss,
                             "target": opt_target,
                             "quantity": opt_qty,
+                            "lot_size": lot_size,
                             "confidence": best.confidence,
                         }
                         continue
@@ -616,12 +669,22 @@ class BacktestEngine:
                         result.trades_opened += 1
                         position = {
                             "strategy": best.strategy_name,
+                            "symbol": symbol,
+                            "underlying": symbol,
+                            "contract_symbol": symbol,
+                            "contract_key": symbol,
+                            "option_symbol": "",
+                            "expiry": "",
+                            "strike": None,
+                            "option_type": "",
+                            "is_real_option": False,
                             "entry_time": bar.get("timestamp", ""),
                             "entry_price": best.entry_price,
                             "stop_loss": best.stop_loss,
                             "trailing_stop": best.stop_loss,
                             "target": best.target,
                             "quantity": qty,
+                            "lot_size": 1,
                             "confidence": best.confidence,
                         }
 
@@ -661,6 +724,17 @@ class BacktestEngine:
                     stamp_duty=costs["stamp_duty"],
                     slippage=costs["slippage"],
                     total_cost=costs["total_cost"],
+                    underlying=position.get("underlying", symbol),
+                    instrument_key=position.get("contract_key", position.get("contract_symbol", symbol)),
+                    option_symbol=position.get("option_symbol", position.get("contract_symbol", "")),
+                    strike=position.get("strike"),
+                    option_type=position.get("option_type", ""),
+                    expiry=position.get("expiry", ""),
+                    lot_size=position.get("lot_size", INDEX_LOT_SIZES.get(symbol.upper(), 25)),
+                    stop_loss=position.get("stop_loss", 0.0),
+                    target=position.get("target", 0.0),
+                    trailing_stop=position.get("trailing_stop", 0.0),
+                    setup_score=position.get("confidence", 0.0),
                 )
                 all_trades.append(trade)
                 result.trades_closed += 1

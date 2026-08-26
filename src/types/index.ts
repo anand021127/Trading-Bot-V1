@@ -290,6 +290,21 @@ export interface BacktestTrade {
   net_pnl: number
   charges: number
   confidence: number
+  timestamp?: string
+  underlying?: string
+  instrument_key?: string
+  option_symbol?: string
+  strike?: number | string
+  option_type?: string
+  expiry?: string
+  lot_size?: number
+  stop_loss?: number
+  target?: number
+  trailing_stop?: number
+  setup_score?: number
+  r_multiple?: number | string
+  fees?: number
+  slippage?: number
 }
 
 export interface RejectedSignalSample {

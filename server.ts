@@ -1463,10 +1463,53 @@ app.get('/api/backtest/download/:taskId', (req, res) => {
 
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename=backtest_${task.task_id}.csv`);
-  const cols = ['symbol', 'strategy', 'entry_time', 'exit_time', 'entry_price', 'exit_price', 'quantity', 'exit_reason', 'gross_pnl', 'net_pnl', 'charges', 'confidence'];
-  let csv = cols.join(',') + '\n';
-  for (const t of task.result.trade_log || []) {
-    csv += cols.map((c) => JSON.stringify(t[c] ?? '')).join(',') + '\n';
+  const r = task.result;
+  const cols = [
+    'timestamp', 'underlying', 'instrument_key', 'option_symbol', 'strike',
+    'option_type', 'expiry', 'entry_time', 'entry_price', 'exit_time',
+    'exit_price', 'quantity', 'lot_size', 'stop_loss', 'target',
+    'trailing_stop', 'exit_reason', 'gross_pnl', 'fees', 'slippage',
+    'net_pnl', 'r_multiple', 'setup_score', 'strategy',
+  ];
+  let csv = '# Backtest Summary\n';
+  csv += `# Task ID: ${task.task_id}\n`;
+  csv += `# Status: ${task.status}\n`;
+  csv += `# Symbols: ${(task.symbols || []).join(' ')}\n`;
+  csv += `# Total Trades: ${r.trades_taken ?? r.trade_log?.length ?? 0}\n`;
+  csv += `# Win Rate: ${(r.accuracy_pct ?? 0).toFixed(1)}%\n`;
+  csv += `# Net PnL: ${(r.net_profit ?? 0).toFixed(2)}\n`;
+  csv += `# Max Drawdown: ${(r.max_drawdown_pct ?? 0).toFixed(2)}%\n`;
+  csv += `# Total Charges: ${(r.total_charges ?? 0).toFixed(2)}\n`;
+  csv += '\n';
+  csv += cols.join(',') + '\n';
+  for (const t of r.trade_log || []) {
+    const row = [
+      t.timestamp || t.entry_time || '',
+      t.underlying || t.symbol || '',
+      t.instrument_key || t.symbol || '',
+      t.option_symbol || (t.option_type ? t.symbol : ''),
+      t.strike ?? '',
+      t.option_type || '',
+      t.expiry || '',
+      t.entry_time || '',
+      t.entry_price ?? '',
+      t.exit_time || '',
+      t.exit_price ?? '',
+      t.quantity ?? '',
+      t.lot_size ?? '',
+      t.stop_loss ?? '',
+      t.target ?? '',
+      t.trailing_stop ?? '',
+      t.exit_reason || '',
+      t.gross_pnl ?? '',
+      t.fees ?? (t.charges ? (t.charges - (t.slippage || 0)) : 0),
+      t.slippage ?? 0,
+      t.net_pnl ?? '',
+      t.r_multiple ?? '',
+      t.setup_score ?? t.confidence ?? '',
+      t.strategy || '',
+    ];
+    csv += row.map((v) => (typeof v === 'string' && (v.includes(',') || v.includes('"') || v.includes('\n')) ? `"${v.replace(/"/g, '""')}"` : v)).join(',') + '\n';
   }
   res.send(csv);
 });
