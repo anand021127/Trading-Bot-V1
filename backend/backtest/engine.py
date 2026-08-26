@@ -631,7 +631,7 @@ class BacktestEngine:
                             "strategy": best.strategy_name,
                             "symbol": symbol,
                             "underlying": symbol,
-                            "contract_symbol": opt_trading_sym or c_key,
+                            "contract_symbol": c_key,
                             "contract_key": c_key,
                             "option_symbol": opt_trading_sym or c_key,
                             "expiry": exp_str,
