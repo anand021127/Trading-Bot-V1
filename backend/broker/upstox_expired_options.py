@@ -221,9 +221,10 @@ class UpstoxExpiredOptionsClient:
         base_url: str = BASE_URL,
         timeout: int = 15,
         cache_dir: str = DEFAULT_CACHE_DIR,
+        dotenv_path: Optional[str] = None,
     ) -> None:
         from backend.broker.token_resolver import resolve_upstox_token
-        self.access_token = resolve_upstox_token(access_token)
+        self.access_token = resolve_upstox_token(access_token, dotenv_path=dotenv_path)
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.cache = OptionsDataCache(cache_dir=cache_dir)

@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
-"""Historical Options Data Acquisition Pipeline.
+"""Historical Options Data Acquisition & Validation Pipeline.
 
 Authoritative downloader and validator for Upstox Expired Options Historical Data.
 Populates real_data/options_cache/ with verified option contract OHLCV candles
 matching the exact schema expected by HistoricalOptionsDataLoader.
 
 Key features:
-1. Signal-based and grid-based contract requirement discovery (dry-run mode).
+1. Signal-based contract requirement discovery across all 6 major index underlyings.
 2. Authoritative resolution via official Upstox Expired Instruments API.
-3. Strict multi-tier validation (OHLC validity, spot-vs-premium checks, timestamp ordering).
-4. Atomic file persistence to prevent partial/corrupt files.
-5. Resumable execution (skips already-cached and validated contracts).
-6. Graceful token expiration / auth error handling with actionable remediation steps.
+3. Strict token priority (--token -> os.environ -> repository .env -> SQLite DB).
+4. Safe token masking (never exposes secrets in console, logs, or error traces).
+5. Strict multi-tier validation (OHLC bounds, spot-vs-premium integrity, timestamp ordering).
+6. Atomic file persistence to prevent partial/corrupt files.
+7. Resumable execution (skips already-cached and validated contracts unless --force is given).
+8. Comprehensive post-run audit & diagnostic reporting.
 
 Usage:
-  # Dry-run / Discovery of required contracts for 2024 backtests
+  # Download missing contracts for all 6 indices
+  python3 scripts/download_historical_options.py --symbols NIFTY50,BANKNIFTY,FINNIFTY,MIDCPNIFTY,SENSEX,BANKEX
+
+  # Explicit token override
+  python3 scripts/download_historical_options.py --token <UPSTOX_TOKEN>
+
+  # Dry-run / Discovery mode
   python3 scripts/download_historical_options.py --dry-run
 
-  # Download missing contracts for specific symbols
-  python3 scripts/download_historical_options.py --symbols NIFTY50,BANKNIFTY
-
-  # Force re-download and re-validate all contracts
-  python3 scripts/download_historical_options.py --force
+  # Audit cache only
+  python3 scripts/download_historical_options.py --audit-only
 """
 from __future__ import annotations
 
@@ -41,6 +46,12 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from backend.broker.token_resolver import (
+    resolve_upstox_token,
+    get_token_metadata,
+    find_repo_dotenv_path,
+    load_repo_dotenv,
+)
 from backend.broker.upstox_expired_options import (
     UpstoxExpiredOptionsClient,
     OptionsDataCache,
@@ -50,8 +61,7 @@ from backend.broker.upstox_expired_options import (
     INDEX_INSTRUMENT_KEYS,
     INDEX_STRIKE_INTERVALS,
 )
-from backend.broker.token_resolver import resolve_upstox_token
-from backend.backtest.options_data_layer import HistoricalOptionsDataLoader
+from backend.backtest.options_data_layer import HistoricalOptionsDataLoader, normalize_underlying
 from backend.backtest.historical_data_io import load_dataset_safe
 from backend.strategy.strategy_engine import MultiStrategyEngine
 from backend.strategy.strategies.ema_trend import EMATrendStrategy
@@ -166,7 +176,7 @@ def discover_required_contracts_from_signals(
         step = INDEX_STRIKE_INTERVALS.get(sym, 50.0)
         trend_series = build_trend_series(candles)
 
-        # Pre-fetch expiries once per symbol
+        # Pre-fetch expiries once per symbol if client is active
         symbol_expiries = []
         if client:
             try:
@@ -174,9 +184,9 @@ def discover_required_contracts_from_signals(
             except Exception:
                 symbol_expiries = []
 
-        logger.info("Scanning %s (%d spot candles) for signals...", sym, len(candles))
+        logger.info("Scanning %s (%d spot candles) for strategy signals...", sym, len(candles))
         
-        # Scan window (60 bars is optimal for EMA50/RSI14/ATR14 indicators)
+        # Scan window (60 bars warmup for EMA50/RSI14/ATR14 indicators)
         for i in range(55, len(candles)):
             window = candles[max(0, i + 1 - 60): i + 1]
             curr_bar = window[-1]
@@ -253,15 +263,18 @@ class HistoricalOptionsIngestionPipeline:
         self,
         access_token: Optional[str] = None,
         cache_dir: str = DEFAULT_CACHE_DIR,
+        dotenv_path: Optional[str] = None,
         rate_limit_delay: float = 0.25,
     ) -> None:
         self.cache_dir = cache_dir
         self.cache = OptionsDataCache(cache_dir=cache_dir)
         self.validator = OptionsDataValidator()
         self.rate_limit_delay = rate_limit_delay
+        self.dotenv_path = dotenv_path
         self.client = UpstoxExpiredOptionsClient(
             access_token=access_token,
             cache_dir=cache_dir,
+            dotenv_path=dotenv_path,
         )
 
     def test_auth(self) -> Dict[str, Any]:
@@ -322,7 +335,7 @@ class HistoricalOptionsIngestionPipeline:
         """Execute full ingestion pipeline with progress reporting and error handling."""
         cached_reqs, missing_reqs = self.check_cache_status(requirements)
         
-        summary = {
+        summary: Dict[str, Any] = {
             "total_required": len(requirements),
             "already_cached": len(cached_reqs),
             "to_download": len(missing_reqs) if not force else len(requirements),
@@ -331,6 +344,14 @@ class HistoricalOptionsIngestionPipeline:
             "skipped": 0,
             "errors": [],
             "auth_error": None,
+            "error_categories": {
+                "AUTH_INVALID_TOKEN": 0,
+                "PERMISSION_DENIED": 0,
+                "DATA_UNAVAILABLE": 0,
+                "RATE_LIMITED": 0,
+                "VALIDATION_FAILED": 0,
+                "OTHER": 0,
+            },
         }
 
         if dry_run:
@@ -353,6 +374,11 @@ class HistoricalOptionsIngestionPipeline:
             )
             logger.error(auth_msg)
             summary["auth_error"] = auth
+            err_code = str(auth.get("error_code", "OTHER"))
+            if err_code in summary["error_categories"]:
+                summary["error_categories"][err_code] += len(missing_reqs)
+            else:
+                summary["error_categories"]["OTHER"] += len(missing_reqs)
             return summary
 
         targets = requirements if force else missing_reqs
@@ -371,46 +397,174 @@ class HistoricalOptionsIngestionPipeline:
             if success:
                 summary["downloaded"] += 1
                 candles_cnt = len(data.get("candles", [])) if data else 0
-                logger.info("  -> SUCCESS: %d candles validated & saved", candles_cnt)
+                logger.info("  -> SUCCESS: %d candles validated & saved to cache", candles_cnt)
             else:
                 summary["failed"] += 1
+                err_str = str(err)
                 err_record = {
                     "contract": req.key,
-                    "error": err,
+                    "underlying": req.underlying,
+                    "expiry": req.expiry,
+                    "strike": req.strike,
+                    "option_type": req.option_type,
+                    "from_date": req.from_date,
+                    "to_date": req.to_date,
+                    "error": err_str,
                 }
                 summary["errors"].append(err_record)
-                logger.warning("  -> FAILED: %s", err)
+                
+                # Categorize error
+                if "401" in err_str or "AUTH" in err_str:
+                    summary["error_categories"]["AUTH_INVALID_TOKEN"] += 1
+                elif "403" in err_str or "PERMISSION" in err_str:
+                    summary["error_categories"]["PERMISSION_DENIED"] += 1
+                elif "DATA_UNAVAILABLE" in err_str or "404" in err_str or "not found" in err_str.lower():
+                    summary["error_categories"]["DATA_UNAVAILABLE"] += 1
+                elif "429" in err_str or "rate limit" in err_str.lower():
+                    summary["error_categories"]["RATE_LIMITED"] += 1
+                elif "validation" in err_str.lower():
+                    summary["error_categories"]["VALIDATION_FAILED"] += 1
+                else:
+                    summary["error_categories"]["OTHER"] += 1
+
+                logger.warning("  -> FAILED: %s", err_str)
 
             time.sleep(self.rate_limit_delay)
 
         return summary
 
 
+def run_cache_audit(
+    cache_dir: str = DEFAULT_CACHE_DIR,
+    discovered_reqs: Optional[List[ContractRequirement]] = None,
+) -> Dict[str, Any]:
+    """Audit all option cache files on disk, validate integrity, and compile statistical summary."""
+    validator = OptionsDataValidator()
+    cache_files = sorted(glob.glob(os.path.join(cache_dir, "*.json")))
+    
+    total_files = len(cache_files)
+    valid_files = 0
+    invalid_files = 0
+    invalid_details = []
+    
+    underlying_counts: Dict[str, int] = {}
+    ce_pe_counts: Dict[str, int] = {"CE": 0, "PE": 0}
+    total_candles = 0
+    
+    earliest_candle: Optional[str] = None
+    latest_candle: Optional[str] = None
+    
+    for f in cache_files:
+        try:
+            with open(f, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            
+            if not isinstance(data, dict) or "contract" not in data or "candles" not in data:
+                invalid_files += 1
+                invalid_details.append({"file": os.path.basename(f), "error": "Missing contract/candles schema"})
+                continue
+
+            c_info = data["contract"]
+            candles = data["candles"]
+            
+            if not candles:
+                invalid_files += 1
+                invalid_details.append({"file": os.path.basename(f), "error": "Candles array is empty"})
+                continue
+
+            # Validate candles
+            is_valid, err, _ = validator.validate_candles(candles, expected_instrument_key=c_info.get("instrument_key", ""))
+            if not is_valid:
+                invalid_files += 1
+                invalid_details.append({"file": os.path.basename(f), "error": err})
+                continue
+
+            valid_files += 1
+            und = normalize_underlying(c_info.get("underlying", "UNKNOWN"))
+            underlying_counts[und] = underlying_counts.get(und, 0) + 1
+            
+            opt_type = c_info.get("option_type", "CE").upper()
+            ce_pe_counts[opt_type] = ce_pe_counts.get(opt_type, 0) + 1
+            
+            total_candles += len(candles)
+            
+            for c in candles:
+                ts = c.get("timestamp")
+                if ts:
+                    if earliest_candle is None or ts < earliest_candle:
+                        earliest_candle = ts
+                    if latest_candle is None or ts > latest_candle:
+                        latest_candle = ts
+        except Exception as e:
+            invalid_files += 1
+            invalid_details.append({"file": os.path.basename(f), "error": str(e)})
+
+    # Check against discovered requirements if provided
+    missing_count = 0
+    if discovered_reqs:
+        for r in discovered_reqs:
+            cf = os.path.join(cache_dir, r.cache_filename)
+            if not os.path.exists(cf):
+                missing_count += 1
+
+    return {
+        "total_cache_files": total_files,
+        "valid_cache_files": valid_files,
+        "invalid_cache_files": invalid_files,
+        "invalid_details": invalid_details,
+        "missing_contracts": missing_count,
+        "contracts_by_underlying": underlying_counts,
+        "contracts_by_type": ce_pe_counts,
+        "earliest_option_candle": earliest_candle or "None",
+        "latest_option_candle": latest_candle or "None",
+        "total_option_candles": total_candles,
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Authoritative Upstox Historical Options Ingestion Pipeline")
-    parser.add_argument("--dry-run", action="store_true", help="Perform discovery and cache audit without downloading")
+    parser = argparse.ArgumentParser(description="Authoritative Upstox Historical Options Ingestion & Validation Pipeline")
+    parser.add_argument("--dry-run", action="store_true", help="Perform discovery and cache audit without calling download APIs")
     parser.add_argument("--force", action="store_true", help="Force re-download and re-validate existing cached contracts")
-    parser.add_argument("--symbols", type=str, default=None, help="Comma-separated list of symbols (e.g. NIFTY50,BANKNIFTY)")
+    parser.add_argument("--symbols", type=str, default=None, help="Comma-separated list of symbols (e.g. NIFTY50,BANKNIFTY,FINNIFTY,MIDCPNIFTY,SENSEX,BANKEX)")
     parser.add_argument("--data-dir", type=str, default="real_data", help="Directory containing underlying spot JSON files")
     parser.add_argument("--cache-dir", type=str, default=DEFAULT_CACHE_DIR, help="Directory to store option contract JSON cache")
-    parser.add_argument("--token", type=str, default=None, help="Upstox Access Token override")
+    parser.add_argument("--token", type=str, default=None, help="Upstox Access Token explicit override (--token)")
+    parser.add_argument("--env-file", type=str, default=None, help="Explicit path to .env file")
     parser.add_argument("--limit", type=int, default=None, help="Max number of contracts to process")
     parser.add_argument("--interval", type=str, default="5minute", help="Candle interval (e.g. 5minute, 1minute)")
     parser.add_argument("--strategies", type=str, default=None, help="Comma-separated strategy names (e.g. OPTION_PREMIUM,EMA_TREND)")
+    parser.add_argument("--audit-only", action="store_true", help="Only run cache audit and exit")
 
     args = parser.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
     strategies = [s.strip().upper() for s in args.strategies.split(",")] if args.strategies else None
     
+    # 0. Load dotenv & inspect token metadata safely
+    load_repo_dotenv(args.env_file)
+    meta = get_token_metadata(explicit_token=args.token, dotenv_path=args.env_file)
+    
+    print("=" * 75)
+    print(" UPSTOX HISTORICAL OPTIONS DATA ACQUISITION & VALIDATION PIPELINE")
+    print("=" * 75)
+    print(f"Token Status   : {'PRESENT' if meta['present'] else 'NOT FOUND'}")
+    print(f"Token Length   : {meta['length']} characters")
+    print(f"Token Masked   : {meta['masked']}")
+    print(f"Token Source   : {meta['source']}")
+    print(f"Cache Directory: {args.cache_dir}")
+    print("-" * 75)
+
+    if args.audit_only:
+        print("\n[Audit Mode] Running audit on cache directory...")
+        audit = run_cache_audit(cache_dir=args.cache_dir)
+        print(json.dumps(audit, indent=2))
+        return
+
     pipeline = HistoricalOptionsIngestionPipeline(
         access_token=args.token,
         cache_dir=args.cache_dir,
+        dotenv_path=args.env_file,
     )
-
-    print("=" * 70)
-    print(" UPSTOX HISTORICAL OPTIONS DATA ACQUISITION & VALIDATION")
-    print("=" * 70)
 
     # 1. Discover requirements
     print("\n[Phase 1] Discovering required option contracts from spot signals...")
@@ -440,7 +594,7 @@ def main():
         print("\n[Phase 3] Dry-Run Mode Active: Skipping API queries.")
         print(f"To acquire the missing {len(missing)} contracts:")
         print(f"  1. Ensure your UPSTOX_ACCESS_TOKEN is active and valid.")
-        print(f"  2. Run: python3 scripts/download_historical_options.py")
+        print(f"  2. Run: python3 scripts/download_historical_options.py --symbols NIFTY50,BANKNIFTY,FINNIFTY,MIDCPNIFTY,SENSEX,BANKEX")
         sys.exit(0)
 
     # 4. Ingestion
@@ -452,14 +606,38 @@ def main():
         limit=args.limit,
     )
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 75)
     print(" INGESTION RUN SUMMARY")
-    print("=" * 70)
+    print("=" * 75)
     print(f"Total Required    : {res['total_required']}")
     print(f"Already In Cache  : {res['already_cached']}")
     print(f"Attempted Fetch   : {res['to_download']}")
     print(f"Successfully Saved: {res['downloaded']}")
     print(f"Failed / Missing  : {res['failed']}")
+    if res.get("error_categories"):
+        print("\nFailure Categorization:")
+        for cat, cnt in res["error_categories"].items():
+            if cnt > 0:
+                print(f"  - {cat:20s}: {cnt:3d}")
+
+    # 5. Run Post-Download Audit
+    print("\n" + "=" * 75)
+    print(" POST-INGESTION CACHE VALIDATION & AUDIT")
+    print("=" * 75)
+    audit = run_cache_audit(cache_dir=args.cache_dir, discovered_reqs=reqs)
+    print(f"Total Cache Files      : {audit['total_cache_files']}")
+    print(f"Valid Cache Files      : {audit['valid_cache_files']}")
+    print(f"Invalid Cache Files    : {audit['invalid_cache_files']}")
+    print(f"Missing Contracts      : {audit['missing_contracts']}")
+    print(f"Earliest Option Candle : {audit['earliest_option_candle']}")
+    print(f"Latest Option Candle   : {audit['latest_option_candle']}")
+    print(f"Total Option Candles   : {audit['total_option_candles']}")
+    print("\nContracts by Underlying:")
+    for u, count in sorted(audit["contracts_by_underlying"].items()):
+        print(f"  - {u:12s}: {count:3d} contracts")
+    print("\nContracts by Option Type:")
+    for t, count in sorted(audit["contracts_by_type"].items()):
+        print(f"  - {t:6s}: {count:3d} contracts")
 
     if res.get("auth_error"):
         print("\n[!] AUTHENTICATION ERROR DETECTED:")
@@ -469,10 +647,10 @@ def main():
         sys.exit(1)
 
     if res["failed"] > 0:
-        print(f"\n[!] Encountered {res['failed']} contract errors. See log details above.")
+        print(f"\n[!] Completed with {res['failed']} unavailable/failed contracts.")
         sys.exit(2)
 
-    print("\n[✓] Ingestion completed successfully.")
+    print("\n[✓] Ingestion & validation completed successfully.")
 
 
 if __name__ == "__main__":
