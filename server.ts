@@ -199,6 +199,60 @@ function loadPersistedToken(): StoredTokenData | null {
   return null;
 }
 
+const CANDIDATE_ENV_PATHS = [
+  '/home/ubuntu/Trading-Bot-V1/.env',
+  path.join(process.cwd(), '.env'),
+  '/data/.env',
+];
+
+function updateEnvFile(filePath: string, updates: Record<string, string>) {
+  try {
+    const parent = path.dirname(filePath);
+    if (!fs.existsSync(parent)) {
+      try {
+        fs.mkdirSync(parent, { recursive: true });
+      } catch {}
+    }
+    let lines: string[] = [];
+    if (fs.existsSync(filePath)) {
+      lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+    }
+    const updatedKeys = new Set(Object.keys(updates));
+    const foundKeys = new Set<string>();
+    const newLines: string[] = [];
+
+    for (const rawLine of lines) {
+      const stripped = rawLine.trim();
+      const isExport = stripped.startsWith('export ');
+      const content = isExport ? stripped.slice(7).trim() : stripped;
+
+      if (content && !content.startsWith('#') && content.includes('=')) {
+        const eqIdx = content.indexOf('=');
+        const key = content.slice(0, eqIdx).trim();
+        if (updatedKeys.has(key)) {
+          foundKeys.add(key);
+          const val = updates[key];
+          newLines.push(`${isExport ? 'export ' : ''}${key}="${val}"`);
+          continue;
+        }
+      }
+      newLines.push(rawLine);
+    }
+
+    for (const [k, v] of Object.entries(updates)) {
+      if (!foundKeys.has(k)) {
+        newLines.push(`${k}="${v}"`);
+      }
+    }
+
+    const tmpPath = `${filePath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, newLines.join('\n'), 'utf-8');
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    // Ignore error
+  }
+}
+
 function savePersistedToken(token: string, userProfile?: any): boolean {
   const cleanToken = token.trim();
   runtimeTokenOverride = cleanToken;
@@ -225,6 +279,15 @@ function savePersistedToken(token: string, userProfile?: any): boolean {
     }
   }
 
+  // Atomically update all candidate .env files
+  for (const envP of CANDIDATE_ENV_PATHS) {
+    try {
+      if (fs.existsSync(path.dirname(envP))) {
+        updateEnvFile(envP, { UPSTOX_ACCESS_TOKEN: cleanToken });
+      }
+    } catch {}
+  }
+
   syncTokenToSQLite(cleanToken);
   return true;
 }
@@ -241,6 +304,15 @@ function deletePersistedToken(): boolean {
     } catch (err) {
       // Ignore
     }
+  }
+
+  // Clear in .env files
+  for (const envP of CANDIDATE_ENV_PATHS) {
+    try {
+      if (fs.existsSync(envP)) {
+        updateEnvFile(envP, { UPSTOX_ACCESS_TOKEN: '' });
+      }
+    } catch {}
   }
 
   try {
@@ -2343,12 +2415,14 @@ app.post('/api/settings/disconnect-token', (req, res) => {
 
 app.get('/api/settings/broker-status', async (req, res) => {
   const tokenMeta = resolveUpstoxToken();
-  const status = {
+  const status: any = {
     token_present: tokenMeta.source !== 'none',
     token_source: tokenMeta.source,
     token_fingerprint: tokenMeta.fingerprint,
     token_valid: false,
     api_reachable: false,
+    expired_instruments_accessible: false,
+    plan_type: 'Standard',
     websocket_url: 'https://api.upstox.com/v3/feed/market-data-feed/authorize',
     overall: 'DISCONNECTED',
     reason: 'No access token found. Complete OAuth authentication.',
@@ -2359,7 +2433,7 @@ app.get('/api/settings/broker-status', async (req, res) => {
   }
 
   try {
-    const response = await fetch('https://api.upstox.com/v2/user/profile', {
+    const profileRes = await fetch('https://api.upstox.com/v2/user/profile', {
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${tokenMeta.token}`,
@@ -2368,13 +2442,37 @@ app.get('/api/settings/broker-status', async (req, res) => {
     });
 
     status.api_reachable = true;
-    if (response.status === 200) {
+    if (profileRes.status === 200) {
       status.token_valid = true;
       status.overall = 'CONNECTED';
-      status.reason = 'Active Upstox broker session verified.';
+      
+      // Probe Expired Instruments API for Upstox Plus Plan entitlement
+      try {
+        const expRes = await fetch('https://api.upstox.com/v2/expired-instruments/expiries?instrument_key=NSE_INDEX%7CNifty%2050', {
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${tokenMeta.token}`,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          },
+        });
+        if (expRes.status === 200) {
+          status.expired_instruments_accessible = true;
+          status.plan_type = 'Upstox Plus Plan (Expired Historical Derivatives Active)';
+          status.reason = 'Active Upstox broker session verified (Plus Plan Enabled).';
+        } else if (expRes.status === 403) {
+          status.expired_instruments_accessible = false;
+          status.plan_type = 'Standard (Upstox Plus Plan Required for Historical Expired Options)';
+          status.reason = 'Active Upstox broker session verified. Historical Expired Options requires Upstox Plus Plan.';
+        } else {
+          status.expired_instruments_accessible = false;
+          status.reason = 'Active Upstox broker session verified.';
+        }
+      } catch {
+        status.reason = 'Active Upstox broker session verified.';
+      }
     } else {
-      const errBody: any = await response.json().catch(() => ({}));
-      const errCode = errBody.errors?.[0]?.errorCode || `HTTP_${response.status}`;
+      const errBody: any = await profileRes.json().catch(() => ({}));
+      const errCode = errBody.errors?.[0]?.errorCode || `HTTP_${profileRes.status}`;
       status.overall = 'AUTHENTICATION_FAILED';
       status.reason = `Upstox authentication failed (${errCode}). Reconnect via OAuth in Settings.`;
     }
@@ -2506,7 +2604,20 @@ app.all('/api/settings/token-callback', async (req, res) => {
       `);
     }
 
-    // Step 3: Token verified with HTTP 200 — Save to persistent storage
+    // Check Expired Instruments API entitlement
+    let isPlusPlan = false;
+    try {
+      const expRes = await fetch('https://api.upstox.com/v2/expired-instruments/expiries?instrument_key=NSE_INDEX%7CNifty%2050', {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+          'User-Agent': 'Mozilla/5.0',
+        },
+      });
+      isPlusPlan = expRes.status === 200;
+    } catch {}
+
+    // Step 3: Token verified with HTTP 200 — Save to persistent storage (DB, JSON, .env)
     savePersistedToken(accessToken, profileData.data);
     process.env.UPSTOX_ACCESS_TOKEN = accessToken;
     
@@ -2522,17 +2633,27 @@ app.all('/api/settings/token-callback', async (req, res) => {
     // Trigger Upstox WebSocket initialization
     initUpstoxV3MarketDataFeed();
 
+    // Propagate to Python Engine
+    try {
+      const propagateCmd = `python3 -c "from backend.api.routers.settings import _propagate_token_to_engine, _restart_websocket_client; _propagate_token_to_engine('${accessToken}'); _restart_websocket_client('${accessToken}')"`;
+      execSync(propagateCmd, { timeout: 3000, stdio: 'ignore' });
+    } catch {}
+
     const userName = profileData.data?.user_name || profileData.data?.user_id || 'Upstox Trader';
+    const planMsg = isPlusPlan
+      ? 'Upstox Plus Plan Active (Expired historical derivatives enabled)'
+      : 'Standard Live Brokerage Active (Note: Expired Historical Options requires Upstox Plus Plan)';
 
     return res.send(`
       <!DOCTYPE html><html><body style="font-family:sans-serif;background:#0b0f19;color:#10b981;padding:40px;text-align:center;">
         <h2>Upstox Broker Authenticated</h2>
         <p style="color:#e2e8f0;">Welcome, <strong>${userName}</strong>!</p>
-        <p style="color:#94a3b8;font-size:14px;">Access token verified against Upstox Profile API and persisted.</p>
+        <p style="color:#38bdf8;font-size:14px;">${planMsg}</p>
+        <p style="color:#94a3b8;font-size:13px;">Access token verified against Upstox Profile API and persisted to SQLite & .env.</p>
         <p style="color:#64748b;font-size:12px;">This window will close automatically.</p>
         <script>
           if (window.opener) {
-            window.opener.postMessage({ type: 'UPSTOX_AUTH_SUCCESS' }, '*');
+            window.opener.postMessage({ type: 'UPSTOX_AUTH_SUCCESS', user_name: '${userName}', plus_plan: ${isPlusPlan} }, '*');
           }
           setTimeout(() => window.close(), 2000);
         </script>

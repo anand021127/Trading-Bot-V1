@@ -639,3 +639,9 @@ class UpstoxExpiredOptionsClient:
             "contract": full_contract_info,
             "candles": clean_candles,
         }
+
+    def test_access(self) -> Dict[str, Any]:
+        """Comprehensive self-test for API connectivity, token validity, and Expired Instruments entitlement."""
+        from backend.broker.token_resolver import validate_token_live
+        return validate_token_live(self.access_token)
+

@@ -389,9 +389,11 @@ class DatabaseManager:
             return None
 
     def save_token(self, token: str) -> None:
-        """Persist access token to DB and JSON file (survives process restart)."""
+        """Persist access token to SQLite DB, JSON files, repository .env files, and os.environ."""
         clean_token = token.strip()
         self.save_setting("upstox_access_token", clean_token)
+        os.environ["UPSTOX_ACCESS_TOKEN"] = clean_token
+
         import json
         payload = {
             "access_token": clean_token,
@@ -411,6 +413,15 @@ class DatabaseManager:
                     json.dump(payload, f, indent=2)
             except Exception:
                 pass
+
+        # Also atomically update repository .env files
+        try:
+            from backend.broker.token_resolver import update_dotenv_file, DEFAULT_REPO_DOTENV_PATHS
+            for env_p in DEFAULT_REPO_DOTENV_PATHS:
+                if os.path.exists(os.path.dirname(os.path.abspath(env_p))):
+                    update_dotenv_file(env_p, {"UPSTOX_ACCESS_TOKEN": clean_token})
+        except Exception:
+            pass
 
     def load_token(self) -> str:
         """Load access token from DB or fallback JSON file."""

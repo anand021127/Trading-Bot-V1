@@ -277,53 +277,48 @@ async def token_callback(
         token = data.get("access_token", "")
 
         if token:
-            # Mandatory Step: Verify against Upstox /v2/user/profile BEFORE persistence (MUST be HTTP 200)
-            upstox_client = UpstoxClient(access_token=token)
-            is_valid = upstox_client.is_token_valid()
-            profile_data = None
-            if is_valid:
-                try:
-                    profile_data = upstox_client.get_profile()
-                except Exception:
-                    profile_data = {"status": "success", "data": {"user_name": "Upstox Trader"}}
+            from backend.broker.token_resolver import validate_token_live, persist_upstox_token
+            # Dual Verification: Check /v2/user/profile AND /v2/expired-instruments/expiries
+            val_result = validate_token_live(token)
 
-            if is_valid and profile_data and profile_data.get("status") == "success":
-                # Only on HTTP 200: Persist to SQLite, update runtime and propagate
-                try:
-                    _db.save_token(token)
-                    user_name = profile_data.get("data", {}).get("user_name") or profile_data.get("data", {}).get("user_id") or "Upstox Trader"
-                    user_id = profile_data.get("data", {}).get("user_id", "")
-                    if user_name:
-                        _db.save_setting("upstox_user_name", user_name)
-                    if user_id:
-                        _db.save_setting("upstox_user_id", user_id)
-                except Exception as e:
-                    logger.error("Failed to persist token to SQLite: %s", e)
+            if val_result.get("profile_verified"):
+                # Profile verified (HTTP 200) -> Persist atomically to SQLite, JSON, .env, and os.environ
+                user_name = val_result.get("user_name") or val_result.get("user_id") or "Upstox Trader"
+                user_id = val_result.get("user_id", "")
+                profile_dict = {"user_name": user_name, "user_id": user_id}
 
-                os.environ["UPSTOX_ACCESS_TOKEN"] = token
+                persist_upstox_token(token, profile_dict)
                 _propagate_token_to_engine(token)
                 _restart_websocket_client(token)
 
-                user_name = profile_data.get("data", {}).get("user_name") or profile_data.get("data", {}).get("user_id") or "Upstox Trader"
+                entitled = val_result.get("expired_instruments_entitled", False)
+                plan_msg = (
+                    "Upstox Plus Plan Active (Expired historical derivatives enabled)"
+                    if entitled else
+                    "Standard Live Brokerage Active (Note: Expired Historical Options API requires Upstox Plus Plan)"
+                )
 
                 html_ok = f"""<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0b0f19;color:#10b981;padding:40px;text-align:center;">
                 <h2>Upstox Authentication Successful</h2>
                 <p style="color:#e2e8f0;">Welcome, <strong>{user_name}</strong>!</p>
-                <p style="color:#94a3b8;font-size:14px;">Token verified against Upstox Profile API (HTTP 200) and persisted to SQLite.</p>
+                <p style="color:#38bdf8;font-size:14px;">{plan_msg}</p>
+                <p style="color:#94a3b8;font-size:13px;">Token verified against Upstox Profile API (HTTP 200) and persisted to SQLite & .env.</p>
                 <p style="color:#64748b;font-size:12px;">This window will close automatically.</p>
                 <script>
                   if (window.opener) {{
-                    window.opener.postMessage({{ type: 'UPSTOX_AUTH_SUCCESS', user_name: '{user_name}' }}, '*');
+                    window.opener.postMessage({{ type: 'UPSTOX_AUTH_SUCCESS', user_name: '{user_name}', plus_plan: {str(entitled).lower()} }}, '*');
                   }}
-                  setTimeout(() => window.close(), 1500);
+                  setTimeout(() => window.close(), 2000);
                 </script>
                 </body></html>"""
                 return HTMLResponse(content=html_ok, status_code=200)
             else:
                 # Do NOT persist if profile verification fails
-                html_invalid = """<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0b0f19;color:#ef4444;padding:40px;text-align:center;">
+                err_code = val_result.get("error_code") or "AUTH_VERIFICATION_FAILED"
+                err_msg = val_result.get("message") or "Profile verification failed"
+                html_invalid = f"""<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0b0f19;color:#ef4444;padding:40px;text-align:center;">
                 <h2>Authentication Verification Failed</h2>
-                <p style="color:#94a3b8;">Token exchange succeeded but Upstox profile verification failed. Token was NOT persisted.</p>
+                <p style="color:#94a3b8;">Token exchange succeeded but Upstox profile verification failed ({err_code}: {err_msg}). Token was NOT persisted.</p>
                 <button onclick="window.close()" style="background:#1e293b;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">Close Window</button>
                 </body></html>"""
                 return HTMLResponse(content=html_invalid, status_code=401)
@@ -414,15 +409,29 @@ def _restart_websocket_client(token: str) -> None:
 
 @router.post("/disconnect-token")
 async def disconnect_token() -> Dict[str, Any]:
-    """Fully clear the Upstox token from both the environment and the
-    persisted DB, and stop the WebSocket client. Use this to get back to a
-    genuinely clean/disconnected state — without it, a token saved in an
-    earlier session keeps getting silently reloaded on every request."""
+    """Fully clear the Upstox token from environment, persisted DB, JSON files, and .env files."""
+    from backend.broker.token_resolver import update_dotenv_file, DEFAULT_REPO_DOTENV_PATHS, DEFAULT_TOKEN_JSON_PATHS
     os.environ["UPSTOX_ACCESS_TOKEN"] = ""
     try:
         _db.save_token("")
     except Exception:
         pass
+
+    # Clear JSON files
+    for jp in DEFAULT_TOKEN_JSON_PATHS:
+        try:
+            if os.path.isfile(jp):
+                os.remove(jp)
+        except Exception:
+            pass
+
+    # Clear .env files
+    for ep in DEFAULT_REPO_DOTENV_PATHS:
+        try:
+            if os.path.isfile(ep):
+                update_dotenv_file(ep, {"UPSTOX_ACCESS_TOKEN": ""})
+        except Exception:
+            pass
 
     try:
         import backend.api.main as main_mod
@@ -434,16 +443,16 @@ async def disconnect_token() -> Dict[str, Any]:
     except Exception:
         pass
 
-    return {"status": "disconnected", "message": "Token cleared from DB and environment. WebSocket stopped."}
+    return {"status": "disconnected", "message": "Token cleared from DB, JSON, .env, and environment. WebSocket stopped."}
 
 
 @router.get("/broker-status")
 async def get_broker_status() -> Dict[str, Any]:
     """
     Real broker connection status check.
-    Does NOT just check if token exists — actually calls Upstox API.
+    Probes Upstox User Profile API and Expired Instruments API.
     """
-    from backend.broker.token_resolver import resolve_upstox_token, get_token_metadata
+    from backend.broker.token_resolver import resolve_upstox_token, get_token_metadata, validate_token_live
     meta = get_token_metadata()
     token = resolve_upstox_token()
 
@@ -453,32 +462,33 @@ async def get_broker_status() -> Dict[str, Any]:
         "token_fingerprint": meta["fingerprint"],
         "token_valid": False,
         "api_reachable": False,
+        "expired_instruments_accessible": False,
+        "plan_type": "Standard",
         "websocket_url": settings.broker.websocket_url,
         "overall": "DISCONNECTED",
         "reason": "",
     }
 
     if not token:
-        status["reason"] = "No access token found. Go to Settings → Generate Token."
+        status["reason"] = "No access token found. Go to Settings → Connect Upstox."
         return status
 
-    try:
-        from backend.broker.upstox_client import UpstoxClient
-        client = UpstoxClient(access_token=token)
-        valid = client.is_token_valid()
-        status["token_valid"] = valid
-        status["api_reachable"] = True
+    val_result = validate_token_live(token)
+    status["api_reachable"] = val_result["profile_status"] is not None
+    status["token_valid"] = bool(val_result.get("profile_verified"))
+    status["expired_instruments_accessible"] = bool(val_result.get("expired_instruments_entitled"))
+    status["plan_type"] = val_result.get("plan_type", "Standard")
 
-        if valid:
-            status["overall"] = "CONNECTED"
-            status["reason"] = "Token valid and Upstox API reachable."
+    if status["token_valid"]:
+        status["overall"] = "CONNECTED"
+        if status["expired_instruments_accessible"]:
+            status["reason"] = "Token verified (HTTP 200) + Upstox Plus Plan Active (Expired Options Enabled)."
         else:
-            status["overall"] = "AUTHENTICATION_FAILED"
-            status["reason"] = "Token present but rejected by Upstox (401). Regenerate token in Settings."
-    except Exception as e:
-        err = str(e)
-        status["overall"] = "AUTHENTICATION_FAILED" if "401" in err else "DISCONNECTED"
-        status["reason"] = f"Upstox connection error: {err}"
+            status["reason"] = "Token verified (HTTP 200). Note: Expired Historical Options API requires Upstox Plus Plan."
+    else:
+        err_code = val_result.get("error_code") or "401"
+        status["overall"] = "AUTHENTICATION_FAILED"
+        status["reason"] = f"Upstox rejected token ({err_code}). Reconnect via OAuth in Settings."
 
     return status
 
@@ -486,19 +496,19 @@ async def get_broker_status() -> Dict[str, Any]:
 @router.post("/save-token")
 async def save_token_endpoint(body: Dict[str, Any]) -> Dict[str, Any]:
     """Manually or programmatically save token, verify against profile, and persist."""
-    from backend.broker.upstox_client import UpstoxClient
+    from backend.broker.token_resolver import validate_token_live, persist_upstox_token
     import hashlib
 
     token = (body.get("access_token") or body.get("token") or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="No access token provided")
 
-    client = UpstoxClient(access_token=token)
-    profile = client.get_profile()
+    val_result = validate_token_live(token)
 
-    if profile:
-        _db.save_token(token)
-        os.environ["UPSTOX_ACCESS_TOKEN"] = token
+    if val_result.get("profile_verified"):
+        user_name = val_result.get("user_name") or "Upstox Trader"
+        user_id = val_result.get("user_id") or ""
+        persist_upstox_token(token, {"user_name": user_name, "user_id": user_id})
         _propagate_token_to_engine(token)
         _restart_websocket_client(token)
         sha = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -508,21 +518,25 @@ async def save_token_endpoint(body: Dict[str, Any]) -> Dict[str, Any]:
             "http_status": 200,
             "token_fingerprint": f"{sha[:6]}...{sha[-6:]}",
             "token_length": len(token),
-            "user_name": profile.get("user_name", "Upstox Trader"),
-            "user_id": profile.get("user_id", ""),
-            "message": "Token verified and saved to database.",
+            "user_name": user_name,
+            "user_id": user_id,
+            "is_plus_plan": val_result.get("expired_instruments_entitled", False),
+            "plan_type": val_result.get("plan_type", "Standard"),
+            "message": "Token verified and saved to database, JSON, and .env files.",
         }
     else:
+        err_msg = val_result.get("message") or "Token verification failed against Upstox /v2/user/profile."
         raise HTTPException(
             status_code=400,
-            detail="Token verification failed against Upstox /v2/user/profile."
+            detail=f"Token verification failed: {err_msg}",
         )
 
 
 @router.get("/token-status")
 async def token_status_endpoint() -> Dict[str, Any]:
     """Safe token status diagnostic."""
-    from backend.broker.token_resolver import resolve_upstox_token, get_token_metadata
+    from backend.broker.token_resolver import get_token_metadata
+    return get_token_metadata()
     from backend.broker.upstox_client import UpstoxClient
 
     token = resolve_upstox_token()
