@@ -300,6 +300,31 @@ export default function Backtest() {
             </div>
           )}
 
+          {/* Comprehensive Summary Metrics (Always Visible upon backtest completion) */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2.5">
+            {[
+              { label: 'Total Trades',    value: String(tradesTaken),                                               color: 'text-white' },
+              { label: 'Winning Trades',  value: String(winningTrades),                                             color: 'text-emerald-400' },
+              { label: 'Losing Trades',   value: String(losingTrades),                                              color: 'text-red-400' },
+              { label: 'Win Rate',        value: `${accuracy.toFixed(1)}%`,                                         color: accuracy >= 40 ? 'text-emerald-400' : 'text-red-400' },
+              { label: 'Gross Profit',    value: formatCurrency(grossProfit),                                       color: 'text-emerald-400' },
+              { label: 'Gross Loss',      value: formatCurrency(grossLoss),                                         color: 'text-red-400' },
+              { label: 'Net P&L',         value: `${formatCurrency(netProfit)} (${netProfitPct >= 0 ? '+' : ''}${netProfitPct.toFixed(2)}%)`, color: pnlColor(netProfit) },
+              { label: 'Profit Factor',   value: profitFactor >= 99 ? '99.00+' : profitFactor.toFixed(2),           color: profitFactor >= 1.5 ? 'text-emerald-400' : 'text-red-400' },
+              { label: 'Max Drawdown',    value: `${maxDD.toFixed(2)}%`,                                            color: maxDD < 5 ? 'text-emerald-400' : 'text-red-400' },
+              { label: 'Total Charges',   value: formatCurrency(totalCharges),                                      color: 'text-slate-400' },
+              { label: 'Avg Win',         value: formatCurrency(avgWin),                                            color: 'text-emerald-400' },
+              { label: 'Avg Loss',        value: formatCurrency(avgLoss),                                           color: 'text-red-400' },
+              { label: 'Expectancy',      value: `${formatCurrency(expectancy)}/trade`,                             color: pnlColor(expectancy) },
+              { label: 'Candles Scanned', value: candlesScanned.toLocaleString(),                                   color: 'text-slate-400' },
+            ].map(m => (
+              <div key={m.label} className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-3 shadow-sm">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-1 truncate">{m.label}</div>
+                <div className={`text-sm font-bold ${m.color} truncate`}>{m.value}</div>
+              </div>
+            ))}
+          </div>
+
           {/* Signals & Rejections Overview Card */}
           <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-4">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-center">
@@ -318,6 +343,50 @@ export default function Backtest() {
             </div>
           </div>
 
+          {/* Win / Loss Ratio bar (Shown when trades are executed) */}
+          {tradesTaken > 0 && (
+            <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-4">
+              <div className="flex items-center justify-between text-xs mb-2">
+                <span className="text-emerald-400 font-semibold">{winningTrades} Wins ({((winningTrades / tradesTaken) * 100).toFixed(1)}%)</span>
+                <span className="text-slate-400">{tradesTaken} Total Closed Trades</span>
+                <span className="text-red-400 font-semibold">{losingTrades} Losses ({((losingTrades / tradesTaken) * 100).toFixed(1)}%)</span>
+              </div>
+              <div className="h-2.5 bg-red-900/40 rounded-full overflow-hidden flex">
+                <div className="h-full bg-emerald-500 rounded-l-full transition-all duration-500"
+                  style={{ width: `${(winningTrades / tradesTaken * 100)}%` }} />
+                <div className="h-full bg-red-500 rounded-r-full transition-all duration-500"
+                  style={{ width: `${(losingTrades / tradesTaken * 100)}%` }} />
+              </div>
+            </div>
+          )}
+
+          {/* Equity Curve (Shown when multiple equity data points exist) */}
+          {equityCurve.length > 1 && (
+            <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-5">
+              <h2 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
+                <BarChart2 size={14} className="text-blue-400" /> Equity Curve
+              </h2>
+              <div className="flex items-end gap-0.5 h-32">
+                {equityCurve.map((pt, i) => {
+                  const h = maxEq > minEq ? ((pt.equity - minEq) / (maxEq - minEq)) * 100 : 50
+                  const prevVal = i > 0 ? equityCurve[i - 1].equity : pt.equity
+                  const isUp = pt.equity >= prevVal
+                  return (
+                    <div key={i} className="flex-1 flex flex-col justify-end h-full"
+                      title={`${pt.timestamp}: ${formatCurrency(pt.equity)}`}>
+                      <div className={`w-full rounded-t ${isUp ? 'bg-emerald-500/70' : 'bg-red-500/70'}`}
+                        style={{ height: `${Math.max(h, 1)}%` }} />
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="flex justify-between text-[10px] text-slate-600 mt-1">
+                <span>{formatCurrency(equityCurve[0]?.equity)}</span>
+                <span>{formatCurrency(equityCurve[equityCurve.length - 1]?.equity)}</span>
+              </div>
+            </div>
+          )}
+
           {/* Rejection Breakdown Panel */}
           {Object.keys(rejectionReasons).length > 0 && (
             <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-5">
@@ -330,7 +399,7 @@ export default function Backtest() {
                   {rejectedTotal} total rejection evaluation(s)
                 </span>
               </div>
-              <div className="space-y-2">
+              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
                 {Object.entries(rejectionReasons)
                   .sort((a, b) => b[1] - a[1])
                   .map(([reason, count]) => {
@@ -356,246 +425,175 @@ export default function Backtest() {
             </div>
           )}
 
-          {tradesTaken === 0 ? (
-            <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-8 text-center">
-              <BarChart2 size={28} className="mx-auto mb-2 text-slate-600" />
-              <div className="text-sm text-slate-400 font-medium">No trades taken in this window</div>
-              <div className="text-xs text-slate-600 mt-1">
-                {signalsGenerated > 0
-                  ? `${signalsGenerated} signal(s) were generated but not all conditions passed — see rejection reasons above.`
-                  : 'No strategy conditions were fully met. Try a longer date range, a different interval, or a trending symbol.'}
+          {/* Trade Log Panel (Always rendered for full visibility) */}
+          <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl overflow-hidden shadow-lg">
+            <div className="px-4 py-3 border-b border-[#1e2d45] flex flex-wrap items-center justify-between gap-3 bg-[#111728]">
+              <div className="flex items-center gap-3">
+                <h2 className="text-sm font-bold text-white tracking-wide">Trade Log</h2>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-[#1e2d45] text-slate-300 font-semibold">
+                  {filteredTrades.length} / {tradeLog.length} trades
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5 bg-[#0b101d] p-1 rounded-lg border border-[#1e2d45]">
+                <button
+                  onClick={() => setTradeFilter('ALL')}
+                  className={`text-xs px-2.5 py-1 rounded font-medium transition-all ${
+                    tradeFilter === 'ALL'
+                      ? 'bg-blue-600 text-white shadow'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  All ({tradeLog.length})
+                </button>
+                <button
+                  onClick={() => setTradeFilter('WINS')}
+                  className={`text-xs px-2.5 py-1 rounded font-medium transition-all ${
+                    tradeFilter === 'WINS'
+                      ? 'bg-emerald-600 text-white shadow'
+                      : 'text-slate-400 hover:text-emerald-300'
+                  }`}
+                >
+                  Wins ({winningTrades})
+                </button>
+                <button
+                  onClick={() => setTradeFilter('LOSSES')}
+                  className={`text-xs px-2.5 py-1 rounded font-medium transition-all ${
+                    tradeFilter === 'LOSSES'
+                      ? 'bg-red-600 text-white shadow'
+                      : 'text-slate-400 hover:text-red-300'
+                  }`}
+                >
+                  Losses ({losingTrades})
+                </button>
               </div>
             </div>
-          ) : (
-            <>
-              {/* Comprehensive Summary Metrics */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2.5">
-                {[
-                  { label: 'Total Trades',    value: String(tradesTaken),                                               color: 'text-white' },
-                  { label: 'Winning Trades',  value: String(winningTrades),                                             color: 'text-emerald-400' },
-                  { label: 'Losing Trades',   value: String(losingTrades),                                              color: 'text-red-400' },
-                  { label: 'Win Rate',        value: `${accuracy.toFixed(1)}%`,                                         color: accuracy >= 40 ? 'text-emerald-400' : 'text-red-400' },
-                  { label: 'Gross Profit',    value: formatCurrency(grossProfit),                                       color: 'text-emerald-400' },
-                  { label: 'Gross Loss',      value: formatCurrency(grossLoss),                                         color: 'text-red-400' },
-                  { label: 'Net P&L',         value: `${formatCurrency(netProfit)} (${netProfitPct >= 0 ? '+' : ''}${netProfitPct.toFixed(2)}%)`, color: pnlColor(netProfit) },
-                  { label: 'Profit Factor',   value: profitFactor >= 99 ? '99.00+' : profitFactor.toFixed(2),           color: profitFactor >= 1.5 ? 'text-emerald-400' : 'text-red-400' },
-                  { label: 'Max Drawdown',    value: `${maxDD.toFixed(2)}%`,                                            color: maxDD < 5 ? 'text-emerald-400' : 'text-red-400' },
-                  { label: 'Total Charges',   value: formatCurrency(totalCharges),                                      color: 'text-slate-400' },
-                  { label: 'Avg Win',         value: formatCurrency(avgWin),                                            color: 'text-emerald-400' },
-                  { label: 'Avg Loss',        value: formatCurrency(avgLoss),                                           color: 'text-red-400' },
-                  { label: 'Expectancy',      value: `${formatCurrency(expectancy)}/trade`,                             color: pnlColor(expectancy) },
-                  { label: 'Candles Scanned', value: candlesScanned.toLocaleString(),                                   color: 'text-slate-400' },
-                ].map(m => (
-                  <div key={m.label} className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-3">
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-1 truncate">{m.label}</div>
-                    <div className={`text-sm font-bold ${m.color} truncate`}>{m.value}</div>
-                  </div>
-                ))}
-              </div>
 
-              {/* Win / Loss Ratio bar */}
-              <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-4">
-                <div className="flex items-center justify-between text-xs mb-2">
-                  <span className="text-emerald-400 font-semibold">{winningTrades} Wins ({tradesTaken > 0 ? ((winningTrades / tradesTaken) * 100).toFixed(1) : 0}%)</span>
-                  <span className="text-slate-400">{tradesTaken} Total Closed Trades</span>
-                  <span className="text-red-400 font-semibold">{losingTrades} Losses ({tradesTaken > 0 ? ((losingTrades / tradesTaken) * 100).toFixed(1) : 0}%)</span>
-                </div>
-                <div className="h-2.5 bg-red-900/40 rounded-full overflow-hidden flex">
-                  <div className="h-full bg-emerald-500 rounded-l-full transition-all duration-500"
-                    style={{ width: `${tradesTaken > 0 ? (winningTrades / tradesTaken * 100) : 0}%` }} />
-                  <div className="h-full bg-red-500 rounded-r-full transition-all duration-500"
-                    style={{ width: `${tradesTaken > 0 ? (losingTrades / tradesTaken * 100) : 0}%` }} />
-                </div>
-              </div>
+            <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+              <table className="w-full text-xs text-left border-collapse">
+                <thead className="sticky top-0 z-10 bg-[#0f1628] border-b border-[#1e2d45]">
+                  <tr className="text-slate-400 font-semibold text-[11px] uppercase tracking-wider">
+                    <th className="px-3.5 py-3 whitespace-nowrap">Date / Time</th>
+                    <th className="px-3 py-3 whitespace-nowrap">CE / PE</th>
+                    <th className="px-3 py-3 whitespace-nowrap">ATM Strike</th>
+                    <th className="px-3 py-3 whitespace-nowrap">Expiry</th>
+                    <th className="px-3 py-3 whitespace-nowrap text-right">Entry ₹</th>
+                    <th className="px-3 py-3 whitespace-nowrap text-right">Exit ₹</th>
+                    <th className="px-3 py-3 whitespace-nowrap text-center">Qty</th>
+                    <th className="px-3 py-3 whitespace-nowrap text-right">P&L ₹ (Gross)</th>
+                    <th className="px-3 py-3 whitespace-nowrap text-right">Net P&L ₹</th>
+                    <th className="px-3 py-3 whitespace-nowrap">Exit Reason</th>
+                    <th className="px-3.5 py-3 whitespace-nowrap text-center">Result</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1a253a]">
+                  {filteredTrades.length === 0 ? (
+                    <tr>
+                      <td colSpan={11} className="px-4 py-8 text-center text-slate-500">
+                        {tradeLog.length === 0
+                          ? `No executed trades in this backtest window (${rejectedTotal > 0 ? `${rejectedTotal.toLocaleString()} signals filtered out — see Rejection Breakdown above` : 'no strategy conditions triggered'}).`
+                          : `No trades match the selected filter (${tradeFilter}).`}
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredTrades.map((t, i) => {
+                      const isWin = (t.net_pnl ?? 0) > 0
+                      const isLoss = (t.net_pnl ?? 0) < 0
+                      const optType = t.option_type || (t.symbol.includes('CE') ? 'CE' : t.symbol.includes('PE') ? 'PE' : '')
+                      const strikeVal = t.strike !== undefined && t.strike !== null && t.strike !== '' ? t.strike : ''
+                      const formattedReason = (t.exit_reason || '')
+                        .replace(/_/g, ' ')
+                        .replace(/\b\w/g, l => l.toUpperCase())
 
-              {equityCurve.length > 1 && (
-                <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-5">
-                  <h2 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-                    <BarChart2 size={14} className="text-blue-400" /> Equity Curve
-                  </h2>
-                  <div className="flex items-end gap-0.5 h-32">
-                    {equityCurve.map((pt, i) => {
-                      const h = maxEq > minEq ? ((pt.equity - minEq) / (maxEq - minEq)) * 100 : 50
-                      const prevVal = i > 0 ? equityCurve[i - 1].equity : pt.equity
-                      const isUp = pt.equity >= prevVal
                       return (
-                        <div key={i} className="flex-1 flex flex-col justify-end h-full"
-                          title={`${pt.timestamp}: ${formatCurrency(pt.equity)}`}>
-                          <div className={`w-full rounded-t ${isUp ? 'bg-emerald-500/70' : 'bg-red-500/70'}`}
-                            style={{ height: `${Math.max(h, 1)}%` }} />
-                        </div>
-                      )
-                    })}
-                  </div>
-                  <div className="flex justify-between text-[10px] text-slate-600 mt-1">
-                    <span>{formatCurrency(equityCurve[0]?.equity)}</span>
-                    <span>{formatCurrency(equityCurve[equityCurve.length - 1]?.equity)}</span>
-                  </div>
-                </div>
-              )}
+                        <tr
+                          key={i}
+                          className={`transition-colors hover:bg-[#182236] ${
+                            isWin ? 'bg-emerald-950/10' : isLoss ? 'bg-red-950/10' : 'bg-slate-900/10'
+                          }`}
+                        >
+                          <td className="px-3.5 py-2.5 whitespace-nowrap font-mono text-slate-300">
+                            <div>{(t.entry_time || t.timestamp || '').slice(0, 16).replace('T', ' ')}</div>
+                            {t.exit_time && (
+                              <div className="text-[10px] text-slate-500">
+                                Exit: {t.exit_time.slice(0, 16).replace('T', ' ')}
+                              </div>
+                            )}
+                          </td>
 
-              {tradeLog.length > 0 && (
-                <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl overflow-hidden shadow-lg">
-                  <div className="px-4 py-3 border-b border-[#1e2d45] flex flex-wrap items-center justify-between gap-3 bg-[#111728]">
-                    <div className="flex items-center gap-3">
-                      <h2 className="text-sm font-bold text-white tracking-wide">Trade Log</h2>
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-[#1e2d45] text-slate-300 font-semibold">
-                        {filteredTrades.length} / {tradeLog.length} trades
-                      </span>
-                    </div>
+                          <td className="px-3 py-2.5 whitespace-nowrap">
+                            {optType === 'CE' ? (
+                              <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-900/40 text-emerald-300 border border-emerald-700/50">
+                                CE
+                              </span>
+                            ) : optType === 'PE' ? (
+                              <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-purple-900/40 text-purple-300 border border-purple-700/50">
+                                PE
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-800 text-slate-400">
+                                SPOT
+                              </span>
+                            )}
+                          </td>
 
-                    <div className="flex items-center gap-1.5 bg-[#0b101d] p-1 rounded-lg border border-[#1e2d45]">
-                      <button
-                        onClick={() => setTradeFilter('ALL')}
-                        className={`text-xs px-2.5 py-1 rounded font-medium transition-all ${
-                          tradeFilter === 'ALL'
-                            ? 'bg-blue-600 text-white shadow'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        All ({tradeLog.length})
-                      </button>
-                      <button
-                        onClick={() => setTradeFilter('WINS')}
-                        className={`text-xs px-2.5 py-1 rounded font-medium transition-all ${
-                          tradeFilter === 'WINS'
-                            ? 'bg-emerald-600 text-white shadow'
-                            : 'text-slate-400 hover:text-emerald-300'
-                        }`}
-                      >
-                        Wins ({winningTrades})
-                      </button>
-                      <button
-                        onClick={() => setTradeFilter('LOSSES')}
-                        className={`text-xs px-2.5 py-1 rounded font-medium transition-all ${
-                          tradeFilter === 'LOSSES'
-                            ? 'bg-red-600 text-white shadow'
-                            : 'text-slate-400 hover:text-red-300'
-                        }`}
-                      >
-                        Losses ({losingTrades})
-                      </button>
-                    </div>
-                  </div>
+                          <td className="px-3 py-2.5 whitespace-nowrap font-mono text-slate-200">
+                            {strikeVal ? `₹${Number(strikeVal).toLocaleString('en-IN')}` : '—'}
+                          </td>
 
-                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-                    <table className="w-full text-xs text-left border-collapse">
-                      <thead className="sticky top-0 z-10 bg-[#0f1628] border-b border-[#1e2d45]">
-                        <tr className="text-slate-400 font-semibold text-[11px] uppercase tracking-wider">
-                          <th className="px-3.5 py-3 whitespace-nowrap">Date / Time</th>
-                          <th className="px-3 py-3 whitespace-nowrap">CE / PE</th>
-                          <th className="px-3 py-3 whitespace-nowrap">ATM Strike</th>
-                          <th className="px-3 py-3 whitespace-nowrap">Expiry</th>
-                          <th className="px-3 py-3 whitespace-nowrap text-right">Entry ₹</th>
-                          <th className="px-3 py-3 whitespace-nowrap text-right">Exit ₹</th>
-                          <th className="px-3 py-3 whitespace-nowrap text-center">Qty</th>
-                          <th className="px-3 py-3 whitespace-nowrap text-right">P&L ₹ (Gross)</th>
-                          <th className="px-3 py-3 whitespace-nowrap text-right">Net P&L ₹</th>
-                          <th className="px-3 py-3 whitespace-nowrap">Exit Reason</th>
-                          <th className="px-3.5 py-3 whitespace-nowrap text-center">Result</th>
+                          <td className="px-3 py-2.5 whitespace-nowrap font-mono text-slate-300">
+                            {t.expiry || '—'}
+                          </td>
+
+                          <td className="px-3 py-2.5 whitespace-nowrap text-right font-mono text-slate-200">
+                            ₹{Number(t.entry_price).toFixed(2)}
+                          </td>
+
+                          <td className="px-3 py-2.5 whitespace-nowrap text-right font-mono text-slate-200">
+                            ₹{Number(t.exit_price).toFixed(2)}
+                          </td>
+
+                          <td className="px-3 py-2.5 whitespace-nowrap text-center text-slate-300 font-mono">
+                            {t.quantity}
+                          </td>
+
+                          <td className={`px-3 py-2.5 whitespace-nowrap text-right font-mono font-medium ${pnlColor(t.gross_pnl)}`}>
+                            {formatCurrency(t.gross_pnl)}
+                          </td>
+
+                          <td className={`px-3 py-2.5 whitespace-nowrap text-right font-mono font-bold ${pnlColor(t.net_pnl)}`}>
+                            {formatCurrency(t.net_pnl)}
+                          </td>
+
+                          <td className="px-3 py-2.5 whitespace-nowrap text-slate-300">
+                            <span className="px-2 py-0.5 rounded bg-[#1c283f] text-[11px] text-slate-300 border border-[#2b3c5c]">
+                              {formattedReason || '—'}
+                            </span>
+                          </td>
+
+                          <td className="px-3.5 py-2.5 whitespace-nowrap text-center">
+                            {isWin ? (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                                WIN
+                              </span>
+                            ) : isLoss ? (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-300 border border-red-500/40">
+                                LOSS
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-700/50 text-slate-400 border border-slate-600">
+                                FLAT
+                              </span>
+                            )}
+                          </td>
                         </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#1a253a]">
-                        {filteredTrades.map((t, i) => {
-                          const isWin = (t.net_pnl ?? 0) > 0
-                          const isLoss = (t.net_pnl ?? 0) < 0
-                          const optType = t.option_type || (t.symbol.includes('CE') ? 'CE' : t.symbol.includes('PE') ? 'PE' : '')
-                          const strikeVal = t.strike !== undefined && t.strike !== null && t.strike !== '' ? t.strike : ''
-                          const formattedReason = (t.exit_reason || '')
-                            .replace(/_/g, ' ')
-                            .replace(/\b\w/g, l => l.toUpperCase())
-
-                          return (
-                            <tr
-                              key={i}
-                              className={`transition-colors hover:bg-[#182236] ${
-                                isWin ? 'bg-emerald-950/10' : isLoss ? 'bg-red-950/10' : 'bg-slate-900/10'
-                              }`}
-                            >
-                              <td className="px-3.5 py-2.5 whitespace-nowrap font-mono text-slate-300">
-                                <div>{(t.entry_time || t.timestamp || '').slice(0, 16).replace('T', ' ')}</div>
-                                {t.exit_time && (
-                                  <div className="text-[10px] text-slate-500">
-                                    Exit: {t.exit_time.slice(0, 16).replace('T', ' ')}
-                                  </div>
-                                )}
-                              </td>
-
-                              <td className="px-3 py-2.5 whitespace-nowrap">
-                                {optType === 'CE' ? (
-                                  <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-900/40 text-emerald-300 border border-emerald-700/50">
-                                    CE
-                                  </span>
-                                ) : optType === 'PE' ? (
-                                  <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-purple-900/40 text-purple-300 border border-purple-700/50">
-                                    PE
-                                  </span>
-                                ) : (
-                                  <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-800 text-slate-400">
-                                    SPOT
-                                  </span>
-                                )}
-                              </td>
-
-                              <td className="px-3 py-2.5 whitespace-nowrap font-mono text-slate-200">
-                                {strikeVal ? `₹${Number(strikeVal).toLocaleString('en-IN')}` : '—'}
-                              </td>
-
-                              <td className="px-3 py-2.5 whitespace-nowrap font-mono text-slate-300">
-                                {t.expiry || '—'}
-                              </td>
-
-                              <td className="px-3 py-2.5 whitespace-nowrap text-right font-mono text-slate-200">
-                                ₹{Number(t.entry_price).toFixed(2)}
-                              </td>
-
-                              <td className="px-3 py-2.5 whitespace-nowrap text-right font-mono text-slate-200">
-                                ₹{Number(t.exit_price).toFixed(2)}
-                              </td>
-
-                              <td className="px-3 py-2.5 whitespace-nowrap text-center text-slate-300 font-mono">
-                                {t.quantity}
-                              </td>
-
-                              <td className={`px-3 py-2.5 whitespace-nowrap text-right font-mono font-medium ${pnlColor(t.gross_pnl)}`}>
-                                {formatCurrency(t.gross_pnl)}
-                              </td>
-
-                              <td className={`px-3 py-2.5 whitespace-nowrap text-right font-mono font-bold ${pnlColor(t.net_pnl)}`}>
-                                {formatCurrency(t.net_pnl)}
-                              </td>
-
-                              <td className="px-3 py-2.5 whitespace-nowrap text-slate-300">
-                                <span className="px-2 py-0.5 rounded bg-[#1c283f] text-[11px] text-slate-300 border border-[#2b3c5c]">
-                                  {formattedReason || '—'}
-                                </span>
-                              </td>
-
-                              <td className="px-3.5 py-2.5 whitespace-nowrap text-center">
-                                {isWin ? (
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                                    WIN
-                                  </span>
-                                ) : isLoss ? (
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-300 border border-red-500/40">
-                                    LOSS
-                                  </span>
-                                ) : (
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-700/50 text-slate-400 border border-slate-600">
-                                    FLAT
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
+                      )
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       )}
     </div>
