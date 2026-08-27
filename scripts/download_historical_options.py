@@ -363,10 +363,21 @@ class HistoricalOptionsIngestionPipeline:
 
         # Check authentication first
         auth = self.test_auth()
-        if not auth["accessible"]:
+        is_accessible = bool(
+            auth.get("accessible")
+            or (
+                auth.get("valid") is True
+                and auth.get("profile_verified") is True
+                and auth.get("expired_instruments_entitled") is True
+            )
+        )
+        if not is_accessible:
+            err_code = auth.get("error_code") or "AUTH_INVALID_TOKEN"
+            err_msg = auth.get("error_message") or auth.get("message") or "Authentication or Expired Derivatives entitlement check failed."
+            req_perm = auth.get("required_permission") or "Active Upstox Access Token with Plus Plan entitlement"
             auth_msg = (
-                f"Upstox API Access Error ({auth.get('error_code')}): {auth.get('error_message')}\n"
-                f"Action Required: {auth.get('required_permission')}\n"
+                f"Upstox API Access Error ({err_code}): {err_msg}\n"
+                f"Action Required: {req_perm}\n"
                 f"To refresh your token:\n"
                 f"  1. Log into your Upstox Developer App console.\n"
                 f"  2. Complete OAuth login to generate a fresh access token.\n"
@@ -374,9 +385,9 @@ class HistoricalOptionsIngestionPipeline:
             )
             logger.error(auth_msg)
             summary["auth_error"] = auth
-            err_code = str(auth.get("error_code", "OTHER"))
-            if err_code in summary["error_categories"]:
-                summary["error_categories"][err_code] += len(missing_reqs)
+            err_code_str = str(err_code)
+            if err_code_str in summary["error_categories"]:
+                summary["error_categories"][err_code_str] += len(missing_reqs)
             else:
                 summary["error_categories"]["OTHER"] += len(missing_reqs)
             return summary

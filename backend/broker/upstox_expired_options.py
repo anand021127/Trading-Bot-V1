@@ -224,6 +224,7 @@ class UpstoxExpiredOptionsClient:
         dotenv_path: Optional[str] = None,
     ) -> None:
         from backend.broker.token_resolver import resolve_upstox_token
+        self.dotenv_path = dotenv_path
         self.access_token = resolve_upstox_token(access_token, dotenv_path=dotenv_path)
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -642,6 +643,7 @@ class UpstoxExpiredOptionsClient:
 
     def test_access(self) -> Dict[str, Any]:
         """Comprehensive self-test for API connectivity, token validity, and Expired Instruments entitlement."""
-        from backend.broker.token_resolver import validate_token_live
-        return validate_token_live(self.access_token)
+        from backend.broker.token_resolver import validate_token_live, resolve_upstox_token
+        token = self.access_token or resolve_upstox_token(dotenv_path=self.dotenv_path)
+        return validate_token_live(token, dotenv_path=self.dotenv_path)
 

@@ -427,27 +427,52 @@ def get_token_metadata(
     }
 
 
-def validate_token_live(token: str) -> Dict[str, Any]:
+def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] = None) -> Dict[str, Any]:
     """Perform direct live validation against both Upstox User Profile and Expired Instruments APIs.
     
-    Returns structured status distinguishing:
-    - Profile status: HTTP 200 (Success), HTTP 401 (Invalid/Expired Token)
-    - Expired Instruments status: HTTP 200 (Active + Entitled), HTTP 403 (Permission Denied / Plus Plan Missing), HTTP 401 (Auth Failure)
+    Returns canonical authentication/entitlement contract:
+    - has_token: bool (Token is present)
+    - valid: bool (User Profile verified HTTP 200)
+    - profile_status: Optional[int] (HTTP status code)
+    - profile_verified: bool (HTTP 200 + status == 'success')
+    - user_name: Optional[str]
+    - user_id: Optional[str]
+    - expired_instruments_status: Optional[int] (HTTP status code)
+    - expired_instruments_entitled: bool (HTTP 200 + status == 'success')
+    - accessible: bool (valid AND profile_verified AND expired_instruments_entitled)
+    - plan_type: str ('Upstox Plus Plan (Expired Derivatives Enabled)' or 'Standard')
+    - error_code: Optional[str] ('AUTH_INVALID_TOKEN', 'PERMISSION_DENIED', 'NO_TOKEN', etc.)
+    - error_message: Optional[str]
+    - message: str
+    - required_permission: Optional[str]
     """
     import urllib.request
     import urllib.error
 
     clean_token = (token or "").strip()
     if not clean_token:
+        clean_token = resolve_upstox_token(dotenv_path=dotenv_path)
+
+    if not clean_token:
         return {
+            "has_token": False,
             "valid": False,
             "profile_status": None,
+            "profile_verified": False,
+            "user_name": None,
+            "user_id": None,
             "expired_instruments_status": None,
+            "expired_instruments_entitled": False,
+            "accessible": False,
+            "plan_type": "None",
             "error_code": "NO_TOKEN",
-            "message": "Token is empty or missing",
+            "error_message": "No Upstox access token found. Please authenticate via OAuth in Settings.",
+            "message": "No Upstox access token found. Please authenticate via OAuth in Settings.",
+            "required_permission": "Upstox Access Token (connect via Settings OAuth)",
         }
 
     result: Dict[str, Any] = {
+        "has_token": True,
         "valid": False,
         "profile_status": None,
         "profile_verified": False,
@@ -455,9 +480,12 @@ def validate_token_live(token: str) -> Dict[str, Any]:
         "user_id": None,
         "expired_instruments_status": None,
         "expired_instruments_entitled": False,
+        "accessible": False,
         "plan_type": "Standard",
         "error_code": None,
+        "error_message": None,
         "message": "",
+        "required_permission": None,
     }
 
     # 1. Probe User Profile API
@@ -479,16 +507,22 @@ def validate_token_live(token: str) -> Dict[str, Any]:
     except urllib.error.HTTPError as e:
         result["profile_status"] = e.code
         result["profile_verified"] = False
-        try:
-            err_b = json.loads(e.read().decode("utf-8"))
-            result["error_code"] = err_b.get("errors", [{}])[0].get("errorCode") or f"HTTP_{e.code}"
-            result["message"] = err_b.get("errors", [{}])[0].get("message") or str(e)
-        except Exception:
-            result["error_code"] = f"HTTP_{e.code}"
-            result["message"] = str(e)
+        if e.code == 401:
+            result["error_code"] = "AUTH_INVALID_TOKEN"
+            result["error_message"] = "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token via OAuth."
+            result["required_permission"] = "Valid, unexpired Upstox Access Token (refresh daily via OAuth login)"
+        else:
+            try:
+                err_b = json.loads(e.read().decode("utf-8"))
+                result["error_code"] = err_b.get("errors", [{}])[0].get("errorCode") or f"HTTP_{e.code}"
+                result["error_message"] = err_b.get("errors", [{}])[0].get("message") or str(e)
+            except Exception:
+                result["error_code"] = f"HTTP_{e.code}"
+                result["error_message"] = str(e)
     except Exception as e:
         result["error_code"] = "NETWORK_ERROR"
-        result["message"] = str(e)
+        result["error_message"] = str(e)
+        result["required_permission"] = "Stable Internet connectivity to api.upstox.com"
 
     # 2. Probe Expired Instruments API (NIFTY50)
     try:
@@ -511,12 +545,52 @@ def validate_token_live(token: str) -> Dict[str, Any]:
         if e.code == 403:
             result["expired_instruments_entitled"] = False
             result["plan_type"] = "Standard (Upstox Plus Plan Required for Expired Historical Derivatives)"
+            if not result.get("error_code"):
+                result["error_code"] = "PERMISSION_DENIED"
+                result["error_message"] = "Access forbidden: Expired Instruments API requires active Upstox Plus Plan."
+                result["required_permission"] = "Upstox Plus Plan subscription required for Expired Instruments historical derivatives API"
         elif e.code == 401:
             result["expired_instruments_entitled"] = False
-    except Exception:
-        pass
+            if not result.get("error_code"):
+                result["error_code"] = "AUTH_INVALID_TOKEN"
+                result["error_message"] = "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token."
+                result["required_permission"] = "Valid, unexpired Upstox Access Token (refresh daily via OAuth login)"
+        else:
+            result["expired_instruments_entitled"] = False
+            if not result.get("error_code"):
+                result["error_code"] = f"HTTP_{e.code}"
+                result["error_message"] = f"Expired Instruments API returned HTTP {e.code}"
+    except Exception as e:
+        if not result.get("error_code"):
+            result["error_code"] = "NETWORK_ERROR"
+            result["error_message"] = str(e)
 
-    result["valid"] = bool(result["profile_verified"])
+    # 3. Derive canonical authorization and accessibility flags
+    is_valid = bool(result["profile_verified"])
+    is_entitled = bool(result["expired_instruments_entitled"])
+    is_accessible = bool(is_valid and is_entitled)
+
+    result["valid"] = is_valid
+    result["accessible"] = is_accessible
+    result["message"] = result.get("error_message") or ("Upstox Plus Plan Active and verified." if is_accessible else "")
+
+    if is_accessible:
+        result["error_code"] = None
+        result["error_message"] = None
+        result["required_permission"] = None
+    elif not result.get("error_code"):
+        if not is_valid:
+            result["error_code"] = "AUTH_INVALID_TOKEN"
+            result["error_message"] = "Invalid or expired token."
+            result["required_permission"] = "Valid, unexpired Upstox Access Token"
+        elif not is_entitled:
+            result["error_code"] = "PERMISSION_DENIED"
+            result["error_message"] = "Upstox Plus Plan required for historical expired derivatives access."
+            result["required_permission"] = "Upstox Plus Plan subscription"
+        else:
+            result["error_code"] = "ACCESS_CHECK_FAILED"
+            result["error_message"] = "Upstox access verification failed."
+
     return result
 
 

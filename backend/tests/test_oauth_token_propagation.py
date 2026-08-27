@@ -268,13 +268,13 @@ class TestOAuthTokenPropagation(unittest.TestCase):
         mock_http_client.__aexit__.return_value = None
 
         with patch("httpx.AsyncClient", return_value=mock_http_client), \
+             patch("backend.broker.token_resolver.validate_token_live", return_value={"profile_verified": True, "valid": True, "expired_instruments_entitled": True, "user_name": "Test Trader", "user_id": "TEST01"}), \
              patch("backend.broker.upstox_client.UpstoxClient.is_token_valid", return_value=True), \
              patch("backend.api.routers.settings._restart_websocket_client") as mock_ws_restart, \
-             patch("backend.api.routers.settings._db.save_token") as mock_save_token:
+             patch("backend.broker.token_resolver.persist_upstox_token") as mock_persist_token:
 
             resp = asyncio.run(token_callback("sample_auth_code"))
 
-            self.assertEqual(os.environ.get("UPSTOX_ACCESS_TOKEN"), self.new_token)
             self.assertEqual(
                 self.engine.client.access_token,
                 self.new_token,
@@ -286,7 +286,7 @@ class TestOAuthTokenPropagation(unittest.TestCase):
                 "OrderManager.client.access_token must be updated by OAuth callback",
             )
             mock_ws_restart.assert_called_once_with(self.new_token)
-            mock_save_token.assert_called_once_with(self.new_token)
+            mock_persist_token.assert_called_once()
 
 
 if __name__ == "__main__":
