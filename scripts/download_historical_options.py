@@ -266,6 +266,7 @@ class HistoricalOptionsIngestionPipeline:
         dotenv_path: Optional[str] = None,
         rate_limit_delay: float = 0.25,
     ) -> None:
+        from backend.broker.token_resolver import token_fingerprint, get_token_source
         self.cache_dir = cache_dir
         self.cache = OptionsDataCache(cache_dir=cache_dir)
         self.validator = OptionsDataValidator()
@@ -275,6 +276,12 @@ class HistoricalOptionsIngestionPipeline:
             access_token=access_token,
             cache_dir=cache_dir,
             dotenv_path=dotenv_path,
+        )
+        src = get_token_source(access_token, dotenv_path=dotenv_path)
+        fp = token_fingerprint(self.client.access_token)
+        logger.info(
+            "[Token Diagnostic] Pipeline init: client_token_source=%s, length=%d, fingerprint=%s",
+            src, len(self.client.access_token), fp,
         )
 
     def test_auth(self) -> Dict[str, Any]:
@@ -363,6 +370,15 @@ class HistoricalOptionsIngestionPipeline:
 
         # Check authentication first
         auth = self.test_auth()
+        logger.info(
+            "[Token Diagnostic] Pipeline test_auth: accessible=%s, valid=%s, profile_status=%s, expired_status=%s, error_code=%s, fingerprint=%s",
+            auth.get("accessible"),
+            auth.get("valid"),
+            auth.get("profile_status"),
+            auth.get("expired_instruments_status"),
+            auth.get("error_code"),
+            auth.get("token_fingerprint"),
+        )
         is_accessible = bool(
             auth.get("accessible")
             or (
@@ -558,11 +574,12 @@ def main():
     print("=" * 75)
     print(" UPSTOX HISTORICAL OPTIONS DATA ACQUISITION & VALIDATION PIPELINE")
     print("=" * 75)
-    print(f"Token Status   : {'PRESENT' if meta['present'] else 'NOT FOUND'}")
-    print(f"Token Length   : {meta['length']} characters")
-    print(f"Token Masked   : {meta['masked']}")
-    print(f"Token Source   : {meta['source']}")
-    print(f"Cache Directory: {args.cache_dir}")
+    print(f"Token Status      : {'PRESENT' if meta['present'] else 'NOT FOUND'}")
+    print(f"Token Length      : {meta['length']} characters")
+    print(f"Token Masked      : {meta['masked']}")
+    print(f"Token Fingerprint : {meta.get('fingerprint', 'NONE')}")
+    print(f"Token Source      : {meta['source']}")
+    print(f"Cache Directory   : {args.cache_dir}")
     print("-" * 75)
 
     if args.audit_only:

@@ -390,44 +390,52 @@ class DatabaseManager:
 
     def save_token(self, token: str) -> None:
         """Persist access token to SQLite DB, JSON files, repository .env files, and os.environ."""
-        clean_token = token.strip()
+        clean_token = (token or "").strip().strip('"\'').strip()
         self.save_setting("upstox_access_token", clean_token)
-        os.environ["UPSTOX_ACCESS_TOKEN"] = clean_token
 
-        import json
-        payload = {
-            "access_token": clean_token,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            "source": "oauth_callback"
-        }
-        paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
-        if self.db_path and self.db_path != ":memory:":
-            custom_dir = Path(self.db_path).parent
-            if custom_dir != Path.cwd() and custom_dir != Path("/data"):
-                paths = [str(custom_dir / "upstox_token.json")]
-        for p in paths:
+        is_mock = clean_token.startswith(("mock-", "test-", "leftover-")) or (0 < len(clean_token) < 30)
+
+        # Do not propagate mock test tokens to environment variables or production disk files
+        if clean_token and not is_mock:
+            os.environ["UPSTOX_ACCESS_TOKEN"] = clean_token
+        elif not clean_token:
+            os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
+
+        if not is_mock:
+            import json
+            payload = {
+                "access_token": clean_token,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "source": "oauth_callback"
+            }
+            paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
+            if self.db_path and self.db_path != ":memory:":
+                custom_dir = Path(self.db_path).parent
+                if custom_dir != Path.cwd() and custom_dir != Path("/data"):
+                    paths = [str(custom_dir / "upstox_token.json")]
+            for p in paths:
+                try:
+                    parent = Path(p).parent
+                    parent.mkdir(parents=True, exist_ok=True)
+                    with open(p, "w", encoding="utf-8") as f:
+                        json.dump(payload, f, indent=2)
+                except Exception:
+                    pass
+
+            # Also atomically update repository .env files
             try:
-                parent = Path(p).parent
-                parent.mkdir(parents=True, exist_ok=True)
-                with open(p, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=2)
+                from backend.broker.token_resolver import update_dotenv_file, DEFAULT_REPO_DOTENV_PATHS
+                for env_p in DEFAULT_REPO_DOTENV_PATHS:
+                    if os.path.exists(os.path.dirname(os.path.abspath(env_p))):
+                        update_dotenv_file(env_p, {"UPSTOX_ACCESS_TOKEN": clean_token})
             except Exception:
                 pass
-
-        # Also atomically update repository .env files
-        try:
-            from backend.broker.token_resolver import update_dotenv_file, DEFAULT_REPO_DOTENV_PATHS
-            for env_p in DEFAULT_REPO_DOTENV_PATHS:
-                if os.path.exists(os.path.dirname(os.path.abspath(env_p))):
-                    update_dotenv_file(env_p, {"UPSTOX_ACCESS_TOKEN": clean_token})
-        except Exception:
-            pass
 
     def load_token(self) -> str:
         """Load access token from DB or fallback JSON file."""
         val = self.get_setting("upstox_access_token", "")
         if val and val.strip():
-            return val.strip()
+            return val.strip().strip('"\'').strip()
         import json
         paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
         if self.db_path and self.db_path != ":memory:":

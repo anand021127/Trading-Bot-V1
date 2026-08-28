@@ -13,11 +13,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("token_resolver")
 
 # Candidate locations for repository .env file
 DEFAULT_REPO_DOTENV_PATHS: List[str] = [
@@ -32,6 +35,23 @@ DEFAULT_TOKEN_JSON_PATHS: List[str] = [
     os.path.join(os.getcwd(), "data", "upstox_token.json"),
     os.path.join(os.getcwd(), "upstox_token.json"),
 ]
+
+
+def token_fingerprint(token: Optional[str]) -> str:
+    """Compute safe deterministic SHA-256 fingerprint for token identity verification.
+    
+    Never reveals the secret token content.
+    Returns: 'NONE' if empty, or 'abc123...456def' (first 6 + last 6 hex chars).
+    """
+    if not token or not isinstance(token, str) or not token.strip():
+        return "NONE"
+    clean = token.strip()
+    sha = hashlib.sha256(clean.encode("utf-8")).hexdigest()
+    return f"{sha[:6]}...{sha[-6:]}"
+
+
+# Alias for backward compatibility
+_token_fingerprint = token_fingerprint
 
 
 def decode_jwt_safe(token: str) -> Dict[str, Any]:
@@ -209,12 +229,15 @@ def persist_upstox_token(token: str, user_profile: Optional[Dict[str, Any]] = No
     3. All accessible .env files (/home/ubuntu/Trading-Bot-V1/.env, <PROJECT_ROOT>/.env, cwd/.env)
     4. Runtime process memory (os.environ['UPSTOX_ACCESS_TOKEN'])
     """
-    clean_token = (token or "").strip()
+    clean_token = (token or "").strip().strip('"\'').strip()
     if not clean_token:
         return False
 
-    # 1. Update runtime memory immediately
-    os.environ["UPSTOX_ACCESS_TOKEN"] = clean_token
+    is_mock = clean_token.startswith(("mock-", "test-", "leftover-")) or (0 < len(clean_token) < 30)
+
+    # 1. Update runtime memory immediately (protect against mock/test strings)
+    if not is_mock:
+        os.environ["UPSTOX_ACCESS_TOKEN"] = clean_token
 
     # 2. Persist to SQLite database
     try:
@@ -231,160 +254,178 @@ def persist_upstox_token(token: str, user_profile: Optional[Dict[str, Any]] = No
     except Exception:
         pass
 
-    # 3. Persist to JSON files
-    payload = {
-        "access_token": clean_token,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-        "source": "oauth_verified",
-        "user_name": (user_profile or {}).get("user_name", ""),
-        "user_id": (user_profile or {}).get("user_id", ""),
-    }
-    for json_p in DEFAULT_TOKEN_JSON_PATHS:
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(json_p)), exist_ok=True)
-            with open(json_p, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2)
-        except Exception:
-            pass
+    # 3. Persist to JSON files (skip for mock strings in unit tests unless required)
+    if not is_mock:
+        payload = {
+            "access_token": clean_token,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "source": "oauth_verified",
+            "user_name": (user_profile or {}).get("user_name", ""),
+            "user_id": (user_profile or {}).get("user_id", ""),
+        }
+        for json_p in DEFAULT_TOKEN_JSON_PATHS:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(json_p)), exist_ok=True)
+                with open(json_p, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+            except Exception:
+                pass
 
-    # 4. Atomically update all candidate .env files
-    for env_p in DEFAULT_REPO_DOTENV_PATHS:
-        try:
-            if os.path.exists(os.path.dirname(env_p)):
-                update_dotenv_file(env_p, {"UPSTOX_ACCESS_TOKEN": clean_token})
-        except Exception:
-            pass
+        # 4. Atomically update all candidate .env files
+        for env_p in DEFAULT_REPO_DOTENV_PATHS:
+            try:
+                if os.path.exists(os.path.dirname(env_p)):
+                    update_dotenv_file(env_p, {"UPSTOX_ACCESS_TOKEN": clean_token})
+            except Exception:
+                pass
 
     return True
 
 
-def resolve_upstox_token(
+def _score_candidate(token: str, source: str) -> Tuple[int, float, int]:
+    """Score a token candidate for authoritative selection:
+    Returns (quality_tier, timestamp, source_tier). Higher score wins.
+    """
+    clean = (token or "").strip().strip('"\'').strip()
+    if not clean:
+        return (-100, 0.0, 0)
+
+    is_mock = clean.startswith(("mock-", "test-", "leftover-")) or len(clean) < 30
+    jwt = decode_jwt_safe(clean)
+    is_jwt = jwt.get("is_jwt", False)
+    exp = float(jwt.get("expires_at") or 0.0)
+    iat = float(jwt.get("issued_at") or 0.0)
+    is_expired = jwt.get("is_expired")
+
+    src_tier = {
+        "runtime": 10,
+        "database": 4,
+        "json": 3,
+        "environment": 2,
+        "dotenv": 1,
+    }.get(source, 0)
+
+    if is_jwt:
+        if is_expired is False:
+            # Active unexpired JWT: tier 100
+            return (100, exp or iat, src_tier)
+        elif is_expired is True:
+            # Expired but structured JWT: tier 50
+            return (50, exp or iat, src_tier)
+        else:
+            # Valid JWT without exp: tier 40
+            return (40, iat, src_tier)
+    else:
+        if is_mock:
+            # Mock or dummy test string: negative tier so it never beats real tokens
+            return (-50, 0.0, src_tier)
+        else:
+            # Non-JWT opaque token: tier 20
+            return (20, 0.0, src_tier)
+
+
+def resolve_upstox_token_with_source(
     explicit_token: Optional[str] = None,
     dotenv_path: Optional[str] = None,
-) -> str:
-    """Resolve Upstox access token with strict freshness awareness:
-    1. Explicit runtime token (--token)
-    2. Canonical SQLite DB / JSON persisted token (if active/fresh)
-    3. os.environ['UPSTOX_ACCESS_TOKEN'] & repository .env file
-
-    Automatically synchronizes valid tokens across storage targets.
+) -> Tuple[str, str]:
+    """Resolve Upstox access token and its precise origin source.
+    
+    Guarantees:
+    - Runtime explicit token (--token) always wins.
+    - Never replaces a real JWT with a mock/dummy string.
+    - Selects the freshest active token across all candidates.
+    - Synchronizes chosen non-mock token to os.environ['UPSTOX_ACCESS_TOKEN'].
     """
     # 1. Explicit runtime token
     if explicit_token and explicit_token.strip():
-        tok = explicit_token.strip()
+        tok = explicit_token.strip().strip('"\'').strip()
         os.environ["UPSTOX_ACCESS_TOKEN"] = tok
-        return tok
+        return tok, "runtime (--token)"
 
-    # 2. Check canonical SQLite database
+    # 2. Collect all candidate tokens
     db_token = ""
     try:
         from backend.database.db_manager import DatabaseManager
         db = DatabaseManager()
-        db_token = (db.load_token() or "").strip()
+        db_token = (db.load_token() or "").strip().strip('"\'').strip()
     except Exception:
         db_token = ""
 
-    # 3. Check JSON storage
     json_token = ""
+    matched_json_path = ""
     for json_p in DEFAULT_TOKEN_JSON_PATHS:
         if os.path.isfile(json_p):
             try:
                 with open(json_p, "r", encoding="utf-8") as f:
                     d = json.load(f)
-                    jt = (d.get("access_token") or "").strip()
+                    jt = (d.get("access_token") or "").strip().strip('"\'').strip()
                     if jt:
                         json_token = jt
+                        matched_json_path = json_p
                         break
             except Exception:
                 pass
 
-    # 4. Check Environment & .env
-    env_token = (os.getenv("UPSTOX_ACCESS_TOKEN") or "").strip()
+    env_token = (os.getenv("UPSTOX_ACCESS_TOKEN") or "").strip().strip('"\'').strip()
+    
     found_dotenv = find_repo_dotenv_path(dotenv_path)
     dot_token = ""
     if found_dotenv:
         env_vars = parse_dotenv_file(found_dotenv)
-        dot_token = (env_vars.get("UPSTOX_ACCESS_TOKEN") or "").strip()
+        dot_token = (env_vars.get("UPSTOX_ACCESS_TOKEN") or "").strip().strip('"\'').strip()
 
-    # Determine candidate tokens
-    candidates = [
+    candidates: List[Tuple[str, str]] = [
         ("database", db_token),
         ("json", json_token),
         ("environment", env_token),
         ("dotenv", dot_token),
     ]
 
-    # Filter non-empty candidates
     valid_candidates = [(src, tok) for src, tok in candidates if tok]
-
     if not valid_candidates:
-        return ""
+        return "", "none"
 
-    # Evaluate freshness: if database or json has a newer / valid token, prefer it
-    # If all are equal, return the first
-    selected_token = valid_candidates[0][1]
-    
-    # Check if we have an unexpired JWT among candidates
-    best_candidate = None
-    for src, tok in valid_candidates:
-        jwt_info = decode_jwt_safe(tok)
-        if jwt_info.get("is_jwt"):
-            exp = jwt_info.get("expires_at")
-            now = time.time()
-            if exp and exp > now:
-                # Found active unexpired token
-                best_candidate = (src, tok)
-                break
+    # Score and rank candidates
+    scored = [(_score_candidate(tok, src), src, tok) for src, tok in valid_candidates]
+    scored.sort(key=lambda item: item[0], reverse=True)
 
-    if best_candidate:
-        selected_token = best_candidate[1]
+    best_score, best_src, best_token = scored[0]
+
+    # Map internal source key to human-readable description
+    if best_src == "database":
+        source_label = "database (SQLite)"
+    elif best_src == "json":
+        source_label = f"json ({matched_json_path or 'storage'})"
+    elif best_src == "environment":
+        source_label = "environment (os.environ)"
+    elif best_src == "dotenv":
+        source_label = f"dotenv ({found_dotenv or '.env'})"
     else:
-        # If none unexpired, prioritize database / json over stale static env
-        for src, tok in valid_candidates:
-            if src in ("database", "json"):
-                selected_token = tok
-                break
+        source_label = best_src
 
-    # Synchronize selected token to runtime memory
-    if selected_token:
-        os.environ["UPSTOX_ACCESS_TOKEN"] = selected_token
+    # Synchronize selected token to runtime memory if not a mock token
+    if best_token and not (best_token.startswith(("mock-", "test-", "leftover-")) or len(best_token) < 30):
+        os.environ["UPSTOX_ACCESS_TOKEN"] = best_token
 
-    return selected_token
+    return best_token, source_label
+
+
+def resolve_upstox_token(
+    explicit_token: Optional[str] = None,
+    dotenv_path: Optional[str] = None,
+) -> str:
+    """Resolve Upstox access token with strict freshness and integrity awareness."""
+    tok, _ = resolve_upstox_token_with_source(explicit_token, dotenv_path=dotenv_path)
+    return tok
 
 
 def get_token_source(
     explicit_token: Optional[str] = None,
     dotenv_path: Optional[str] = None,
 ) -> str:
-    """Determine the origin source of the active token."""
-    if explicit_token and explicit_token.strip():
-        return "runtime (--token)"
-
-    try:
-        from backend.database.db_manager import DatabaseManager
-        db = DatabaseManager()
-        db_token = (db.load_token() or "").strip()
-        if db_token:
-            return "database (SQLite)"
-    except Exception:
-        pass
-
-    for json_p in DEFAULT_TOKEN_JSON_PATHS:
-        if os.path.isfile(json_p):
-            return f"json ({json_p})"
-
-    env_token = os.getenv("UPSTOX_ACCESS_TOKEN", "")
-    if env_token and env_token.strip():
-        return "environment (os.environ)"
-
-    found_dotenv = find_repo_dotenv_path(dotenv_path)
-    if found_dotenv:
-        env_vars = parse_dotenv_file(found_dotenv)
-        dot_token = env_vars.get("UPSTOX_ACCESS_TOKEN", "")
-        if dot_token and dot_token.strip():
-            return f"dotenv ({found_dotenv})"
-
-    return "none"
+    """Determine the origin source of the winning resolved token."""
+    _, src = resolve_upstox_token_with_source(explicit_token, dotenv_path=dotenv_path)
+    return src
 
 
 def get_token_metadata(
@@ -445,15 +486,19 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
     - error_message: Optional[str]
     - message: str
     - required_permission: Optional[str]
+    - token_fingerprint: str (Safe SHA-256 fingerprint for diagnostic correlation)
     """
     import urllib.request
     import urllib.error
 
-    clean_token = (token or "").strip()
+    clean_token = (token or "").strip().strip('"\'').strip()
     if not clean_token:
         clean_token = resolve_upstox_token(dotenv_path=dotenv_path)
 
+    fp = token_fingerprint(clean_token)
+
     if not clean_token:
+        logger.info("[Token Diagnostic] validate_token_live: No token found. fingerprint=NONE")
         return {
             "has_token": False,
             "valid": False,
@@ -469,6 +514,7 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
             "error_message": "No Upstox access token found. Please authenticate via OAuth in Settings.",
             "message": "No Upstox access token found. Please authenticate via OAuth in Settings.",
             "required_permission": "Upstox Access Token (connect via Settings OAuth)",
+            "token_fingerprint": "NONE",
         }
 
     result: Dict[str, Any] = {
@@ -486,6 +532,7 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
         "error_message": None,
         "message": "",
         "required_permission": None,
+        "token_fingerprint": fp,
     }
 
     # 1. Probe User Profile API
@@ -587,9 +634,11 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
             result["error_code"] = "PERMISSION_DENIED"
             result["error_message"] = "Upstox Plus Plan required for historical expired derivatives access."
             result["required_permission"] = "Upstox Plus Plan subscription"
-        else:
-            result["error_code"] = "ACCESS_CHECK_FAILED"
-            result["error_message"] = "Upstox access verification failed."
+
+    logger.info(
+        "[Token Diagnostic] validate_token_live: length=%d, fingerprint=%s, profile_status=%s, expired_status=%s, accessible=%s",
+        len(clean_token), fp, result["profile_status"], result["expired_instruments_status"], result["accessible"]
+    )
 
     return result
 

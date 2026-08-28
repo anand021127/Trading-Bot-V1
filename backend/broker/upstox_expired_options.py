@@ -223,9 +223,13 @@ class UpstoxExpiredOptionsClient:
         cache_dir: str = DEFAULT_CACHE_DIR,
         dotenv_path: Optional[str] = None,
     ) -> None:
-        from backend.broker.token_resolver import resolve_upstox_token
+        from backend.broker.token_resolver import (
+            resolve_upstox_token,
+            get_token_source,
+            token_fingerprint,
+        )
         self.dotenv_path = dotenv_path
-        self.access_token = resolve_upstox_token(access_token, dotenv_path=dotenv_path)
+        self.access_token = (resolve_upstox_token(access_token, dotenv_path=dotenv_path) or "").strip().strip('"\'').strip()
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.cache = OptionsDataCache(cache_dir=cache_dir)
@@ -233,19 +237,48 @@ class UpstoxExpiredOptionsClient:
         self._expiries_cache: Dict[str, List[str]] = {}
         self._contracts_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
 
+        src = get_token_source(access_token, dotenv_path=dotenv_path)
+        fp = token_fingerprint(self.access_token)
+        logger.info(
+            "[Token Diagnostic] UpstoxExpiredOptionsClient init: token_source=%s, length=%d, fingerprint=%s",
+            src, len(self.access_token), fp,
+        )
+
+    def update_access_token(self, new_token: str) -> None:
+        """Update client access token dynamically."""
+        from backend.broker.token_resolver import token_fingerprint
+        clean = (new_token or "").strip().strip('"\'').strip()
+        self.access_token = clean
+        if clean and not (clean.startswith(("mock-", "test-", "leftover-")) or len(clean) < 30):
+            os.environ["UPSTOX_ACCESS_TOKEN"] = clean
+        fp = token_fingerprint(self.access_token)
+        logger.info(
+            "[Token Diagnostic] UpstoxExpiredOptionsClient update_access_token: length=%d, fingerprint=%s",
+            len(self.access_token), fp,
+        )
+
     def _headers(self) -> Dict[str, str]:
         h = {
             "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 UpstoxTradingBot/2.0",
+            "User-Agent": "Upstox-Trading-Bot/2.0",
         }
         if self.access_token:
-            h["Authorization"] = f"Bearer {self.access_token}"
+            clean = self.access_token.strip().strip('"\'').strip()
+            h["Authorization"] = f"Bearer {clean}"
         return h
 
     def _get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, max_retries: int = 3) -> Dict[str, Any]:
+        from backend.broker.token_resolver import token_fingerprint
+        clean = (self.access_token or "").strip().strip('"\'').strip()
+        fp = token_fingerprint(clean)
+        logger.info(
+            "[Token Diagnostic] UpstoxExpiredOptionsClient._get %s: token_length=%d, fingerprint=%s",
+            endpoint, len(clean), fp,
+        )
+
         url = f"{self.base_url}{endpoint}"
         if params:
-            query_str = urllib.parse.urlencode(params)
+            query_str = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
             url = f"{url}?{query_str}"
 
         last_error: Optional[Exception] = None
@@ -319,41 +352,15 @@ class UpstoxExpiredOptionsClient:
         raise UpstoxExpiredAPIError(500, "Unknown request failure")
 
     def test_access(self) -> Dict[str, Any]:
-        """Perform non-destructive probe of Upstox Expired Instruments API access."""
-        result: Dict[str, Any] = {
-            "has_token": bool(self.access_token and len(self.access_token) > 10),
-            "accessible": False,
-            "error_code": None,
-            "error_message": None,
-            "required_permission": None,
-        }
-        if not result["has_token"]:
-            result["error_code"] = "NO_TOKEN"
-            result["error_message"] = "UPSTOX_ACCESS_TOKEN is missing or empty"
-            result["required_permission"] = "Set UPSTOX_ACCESS_TOKEN in environment or settings"
-            return result
-
-        try:
-            # Probe: Get expiries for Nifty 50
-            nifty_key = INDEX_INSTRUMENT_KEYS.get("NIFTY50", "NSE_INDEX|Nifty 50")
-            res = self._get("/expired-instruments/expiries", params={"instrument_key": nifty_key})
-            result["accessible"] = True
-            result["sample_expiries"] = res.get("data", [])[:5]
-            return result
-        except UpstoxExpiredAPIError as e:
-            result["error_code"] = e.error_code or str(e.status_code)
-            result["error_message"] = str(e)
-            if e.status_code == 401:
-                result["required_permission"] = "Valid, unexpired Upstox Access Token (refresh daily via OAuth login)"
-            elif e.status_code == 403:
-                result["required_permission"] = "Upstox Plus Plan subscription with Expired Derivatives Historical API enabled"
-            else:
-                result["required_permission"] = f"Upstox API permission for code {e.status_code}"
-            return result
-        except Exception as e:
-            result["error_code"] = "UNEXPECTED_ERROR"
-            result["error_message"] = str(e)
-            return result
+        """Perform direct validation against Upstox Expired Instruments API access."""
+        from backend.broker.token_resolver import validate_token_live, token_fingerprint
+        self.access_token = (self.access_token or "").strip().strip('"\'').strip()
+        fp = token_fingerprint(self.access_token)
+        logger.info(
+            "[Token Diagnostic] UpstoxExpiredOptionsClient.test_access: validating token length=%d, fingerprint=%s",
+            len(self.access_token), fp,
+        )
+        return validate_token_live(token=self.access_token, dotenv_path=self.dotenv_path)
 
     def get_expiries(self, underlying: str) -> List[str]:
         """Fetch all available historical expiries for an underlying index."""
@@ -387,11 +394,11 @@ class UpstoxExpiredOptionsClient:
         }
         
         try:
-            data = self._get("/expired-instruments/option/contract", params=params)
+            data = self._get("/expired-instruments/option/contracts", params=params)
         except UpstoxExpiredAPIError as e:
             if e.status_code == 404:
-                # Try plural endpoint
-                data = self._get("/expired-instruments/option/contracts", params=params)
+                # Fallback to singular endpoint if necessary
+                data = self._get("/expired-instruments/option/contract", params=params)
             else:
                 raise
 
