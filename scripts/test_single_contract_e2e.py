@@ -175,7 +175,7 @@ def run_e2e_single_contract_test(
     print(f"\n[5] Historical Option Contract Resolution:")
     target_contract = None
     selected_contract = None
-    target_21750_pe_exists = False
+    target_contract_exists = False
     contracts_list = []
     contract_err = None
     try:
@@ -187,20 +187,27 @@ def run_e2e_single_contract_test(
                 break
         
         if target_contract:
-            target_21750_pe_exists = True
+            target_contract_exists = True
             selected_contract = target_contract
-            print(f"    - Target Contract 21750 PE exists in Upstox: YES")
+            print(f"    - Target Contract {chosen_strike:g} {chosen_opt_type} exists in Upstox: YES")
             print(f"    - Authoritative Instrument Key: {target_contract['instrument_key']}")
         else:
-            target_21750_pe_exists = False
+            target_contract_exists = False
             pe_strikes = sorted(list({c["strike"] for c in contracts_list if c.get("option_type") == "PE"}))
             ce_strikes = sorted(list({c["strike"] for c in contracts_list if c.get("option_type") == "CE"}))
-            print(f"    - Target Contract 21750 PE exists in Upstox: NO (DATA_UNAVAILABLE)")
-            print(f"    - Total available PE strikes on {chosen_expiry}: {len(pe_strikes)}")
-            if pe_strikes:
-                print(f"    - PE strike range: {pe_strikes[0]:.1f} to {pe_strikes[-1]:.1f}")
-                nearest_pe = min(pe_strikes, key=lambda s: abs(s - chosen_strike))
-                print(f"    - Nearest available PE strike to 21750: {nearest_pe:.1f}")
+            print(f"    - Target Contract {chosen_strike:g} {chosen_opt_type} exists in Upstox: NO (DATA_UNAVAILABLE)")
+            if chosen_opt_type == "PE":
+                print(f"    - Total available PE strikes on {chosen_expiry}: {len(pe_strikes)}")
+                if pe_strikes:
+                    print(f"    - PE strike range: {pe_strikes[0]:.1f} to {pe_strikes[-1]:.1f}")
+                    nearest_pe = min(pe_strikes, key=lambda s: abs(s - chosen_strike))
+                    print(f"    - Nearest available PE strike to {chosen_strike:g}: {nearest_pe:.1f}")
+            else:
+                print(f"    - Total available CE strikes on {chosen_expiry}: {len(ce_strikes)}")
+                if ce_strikes:
+                    print(f"    - CE strike range: {ce_strikes[0]:.1f} to {ce_strikes[-1]:.1f}")
+                    nearest_ce = min(ce_strikes, key=lambda s: abs(s - chosen_strike))
+                    print(f"    - Nearest available CE strike to {chosen_strike:g}: {nearest_ce:.1f}")
             print(f"    - Note: Contract absence in exchange catalogue is NOT an authentication failure.")
 
             # Automatically select a known contract from actual Upstox response for same underlying/expiry
@@ -295,11 +302,25 @@ def run_e2e_single_contract_test(
             # Validator check
             print(f"\n[9] OptionsDataValidator Acceptance:")
             validator = OptionsDataValidator()
-            val_res = validator.validate(cached_data, spot_price_ref=selected_contract["strike"])
-            print(f"    - Validator Result: Valid={val_res.is_valid}, Anomalies={len(val_res.anomalies)}")
-            if val_res.anomalies:
-                for a in val_res.anomalies:
-                    print(f"      * {a}")
+            meta_ok, meta_err = validator.validate_contract_metadata(
+                selected_contract,
+                expected_underlying=chosen_underlying,
+                expected_expiry=selected_contract["expiry"],
+                expected_strike=selected_contract["strike"],
+                expected_option_type=selected_contract["option_type"],
+            )
+            candles_ok, candles_err, _ = validator.validate_candles(
+                candles,
+                expected_instrument_key=selected_contract["instrument_key"],
+                spot_price_reference=selected_contract["strike"],
+            )
+            val_ok = meta_ok and candles_ok
+            print(f"    - Validator Result: Valid={val_ok}, Metadata Valid={meta_ok}, Candles Valid={candles_ok}")
+            if not val_ok:
+                if meta_err:
+                    print(f"      * Metadata Error: {meta_err}")
+                if candles_err:
+                    print(f"      * Candles Error: {candles_err}")
 
             print(f"\n[10] Cache Persistence Verification:")
             print(f"    - File: {cache_path}")
@@ -323,7 +344,8 @@ def run_e2e_single_contract_test(
         "token_fingerprint": token_fp,
         "client_fingerprint": client_fp,
         "auth_header_valid": auth_header == f"Bearer {client.access_token}",
-        "target_21750_pe_exists": target_21750_pe_exists,
+        "target_21750_pe_exists": target_contract_exists,
+        "target_contract_exists": target_contract_exists,
         "selected_contract": selected_contract,
         "success": success,
         "candles_count": len(candles) if candles else 0,

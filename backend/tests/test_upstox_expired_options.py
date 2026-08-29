@@ -303,6 +303,84 @@ class TestUpstoxExpiredOptions(unittest.TestCase):
                 self.assertIn("DATA_UNAVAILABLE", err)
                 self.assertIn("21700.0", err) # mentions available strikes for diagnosis
 
+    def test_live_upstox_response_structure_parsing(self):
+        """Test parsing of exact Upstox live API response format for expired option contracts."""
+        client = UpstoxExpiredOptionsClient(access_token="test_token_123456789012345")
+        mock_upstox_live_response = {
+            "status": "success",
+            "data": [
+                {
+                    "name": "NIFTY",
+                    "segment": "NSE_FO",
+                    "exchange": "NSE",
+                    "expiry": "2024-10-03",
+                    "weekly": True,
+                    "instrument_key": "NSE_FO|58423|03-10-2024",
+                    "exchange_token": "58423",
+                    "trading_symbol": "NIFTY 23050 PE 03 OCT 24",
+                    "tick_size": 5.0,
+                    "lot_size": 25,
+                    "instrument_type": "PE",
+                    "freeze_quantity": 1800.0,
+                    "underlying_key": "NSE_INDEX|Nifty 50",
+                    "underlying_type": "INDEX",
+                    "underlying_symbol": "NIFTY",
+                    "strike_price": 23050.0,
+                    "minimum_lot": 25,
+                },
+                {
+                    "name": "NIFTY",
+                    "segment": "NSE_FO",
+                    "exchange": "NSE",
+                    "expiry": "2024-10-03",
+                    "weekly": True,
+                    "instrument_key": "NSE_FO|58424|03-10-2024",
+                    "exchange_token": "58424",
+                    "trading_symbol": "NIFTY 23050 CE 03 OCT 24",
+                    "tick_size": 5.0,
+                    "lot_size": 25,
+                    "instrument_type": "CE",
+                    "freeze_quantity": 1800.0,
+                    "underlying_key": "NSE_INDEX|Nifty 50",
+                    "underlying_type": "INDEX",
+                    "underlying_symbol": "NIFTY",
+                    "strike_price": 23050.0,
+                    "minimum_lot": 25,
+                },
+            ]
+        }
+
+        with patch.object(client, "_get", return_value=mock_upstox_live_response):
+            contracts = client.get_option_contracts("NIFTY50", "2024-10-03")
+            self.assertEqual(len(contracts), 2)
+            pe_c = contracts[0]
+            self.assertEqual(pe_c["instrument_key"], "NSE_FO|58423|03-10-2024")
+            self.assertEqual(pe_c["expired_instrument_key"], "NSE_FO|58423|03-10-2024")
+            self.assertEqual(pe_c["trading_symbol"], "NIFTY 23050 PE 03 OCT 24")
+            self.assertEqual(pe_c["strike"], 23050.0)
+            self.assertEqual(pe_c["strike_price"], 23050.0)
+            self.assertEqual(pe_c["option_type"], "PE")
+            self.assertEqual(pe_c["expiry"], "2024-10-03")
+            self.assertEqual(pe_c["lot_size"], 25)
+
+    def test_live_upstox_empty_catalogue_response(self):
+        """Test handling when Upstox raw response is literally {'status': 'success', 'data': []}."""
+        client = UpstoxExpiredOptionsClient(access_token="test_token_123456789012345")
+        mock_empty_response = {"status": "success", "data": []}
+
+        with patch.object(client, "_get", return_value=mock_empty_response):
+            contracts = client.get_option_contracts("NIFTY50", "2024-01-18")
+            self.assertEqual(contracts, [])
+            resolved = client.resolve_option_contract(
+                underlying="NIFTY50",
+                target_date=date(2024, 1, 15),
+                spot_price=21700.0,
+                option_type="PE",
+                target_expiry="2024-01-18",
+                target_strike=21700.0,
+            )
+            self.assertIsNone(resolved)
+
 
 if __name__ == "__main__":
     unittest.main()

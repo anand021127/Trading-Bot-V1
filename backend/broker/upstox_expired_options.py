@@ -511,6 +511,64 @@ class UpstoxExpiredOptionsClient:
             self._expiries_cache[und_key] = []
             return []
 
+    def get_expiry_coverage(self, underlying: str) -> Dict[str, Any]:
+        """Fetch and return authoritative historical expiry coverage metadata for an underlying index.
+        
+        Returns:
+            Dict containing:
+                underlying: canonical underlying name
+                instrument_key: Upstox instrument key for the underlying
+                expiries: sorted list of all available historical expiry date strings (YYYY-MM-DD)
+                earliest_expiry: earliest available historical expiry date string (or None)
+                latest_expiry: latest available historical expiry date string (or None)
+                total_expiries: count of available historical expiries
+        """
+        und_key = underlying.upper()
+        inst_key = INDEX_INSTRUMENT_KEYS.get(und_key, f"NSE_INDEX|{underlying}")
+        expiries = self.get_expiries(und_key)
+        return {
+            "underlying": und_key,
+            "instrument_key": inst_key,
+            "expiries": expiries,
+            "earliest_expiry": expiries[0] if expiries else None,
+            "latest_expiry": expiries[-1] if expiries else None,
+            "total_expiries": len(expiries),
+        }
+
+    def is_expiry_covered(self, underlying: str, expiry_date: str) -> Tuple[bool, Optional[str]]:
+        """Check whether a specific expiry date is within Upstox's available historical coverage.
+        
+        Returns:
+            (is_covered: bool, unavailability_reason: Optional[str])
+        """
+        cov = self.get_expiry_coverage(underlying)
+        expiries = cov.get("expiries", [])
+        if not expiries:
+            return False, f"NO_EXPIRIES_RETURNED: No expired expiries returned by Upstox for {underlying}"
+        
+        if expiry_date in expiries:
+            return True, None
+
+        earliest = cov.get("earliest_expiry")
+        latest = cov.get("latest_expiry")
+        total = cov.get("total_expiries", 0)
+        if earliest and expiry_date < earliest:
+            reason = (
+                f"EXPIRY_OUTSIDE_UPSTOX_COVERAGE: Expiry {expiry_date} for {underlying} is earlier than "
+                f"earliest available expiry {earliest} (available range: {earliest} to {latest}, total={total})"
+            )
+        elif latest and expiry_date > latest:
+            reason = (
+                f"EXPIRY_OUTSIDE_UPSTOX_COVERAGE: Expiry {expiry_date} for {underlying} is later than "
+                f"latest available expiry {latest} (available range: {earliest} to {latest}, total={total})"
+            )
+        else:
+            reason = (
+                f"EXPIRY_OUTSIDE_UPSTOX_COVERAGE: Expiry {expiry_date} is not in Upstox available expiries for {underlying} "
+                f"(available range: {earliest or 'none'} to {latest or 'none'}, total={total})"
+            )
+        return False, reason
+
     def get_option_contracts(self, underlying: str, expiry_date: str) -> List[Dict[str, Any]]:
         """Fetch expired option contracts for an underlying and specific expiry date."""
         und_key = underlying.upper()
@@ -611,6 +669,14 @@ class UpstoxExpiredOptionsClient:
                 )
                 return None
             nearest_expiry = valid_expiries[0]
+        else:
+            is_covered, reason = self.is_expiry_covered(und_key, nearest_expiry)
+            if not is_covered:
+                logger.warning(
+                    "Contract resolution skipped for %s on %s: %s",
+                    und_key, nearest_expiry, reason,
+                )
+                return None
 
         # 2. Determine target strike
         if target_strike is not None:

@@ -150,6 +150,24 @@ class TestDownloadHistoricalOptionsPipeline(unittest.TestCase):
         """Pipeline successfully fetches, validates, and atomically caches option data."""
         mock_client = MagicMock()
         mock_client.test_access.return_value = {"has_token": True, "accessible": True}
+        mock_client.get_expiry_coverage.return_value = {
+            "underlying": "NIFTY50",
+            "expiries": ["2024-06-27"],
+            "earliest_expiry": "2024-06-27",
+            "latest_expiry": "2024-06-27",
+            "total_expiries": 1,
+        }
+        mock_client.get_option_contracts.return_value = [
+            {
+                "underlying": "NIFTY50",
+                "expiry": "2024-06-27",
+                "strike": 24500.0,
+                "option_type": "CE",
+                "instrument_key": "NSE_FO|NIFTY2462724500CE",
+                "trading_symbol": "NIFTY2462724500CE",
+                "lot_size": 25,
+            }
+        ]
         
         verified_payload = {
             "contract": {
@@ -180,8 +198,316 @@ class TestDownloadHistoricalOptionsPipeline(unittest.TestCase):
         )
 
         res = pipeline.run_ingestion([req], dry_run=False)
+        self.assertEqual(res["strategy_required_contracts"], 1)
+        self.assertEqual(res["already_cached"], 0)
+        self.assertEqual(res["outside_upstox_coverage"], 0)
+        self.assertEqual(res["not_present_in_catalogue"], 0)
+        self.assertEqual(res["eligible_for_download"], 1)
+        self.assertEqual(res["successfully_downloaded"], 1)
+        self.assertEqual(res["failed_api_downloads"], 0)
+        self.assertEqual(res["remaining_unavailable"], 0)
         self.assertEqual(res["downloaded"], 1)
         self.assertEqual(res["failed"], 0)
+
+    def test_expiry_outside_upstox_coverage_marked_data_unavailable(self):
+        """Expiry outside Upstox coverage is marked DATA_UNAVAILABLE without querying catalogue or candles."""
+        mock_client = MagicMock()
+        mock_client.test_access.return_value = {"has_token": True, "accessible": True}
+        mock_client.get_expiry_coverage.return_value = {
+            "underlying": "NIFTY50",
+            "expiries": ["2024-10-03", "2024-10-10"],
+            "earliest_expiry": "2024-10-03",
+            "latest_expiry": "2024-10-10",
+            "total_expiries": 2,
+        }
+
+        pipeline = HistoricalOptionsIngestionPipeline(cache_dir=self.cache_dir)
+        pipeline.client = mock_client
+
+        req = ContractRequirement(
+            underlying="NIFTY50",
+            expiry="2024-01-18",
+            strike=21700.0,
+            option_type="PE",
+            from_date="2024-01-15",
+            to_date="2024-01-18",
+        )
+
+        res = pipeline.run_ingestion([req], dry_run=False)
+
+        # Assert contract catalogue was NOT queried for this expiry
+        mock_client.get_option_contracts.assert_not_called()
+        mock_client.fetch_and_cache_contract.assert_not_called()
+
+        # Assert status and unavailability reason
+        self.assertEqual(req.status, "DATA_UNAVAILABLE")
+        self.assertIn("EXPIRY_OUTSIDE_UPSTOX_COVERAGE", req.unavailability_reason)
+        self.assertIn("2024-10-03", req.unavailability_reason)
+
+        # Assert summary tallies
+        self.assertEqual(res["strategy_required_contracts"], 1)
+        self.assertEqual(res["outside_upstox_coverage"], 1)
+        self.assertEqual(res["eligible_for_download"], 0)
+        self.assertEqual(res["successfully_downloaded"], 0)
+        self.assertEqual(res["remaining_unavailable"], 1)
+        self.assertEqual(res["error_categories"]["EXPIRY_OUTSIDE_UPSTOX_COVERAGE"], 1)
+
+    def test_contract_absent_from_catalogue_marked_data_unavailable(self):
+        """Expiry inside coverage, but strike/type missing in catalogue is marked DATA_UNAVAILABLE."""
+        mock_client = MagicMock()
+        mock_client.test_access.return_value = {"has_token": True, "accessible": True}
+        mock_client.get_expiry_coverage.return_value = {
+            "underlying": "NIFTY50",
+            "expiries": ["2024-10-03"],
+            "earliest_expiry": "2024-10-03",
+            "latest_expiry": "2024-10-03",
+            "total_expiries": 1,
+        }
+        # Catalogue only contains 25000 CE, but requirement is 25500 PE
+        mock_client.get_option_contracts.return_value = [
+            {
+                "underlying": "NIFTY50",
+                "expiry": "2024-10-03",
+                "strike": 25000.0,
+                "option_type": "CE",
+                "instrument_key": "NSE_FO|NIFTY24O0325000CE",
+                "trading_symbol": "NIFTY24O0325000CE",
+                "lot_size": 25,
+            }
+        ]
+
+        pipeline = HistoricalOptionsIngestionPipeline(cache_dir=self.cache_dir)
+        pipeline.client = mock_client
+
+        req = ContractRequirement(
+            underlying="NIFTY50",
+            expiry="2024-10-03",
+            strike=25500.0,
+            option_type="PE",
+            from_date="2024-10-01",
+            to_date="2024-10-03",
+        )
+
+        res = pipeline.run_ingestion([req], dry_run=False)
+
+        # Assert catalogue was queried once
+        mock_client.get_option_contracts.assert_called_once_with("NIFTY50", "2024-10-03")
+        # Assert candle download was NOT attempted
+        mock_client.fetch_and_cache_contract.assert_not_called()
+
+        self.assertEqual(req.status, "DATA_UNAVAILABLE")
+        self.assertIn("CONTRACT_NOT_IN_CATALOGUE", req.unavailability_reason)
+        self.assertEqual(res["outside_upstox_coverage"], 0)
+        self.assertEqual(res["not_present_in_catalogue"], 1)
+        self.assertEqual(res["eligible_for_download"], 0)
+        self.assertEqual(res["remaining_unavailable"], 1)
+        self.assertEqual(res["error_categories"]["CONTRACT_NOT_IN_CATALOGUE"], 1)
+
+    def test_contract_present_in_catalogue_marked_eligible_and_downloaded(self):
+        """Expiry inside coverage and contract present in catalogue becomes ELIGIBLE and downloads."""
+        mock_client = MagicMock()
+        mock_client.test_access.return_value = {"has_token": True, "accessible": True}
+        mock_client.get_expiry_coverage.return_value = {
+            "underlying": "NIFTY50",
+            "expiries": ["2024-10-03"],
+            "earliest_expiry": "2024-10-03",
+            "latest_expiry": "2024-10-03",
+            "total_expiries": 1,
+        }
+        mock_client.get_option_contracts.return_value = [
+            {
+                "underlying": "NIFTY50",
+                "expiry": "2024-10-03",
+                "strike": 25500.0,
+                "option_type": "PE",
+                "instrument_key": "NSE_FO|NIFTY24O0325500PE",
+                "trading_symbol": "NIFTY24O0325500PE",
+                "lot_size": 25,
+            }
+        ]
+        mock_client.fetch_and_cache_contract.return_value = (
+            True,
+            None,
+            {
+                "contract": {
+                    "underlying": "NIFTY50",
+                    "expiry": "2024-10-03",
+                    "strike": 25500.0,
+                    "option_type": "PE",
+                    "instrument_key": "NSE_FO|NIFTY24O0325500PE",
+                    "lot_size": 25,
+                },
+                "candles": [
+                    {"timestamp": "2024-10-01T09:15:00", "open": 250.0, "high": 260.0, "low": 240.0, "close": 255.0, "volume": 1000},
+                ],
+            },
+        )
+
+        pipeline = HistoricalOptionsIngestionPipeline(cache_dir=self.cache_dir)
+        pipeline.client = mock_client
+
+        req = ContractRequirement(
+            underlying="NIFTY50",
+            expiry="2024-10-03",
+            strike=25500.0,
+            option_type="PE",
+            from_date="2024-10-01",
+            to_date="2024-10-03",
+        )
+
+        res = pipeline.run_ingestion([req], dry_run=False)
+
+        self.assertEqual(req.status, "DOWNLOADED")
+        self.assertEqual(req.instrument_key, "NSE_FO|NIFTY24O0325500PE")
+        self.assertEqual(res["eligible_for_download"], 1)
+        self.assertEqual(res["successfully_downloaded"], 1)
+        self.assertEqual(res["failed_api_downloads"], 0)
+        self.assertEqual(res["remaining_unavailable"], 0)
+
+    def test_cache_resume_avoids_redownload(self):
+        """Pre-existing valid cache files are detected by check_cache_status and not re-downloaded."""
+        cache = OptionsDataCache(cache_dir=self.cache_dir)
+        contract_info = {
+            "underlying": "NIFTY50",
+            "expiry": "2024-10-03",
+            "strike": 25500.0,
+            "option_type": "PE",
+            "instrument_key": "NSE_FO|NIFTY24O0325500PE",
+            "lot_size": 25,
+        }
+        candles = [
+            {"timestamp": "2024-10-01T09:15:00", "open": 250.0, "high": 260.0, "low": 240.0, "close": 255.0, "volume": 1000}
+        ]
+        filename = cache.get_cache_filename("NIFTY50", "2024-10-03", 25500.0, "PE", "5minute", "2024-10-01", "2024-10-03")
+        cache.save(filename, contract_info, candles)
+
+        mock_client = MagicMock()
+        mock_client.test_access.return_value = {"has_token": True, "accessible": True}
+
+        pipeline = HistoricalOptionsIngestionPipeline(cache_dir=self.cache_dir)
+        pipeline.client = mock_client
+
+        req = ContractRequirement(
+            underlying="NIFTY50",
+            expiry="2024-10-03",
+            strike=25500.0,
+            option_type="PE",
+            from_date="2024-10-01",
+            to_date="2024-10-03",
+        )
+
+        res = pipeline.run_ingestion([req], dry_run=False)
+
+        # Neither coverage, catalogue, nor candle fetch should be called
+        mock_client.get_expiry_coverage.assert_not_called()
+        mock_client.get_option_contracts.assert_not_called()
+        mock_client.fetch_and_cache_contract.assert_not_called()
+
+        self.assertEqual(res["strategy_required_contracts"], 1)
+        self.assertEqual(res["already_cached"], 1)
+        self.assertEqual(res["eligible_for_download"], 0)
+        self.assertEqual(res["remaining_unavailable"], 0)
+
+        # Cache file preserved intact
+        cached_data = cache.get(filename)
+        self.assertIsNotNone(cached_data)
+        self.assertEqual(len(cached_data["candles"]), 1)
+
+    def test_no_synthetic_fallback_when_contract_unavailable(self):
+        """Unavailable contracts never write dummy cache files or produce synthetic data."""
+        mock_client = MagicMock()
+        mock_client.test_access.return_value = {"has_token": True, "accessible": True}
+        mock_client.get_expiry_coverage.return_value = {
+            "underlying": "NIFTY50",
+            "expiries": ["2024-10-03"],
+            "earliest_expiry": "2024-10-03",
+            "latest_expiry": "2024-10-03",
+            "total_expiries": 1,
+        }
+
+        pipeline = HistoricalOptionsIngestionPipeline(cache_dir=self.cache_dir)
+        pipeline.client = mock_client
+
+        # Expiry 2024-01-18 outside coverage
+        req = ContractRequirement(
+            underlying="NIFTY50",
+            expiry="2024-01-18",
+            strike=21700.0,
+            option_type="PE",
+            from_date="2024-01-15",
+            to_date="2024-01-18",
+        )
+
+        res = pipeline.run_ingestion([req], dry_run=False)
+        self.assertEqual(res["outside_upstox_coverage"], 1)
+
+        # Verify no cache file exists
+        cache = OptionsDataCache(cache_dir=self.cache_dir)
+        filename = req.cache_filename
+        self.assertIsNone(cache.get(filename))
+
+    def test_full_pipeline_multi_tier_summary_metrics(self):
+        """Pipeline computes all 8 summary metrics accurately across mixed statuses."""
+        mock_client = MagicMock()
+        mock_client.test_access.return_value = {"has_token": True, "accessible": True}
+        mock_client.get_expiry_coverage.return_value = {
+            "underlying": "NIFTY50",
+            "expiries": ["2024-10-03"],
+            "earliest_expiry": "2024-10-03",
+            "latest_expiry": "2024-10-03",
+            "total_expiries": 1,
+        }
+        mock_client.get_option_contracts.return_value = [
+            {
+                "underlying": "NIFTY50",
+                "expiry": "2024-10-03",
+                "strike": 25500.0,
+                "option_type": "PE",
+                "instrument_key": "NSE_FO|NIFTY24O0325500PE",
+                "trading_symbol": "NIFTY24O0325500PE",
+                "lot_size": 25,
+            }
+        ]
+        mock_client.fetch_and_cache_contract.return_value = (
+            True,
+            None,
+            {
+                "contract": {"underlying": "NIFTY50", "expiry": "2024-10-03", "strike": 25500.0, "option_type": "PE", "instrument_key": "NSE_FO|NIFTY24O0325500PE"},
+                "candles": [{"timestamp": "2024-10-01T09:15:00", "open": 200.0, "high": 210.0, "low": 190.0, "close": 205.0, "volume": 500}],
+            }
+        )
+
+        pipeline = HistoricalOptionsIngestionPipeline(cache_dir=self.cache_dir)
+        pipeline.client = mock_client
+
+        # 1. Already cached contract
+        cache = OptionsDataCache(cache_dir=self.cache_dir)
+        cache.save(
+            cache.get_cache_filename("NIFTY50", "2024-10-03", 25000.0, "CE", "5minute", "2024-10-01", "2024-10-03"),
+            {"underlying": "NIFTY50", "expiry": "2024-10-03", "strike": 25000.0, "option_type": "CE", "instrument_key": "NSE_FO|NIFTY24O0325000CE"},
+            [{"timestamp": "2024-10-01T09:15:00", "open": 100.0, "high": 110.0, "low": 90.0, "close": 105.0, "volume": 500}]
+        )
+        req_cached = ContractRequirement("NIFTY50", "2024-10-03", 25000.0, "CE", "2024-10-01", "2024-10-03")
+
+        # 2. Outside coverage contract
+        req_outside = ContractRequirement("NIFTY50", "2024-01-18", 21700.0, "PE", "2024-01-15", "2024-01-18")
+
+        # 3. Inside coverage, but not in catalogue
+        req_not_in_cat = ContractRequirement("NIFTY50", "2024-10-03", 26000.0, "CE", "2024-10-01", "2024-10-03")
+
+        # 4. Inside coverage, in catalogue, downloaded successfully
+        req_downloaded = ContractRequirement("NIFTY50", "2024-10-03", 25500.0, "PE", "2024-10-01", "2024-10-03")
+
+        res = pipeline.run_ingestion([req_cached, req_outside, req_not_in_cat, req_downloaded], dry_run=False)
+
+        self.assertEqual(res["strategy_required_contracts"], 4)
+        self.assertEqual(res["already_cached"], 1)
+        self.assertEqual(res["outside_upstox_coverage"], 1)
+        self.assertEqual(res["not_present_in_catalogue"], 1)
+        self.assertEqual(res["eligible_for_download"], 1)
+        self.assertEqual(res["successfully_downloaded"], 1)
+        self.assertEqual(res["failed_api_downloads"], 0)
+        self.assertEqual(res["remaining_unavailable"], 2)  # 1 outside coverage + 1 not in catalogue
 
     def test_integration_with_options_data_loader_and_backtest_engine(self):
         """Cached contract files are immediately loadable by HistoricalOptionsDataLoader."""

@@ -119,6 +119,24 @@ class ContractRequirement:
             self.to_date,
         )
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "key": self.key,
+            "underlying": self.underlying,
+            "expiry": self.expiry,
+            "strike": self.strike,
+            "option_type": self.option_type,
+            "interval": self.interval,
+            "from_date": self.from_date,
+            "to_date": self.to_date,
+            "instrument_key": self.instrument_key,
+            "trading_symbol": self.trading_symbol,
+            "lot_size": self.lot_size,
+            "status": self.status,
+            "unavailability_reason": self.unavailability_reason,
+            "cache_filename": self.cache_filename,
+        }
+
 
 def build_trend_series(candles: List[Dict[str, Any]], ema_fast: int = 20, ema_slow: int = 50, ci_period: int = 14) -> Dict[str, str]:
     """Calculate underlying EMA trend series for strategy context."""
@@ -310,11 +328,81 @@ class HistoricalOptionsIngestionPipeline:
             filename = req.cache_filename
             cached_data = self.cache.get(filename)
             if cached_data and "candles" in cached_data and len(cached_data["candles"]) > 0:
+                req.status = "ALREADY_CACHED"
                 cached_reqs.append(req)
             else:
                 missing_reqs.append(req)
 
         return cached_reqs, missing_reqs
+
+    def evaluate_coverage_stage(
+        self,
+        requirements: List[ContractRequirement],
+    ) -> Tuple[Dict[str, Dict[str, Any]], List[ContractRequirement], List[ContractRequirement]]:
+        """Coverage-awareness stage before querying contract catalogue or downloading candles.
+        
+        For each underlying present in requirements:
+        Queries the authoritative Upstox expired-instruments expiry endpoint to determine
+        the actual historical expiry coverage available from Upstox.
+        
+        Contracts whose expiry is outside available coverage are classified as DATA_UNAVAILABLE
+        with reason "EXPIRY_OUTSIDE_UPSTOX_COVERAGE".
+        
+        Returns:
+            (coverage_by_underlying, inside_coverage_reqs, outside_coverage_reqs)
+        """
+        needed_underlyings = sorted(list({r.underlying.upper() for r in requirements}))
+        coverage_by_underlying: Dict[str, Dict[str, Any]] = {}
+
+        for und in needed_underlyings:
+            cov = self.client.get_expiry_coverage(und)
+            coverage_by_underlying[und] = cov
+            expiries = cov.get("expiries", [])
+            if expiries:
+                logger.info(
+                    "[Coverage Analysis] %s: %d historical expiries available (Earliest: %s, Latest: %s)",
+                    und, len(expiries), cov.get("earliest_expiry"), cov.get("latest_expiry")
+                )
+            else:
+                logger.warning(
+                    "[Coverage Analysis] %s: 0 historical expiries returned by Upstox (API or entitlement unavailable)",
+                    und
+                )
+
+        inside_coverage: List[ContractRequirement] = []
+        outside_coverage: List[ContractRequirement] = []
+
+        for req in requirements:
+            und = req.underlying.upper()
+            cov = coverage_by_underlying.get(und, {})
+            available_expiries = cov.get("expiries", [])
+
+            if req.expiry in available_expiries:
+                inside_coverage.append(req)
+            else:
+                req.status = "DATA_UNAVAILABLE"
+                earliest = cov.get("earliest_expiry")
+                latest = cov.get("latest_expiry")
+                total = cov.get("total_expiries", 0)
+                if isinstance(earliest, str) and req.expiry < earliest:
+                    reason = (
+                        f"EXPIRY_OUTSIDE_UPSTOX_COVERAGE: Expiry {req.expiry} for {und} is earlier than "
+                        f"earliest available expiry {earliest} (available range: {earliest} to {latest}, total={total})"
+                    )
+                elif isinstance(latest, str) and req.expiry > latest:
+                    reason = (
+                        f"EXPIRY_OUTSIDE_UPSTOX_COVERAGE: Expiry {req.expiry} for {und} is later than "
+                        f"latest available expiry {latest} (available range: {earliest} to {latest}, total={total})"
+                    )
+                else:
+                    reason = (
+                        f"EXPIRY_OUTSIDE_UPSTOX_COVERAGE: Expiry {req.expiry} is not in Upstox historical "
+                        f"catalogue for {und} (available range: {earliest or 'none'} to {latest or 'none'}, total={total})"
+                    )
+                req.unavailability_reason = reason
+                outside_coverage.append(req)
+
+        return coverage_by_underlying, inside_coverage, outside_coverage
 
     def download_requirement(
         self,
@@ -352,11 +440,16 @@ class HistoricalOptionsIngestionPipeline:
     ) -> Tuple[List[ContractRequirement], List[ContractRequirement]]:
         """Resolve required contracts against Upstox's authoritative expired-contract catalogue.
         
+        Requires exact match on:
+        - Expiry date
+        - Strike price
+        - Option type (CE / PE)
+        
         Returns:
-            (available_reqs, unavailable_reqs)
+            (eligible_reqs, not_in_catalogue_reqs)
         """
-        available: List[ContractRequirement] = []
-        unavailable: List[ContractRequirement] = []
+        eligible: List[ContractRequirement] = []
+        not_in_catalogue: List[ContractRequirement] = []
         
         # Group by (underlying, expiry) to query catalogue once per expiry
         grouped: Dict[Tuple[str, str], List[ContractRequirement]] = defaultdict(list)
@@ -383,26 +476,30 @@ class HistoricalOptionsIngestionPipeline:
                     req.instrument_key = matched["instrument_key"]
                     req.trading_symbol = matched.get("trading_symbol")
                     req.lot_size = matched.get("lot_size")
-                    req.status = "AVAILABLE"
+                    req.status = "ELIGIBLE"
                     req.contract_info = matched
-                    available.append(req)
+                    eligible.append(req)
                 else:
                     req.status = "DATA_UNAVAILABLE"
                     avail_strikes = sorted(list({c["strike"] for c in matching_type}))
                     if avail_strikes:
                         nearest = min(avail_strikes, key=lambda s: abs(s - req.strike))
                         reason = (
-                            f"Authoritative contract not found in Upstox for {req.underlying} {req.expiry} {req.strike:.1f} {req.option_type}. "
+                            f"CONTRACT_NOT_IN_CATALOGUE: Strike {req.strike:g} {req.option_type} on {req.expiry} "
+                            f"not found in Upstox catalogue for {req.underlying}. "
                             f"(Available {req.option_type.upper()} strikes on {req.expiry}: {avail_strikes[0]:.1f}..{avail_strikes[-1]:.1f} [count={len(avail_strikes)}], nearest={nearest:.1f})"
                         )
                     elif contracts:
-                        reason = f"No {req.option_type.upper()} contracts on {req.expiry} in Upstox. (Total other contracts: {len(contracts)})"
+                        reason = (
+                            f"CONTRACT_NOT_IN_CATALOGUE: No {req.option_type.upper()} contracts on {req.expiry} in Upstox for {req.underlying}. "
+                            f"(Total other contracts: {len(contracts)})"
+                        )
                     else:
-                        reason = f"0 expired contracts returned by Upstox for {req.underlying} on {req.expiry}"
+                        reason = f"CONTRACT_NOT_IN_CATALOGUE: 0 expired contracts returned by Upstox for {req.underlying} on {req.expiry}"
                     req.unavailability_reason = reason
-                    unavailable.append(req)
+                    not_in_catalogue.append(req)
 
-        return available, unavailable
+        return eligible, not_in_catalogue
 
     def run_ingestion(
         self,
@@ -411,13 +508,25 @@ class HistoricalOptionsIngestionPipeline:
         dry_run: bool = False,
         limit: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Execute full ingestion pipeline with progress reporting and error handling."""
+        """Execute coverage-aware ingestion pipeline with progress reporting and error handling."""
         cached_reqs, missing_reqs = self.check_cache_status(requirements)
         
+        targets = requirements if force else missing_reqs
+        if limit:
+            targets = targets[:limit]
+
         summary: Dict[str, Any] = {
-            "total_required": len(requirements),
+            "strategy_required_contracts": len(requirements),
             "already_cached": len(cached_reqs),
-            "to_download": len(missing_reqs) if not force else len(requirements),
+            "outside_upstox_coverage": 0,
+            "not_present_in_catalogue": 0,
+            "eligible_for_download": 0,
+            "successfully_downloaded": 0,
+            "failed_api_downloads": 0,
+            "remaining_unavailable": 0,
+            # Backwards compatibility fields
+            "total_required": len(requirements),
+            "to_download": len(targets),
             "downloaded": 0,
             "failed": 0,
             "skipped": 0,
@@ -426,21 +535,25 @@ class HistoricalOptionsIngestionPipeline:
             "error_categories": {
                 "AUTH_INVALID_TOKEN": 0,
                 "PERMISSION_DENIED": 0,
+                "EXPIRY_OUTSIDE_UPSTOX_COVERAGE": 0,
+                "CONTRACT_NOT_IN_CATALOGUE": 0,
                 "DATA_UNAVAILABLE": 0,
                 "RATE_LIMITED": 0,
                 "VALIDATION_FAILED": 0,
                 "OTHER": 0,
             },
+            "coverage_metadata": {},
         }
 
         if dry_run:
             logger.info("=== DRY RUN SUMMARY ===")
-            logger.info("Total contracts required: %d", summary["total_required"])
+            logger.info("Strategy-required contracts: %d", summary["strategy_required_contracts"])
             logger.info("Already cached in %s: %d", self.cache_dir, summary["already_cached"])
             logger.info("Missing contracts needing download: %d", summary["to_download"])
+            summary["remaining_unavailable"] = summary["to_download"]
             return summary
 
-        # Check authentication first
+        # 1. Check authentication first
         auth = self.test_auth()
         logger.info(
             "[Token Diagnostic] Pipeline test_auth: accessible=%s, valid=%s, profile_status=%s, expired_status=%s, error_code=%s, fingerprint=%s",
@@ -475,54 +588,93 @@ class HistoricalOptionsIngestionPipeline:
             summary["auth_error"] = auth
             err_code_str = str(err_code)
             if err_code_str in summary["error_categories"]:
-                summary["error_categories"][err_code_str] += len(missing_reqs)
+                summary["error_categories"][err_code_str] += len(targets)
             else:
-                summary["error_categories"]["OTHER"] += len(missing_reqs)
+                summary["error_categories"]["OTHER"] += len(targets)
+            summary["failed"] = len(targets)
+            summary["remaining_unavailable"] = len(targets)
             return summary
 
-        targets = requirements if force else missing_reqs
-        if limit:
-            targets = targets[:limit]
+        if not targets:
+            logger.info("All %d required contracts are already cached and validated.", len(requirements))
+            return summary
 
-        # Authoritative resolution of requirements against Upstox catalogue
-        logger.info("Resolving %d required contracts against Upstox authoritative catalogue...", len(targets))
-        available_reqs, unavailable_reqs = self.resolve_requirements_against_catalogue(targets)
+        # 2. Coverage-awareness stage (BEFORE contract catalogue queries or downloads)
+        logger.info("Evaluating Upstox historical expiry coverage for %d target contracts...", len(targets))
+        cov_by_und, inside_cov, outside_cov = self.evaluate_coverage_stage(targets)
+        summary["coverage_metadata"] = cov_by_und
+        summary["outside_upstox_coverage"] = len(outside_cov)
+
         logger.info(
-            "Catalogue Resolution: %d available, %d DATA_UNAVAILABLE",
-            len(available_reqs), len(unavailable_reqs)
+            "Coverage Stage: %d inside Upstox coverage, %d OUTSIDE Upstox coverage",
+            len(inside_cov), len(outside_cov)
         )
 
-        for unavail in unavailable_reqs:
-            summary["failed"] += 1
+        for out_req in outside_cov:
+            summary["error_categories"]["EXPIRY_OUTSIDE_UPSTOX_COVERAGE"] += 1
             summary["error_categories"]["DATA_UNAVAILABLE"] += 1
             summary["errors"].append({
-                "contract": unavail.key,
-                "underlying": unavail.underlying,
-                "expiry": unavail.expiry,
-                "strike": unavail.strike,
-                "option_type": unavail.option_type,
-                "from_date": unavail.from_date,
-                "to_date": unavail.to_date,
-                "error": f"DATA_UNAVAILABLE — {unavail.unavailability_reason}",
+                "contract": out_req.key,
+                "underlying": out_req.underlying,
+                "expiry": out_req.expiry,
+                "strike": out_req.strike,
+                "option_type": out_req.option_type,
+                "from_date": out_req.from_date,
+                "to_date": out_req.to_date,
+                "category": "EXPIRY_OUTSIDE_UPSTOX_COVERAGE",
+                "error": f"DATA_UNAVAILABLE — {out_req.unavailability_reason}",
             })
-            logger.warning("  -> DATA_UNAVAILABLE: %s (%s)", unavail.key, unavail.unavailability_reason)
+            logger.warning("  -> OUTSIDE COVERAGE: %s (%s)", out_req.key, out_req.unavailability_reason)
 
-        logger.info("Starting ingestion of %d available contracts...", len(available_reqs))
-        
-        for idx, req in enumerate(available_reqs, 1):
+        # 3. Catalogue resolution stage (ONLY for contracts inside coverage)
+        logger.info("Resolving %d in-coverage contracts against Upstox authoritative catalogue...", len(inside_cov))
+        eligible_reqs, not_in_cat_reqs = self.resolve_requirements_against_catalogue(inside_cov)
+        summary["eligible_for_download"] = len(eligible_reqs)
+        summary["not_present_in_catalogue"] = len(not_in_cat_reqs)
+
+        logger.info(
+            "Catalogue Resolution: %d ELIGIBLE for download, %d NOT IN CATALOGUE",
+            len(eligible_reqs), len(not_in_cat_reqs)
+        )
+
+        for not_in_cat in not_in_cat_reqs:
+            summary["error_categories"]["CONTRACT_NOT_IN_CATALOGUE"] += 1
+            summary["error_categories"]["DATA_UNAVAILABLE"] += 1
+            summary["errors"].append({
+                "contract": not_in_cat.key,
+                "underlying": not_in_cat.underlying,
+                "expiry": not_in_cat.expiry,
+                "strike": not_in_cat.strike,
+                "option_type": not_in_cat.option_type,
+                "from_date": not_in_cat.from_date,
+                "to_date": not_in_cat.to_date,
+                "category": "CONTRACT_NOT_IN_CATALOGUE",
+                "error": f"DATA_UNAVAILABLE — {not_in_cat.unavailability_reason}",
+            })
+            logger.warning("  -> NOT IN CATALOGUE: %s (%s)", not_in_cat.key, not_in_cat.unavailability_reason)
+
+        # 4. Download & validation stage (ONLY for eligible contracts)
+        logger.info("Starting historical candle download for %d eligible contracts...", len(eligible_reqs))
+        successfully_downloaded = 0
+        failed_api_downloads = 0
+
+        for idx, req in enumerate(eligible_reqs, 1):
             logger.info(
                 "[%d/%d] Ingesting %s %s Strike %.1f %s (%s to %s)...",
-                idx, len(available_reqs), req.underlying, req.expiry, req.strike, req.option_type, req.from_date, req.to_date,
+                idx, len(eligible_reqs), req.underlying, req.expiry, req.strike, req.option_type, req.from_date, req.to_date,
             )
 
             success, err, data = self.download_requirement(req, force=force)
             if success:
-                summary["downloaded"] += 1
+                successfully_downloaded += 1
+                req.status = "DOWNLOADED"
                 candles_cnt = len(data.get("candles", [])) if data else 0
                 logger.info("  -> SUCCESS: %d candles validated & saved to cache", candles_cnt)
             else:
-                summary["failed"] += 1
+                failed_api_downloads += 1
+                req.status = "DOWNLOAD_FAILED"
                 err_str = str(err)
+                req.unavailability_reason = err_str
                 err_record = {
                     "contract": req.key,
                     "underlying": req.underlying,
@@ -531,11 +683,11 @@ class HistoricalOptionsIngestionPipeline:
                     "option_type": req.option_type,
                     "from_date": req.from_date,
                     "to_date": req.to_date,
+                    "category": "API_ERROR",
                     "error": err_str,
                 }
                 summary["errors"].append(err_record)
-                
-                # Categorize error
+
                 if "401" in err_str or "AUTH" in err_str:
                     summary["error_categories"]["AUTH_INVALID_TOKEN"] += 1
                 elif "403" in err_str or "PERMISSION" in err_str:
@@ -552,6 +704,13 @@ class HistoricalOptionsIngestionPipeline:
                 logger.warning("  -> FAILED: %s", err_str)
 
             time.sleep(self.rate_limit_delay)
+
+        # 5. Populate final summary counts
+        summary["successfully_downloaded"] = successfully_downloaded
+        summary["downloaded"] = successfully_downloaded
+        summary["failed_api_downloads"] = failed_api_downloads
+        summary["remaining_unavailable"] = len(outside_cov) + len(not_in_cat_reqs) + failed_api_downloads
+        summary["failed"] = summary["remaining_unavailable"]
 
         return summary
 
@@ -781,18 +940,22 @@ def main():
     )
 
     print("\n" + "=" * 75)
-    print(" INGESTION RUN SUMMARY")
+    print(" HISTORICAL OPTIONS INGESTION SUMMARY")
     print("=" * 75)
-    print(f"Total Required    : {res['total_required']}")
-    print(f"Already In Cache  : {res['already_cached']}")
-    print(f"Attempted Fetch   : {res['to_download']}")
-    print(f"Successfully Saved: {res['downloaded']}")
-    print(f"Failed / Missing  : {res['failed']}")
+    print(f"Strategy-required contracts            : {res['strategy_required_contracts']}")
+    print(f"Already cached                         : {res['already_cached']}")
+    print(f"Outside Upstox historical coverage     : {res['outside_upstox_coverage']}")
+    print(f"Not present in Upstox contract catalogue: {res['not_present_in_catalogue']}")
+    print(f"Eligible for download                  : {res['eligible_for_download']}")
+    print(f"Successfully downloaded                : {res['successfully_downloaded']}")
+    print(f"Failed API downloads                   : {res['failed_api_downloads']}")
+    print(f"Remaining unavailable                  : {res['remaining_unavailable']}")
+    print("=" * 75)
     if res.get("error_categories"):
         print("\nFailure Categorization:")
         for cat, cnt in res["error_categories"].items():
             if cnt > 0:
-                print(f"  - {cat:20s}: {cnt:3d}")
+                print(f"  - {cat:32s}: {cnt:3d}")
 
     # 5. Run Post-Download Audit
     print("\n" + "=" * 75)
