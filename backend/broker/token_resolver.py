@@ -220,14 +220,61 @@ def load_repo_dotenv(custom_path: Optional[str] = None, override_environ: bool =
     return True, found_path
 
 
-def persist_upstox_token(token: str, user_profile: Optional[Dict[str, Any]] = None) -> bool:
+# Module-level store for the authoritative, verified runtime token
+_current_verified_token: Optional[Dict[str, Any]] = None
+
+
+def set_verified_runtime_token(token: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    """Explicitly register an in-memory live-verified access token."""
+    global _current_verified_token
+    clean = (token or "").strip().strip('"\'').strip()
+    if not clean:
+        _current_verified_token = None
+        return
+    fp = token_fingerprint(clean)
+    meta = metadata or {}
+    _current_verified_token = {
+        "token": clean,
+        "fingerprint": fp,
+        "verified": True,
+        "verified_at": meta.get("verified_at") or datetime.now(timezone.utc).isoformat(),
+        "source": meta.get("source") or "runtime (verified)",
+        "user_name": meta.get("user_name", ""),
+        "user_id": meta.get("user_id", ""),
+        "is_plus_plan": meta.get("is_plus_plan", True),
+    }
+
+
+def get_verified_runtime_token() -> Optional[Dict[str, Any]]:
+    """Return the current verified runtime token if active and unexpired."""
+    global _current_verified_token
+    if not _current_verified_token:
+        return None
+    jwt = decode_jwt_safe(_current_verified_token.get("token", ""))
+    if jwt.get("is_expired") is True:
+        _current_verified_token = None
+        return None
+    return _current_verified_token
+
+
+def clear_verified_runtime_token() -> None:
+    """Clear the in-memory verified runtime token."""
+    global _current_verified_token
+    _current_verified_token = None
+
+
+def persist_upstox_token(
+    token: str,
+    user_profile: Optional[Dict[str, Any]] = None,
+    verification_info: Optional[Dict[str, Any]] = None,
+) -> bool:
     """Canonical persistence function for Upstox access token.
     
-    Atomically synchronizes the fresh token to:
-    1. SQLite database (app_settings table)
-    2. JSON token storage (/data/upstox_token.json, data/upstox_token.json)
-    3. All accessible .env files (/home/ubuntu/Trading-Bot-V1/.env, <PROJECT_ROOT>/.env, cwd/.env)
-    4. Runtime process memory (os.environ['UPSTOX_ACCESS_TOKEN'])
+    Atomically synchronizes the fresh verified token to:
+    1. Runtime verified memory cache (_current_verified_token and os.environ)
+    2. SQLite database (app_settings table)
+    3. JSON token storage (/data/upstox_token.json, data/upstox_token.json)
+    4. All accessible .env files
     """
     clean_token = (token or "").strip().strip('"\'').strip()
     if not clean_token:
@@ -235,7 +282,30 @@ def persist_upstox_token(token: str, user_profile: Optional[Dict[str, Any]] = No
 
     is_mock = clean_token.startswith(("mock-", "test-", "leftover-")) or (0 < len(clean_token) < 30)
 
-    # 1. Update runtime memory immediately (protect against mock/test strings)
+    jwt = decode_jwt_safe(clean_token)
+    if jwt.get("is_expired") is True:
+        logger.warning("[Token Resolver] Refusing to persist expired token.")
+        return False
+
+    fp = token_fingerprint(clean_token)
+    v_at = (verification_info or {}).get("verified_at") or datetime.now(timezone.utc).isoformat()
+    v_src = (verification_info or {}).get("source") or "oauth_verified"
+    uname = (user_profile or {}).get("user_name") or (user_profile or {}).get("user_id") or ""
+    uid = (user_profile or {}).get("user_id") or ""
+    is_plus = bool((verification_info or {}).get("is_plus_plan") or jwt.get("isPlusPlan"))
+
+    # 1. Update runtime verified memory immediately
+    set_verified_runtime_token(
+        clean_token,
+        {
+            "verified_at": v_at,
+            "source": "runtime (verified)",
+            "user_name": uname,
+            "user_id": uid,
+            "is_plus_plan": is_plus,
+        },
+    )
+
     if not is_mock:
         os.environ["UPSTOX_ACCESS_TOKEN"] = clean_token
 
@@ -243,14 +313,11 @@ def persist_upstox_token(token: str, user_profile: Optional[Dict[str, Any]] = No
     try:
         from backend.database.db_manager import DatabaseManager
         db = DatabaseManager()
-        db.save_token(clean_token)
-        if user_profile:
-            uname = user_profile.get("user_name") or user_profile.get("user_id") or ""
-            uid = user_profile.get("user_id") or ""
-            if uname:
-                db.save_setting("upstox_user_name", uname)
-            if uid:
-                db.save_setting("upstox_user_id", uid)
+        db.save_token(clean_token, verified=True, verified_at=v_at, source=v_src)
+        if uname:
+            db.save_setting("upstox_user_name", uname)
+        if uid:
+            db.save_setting("upstox_user_id", uid)
     except Exception:
         pass
 
@@ -259,9 +326,16 @@ def persist_upstox_token(token: str, user_profile: Optional[Dict[str, Any]] = No
         payload = {
             "access_token": clean_token,
             "saved_at": datetime.now(timezone.utc).isoformat(),
-            "source": "oauth_verified",
-            "user_name": (user_profile or {}).get("user_name", ""),
-            "user_id": (user_profile or {}).get("user_id", ""),
+            "verified": True,
+            "verified_at": v_at,
+            "source": v_src,
+            "fingerprint": fp,
+            "user_name": uname,
+            "user_id": uid,
+            "is_jwt": jwt.get("is_jwt", False),
+            "expires_at": jwt.get("expires_at"),
+            "issued_at": jwt.get("issued_at"),
+            "is_plus_plan": is_plus,
         }
         for json_p in DEFAULT_TOKEN_JSON_PATHS:
             try:
@@ -282,19 +356,34 @@ def persist_upstox_token(token: str, user_profile: Optional[Dict[str, Any]] = No
     return True
 
 
-def _score_candidate(token: str, source: str) -> Tuple[int, float, int]:
-    """Score a token candidate for authoritative selection:
-    Returns (quality_tier, timestamp, source_tier). Higher score wins.
+def _score_candidate(
+    token: str,
+    source_key: str,
+    is_verified: bool = False,
+) -> Tuple[int, float, int]:
+    """Score a candidate token strictly adhering to freshness and validity rules:
+    Returns (tier, freshness, source_tier).
+    
+    Tiers:
+      100: Live-verified unexpired token
+       80: Unexpired structured JWT
+       20: Non-JWT opaque candidate (unexpired)
+      -50: EXPIRED token (never selected for active use)
+     -100: Mock / test dummy token
     """
     clean = (token or "").strip().strip('"\'').strip()
     if not clean:
-        return (-100, 0.0, 0)
+        return (-200, 0.0, 0)
 
     is_mock = clean.startswith(("mock-", "test-", "leftover-")) or len(clean) < 30
+    if is_mock:
+        return (-100, 0.0, 0)
+
     jwt = decode_jwt_safe(clean)
     is_jwt = jwt.get("is_jwt", False)
     exp = float(jwt.get("expires_at") or 0.0)
     iat = float(jwt.get("issued_at") or 0.0)
+    freshness = max(iat, exp)
     is_expired = jwt.get("is_expired")
 
     src_tier = {
@@ -303,56 +392,96 @@ def _score_candidate(token: str, source: str) -> Tuple[int, float, int]:
         "json": 3,
         "environment": 2,
         "dotenv": 1,
-    }.get(source, 0)
+    }.get(source_key, 0)
+
+    # If the token is expired, strictly reject from active use
+    if is_expired is True:
+        return (-50, freshness, src_tier)
 
     if is_jwt:
-        if is_expired is False:
-            # Active unexpired JWT: tier 100
-            return (100, exp or iat, src_tier)
-        elif is_expired is True:
-            # Expired but structured JWT: tier 50
-            return (50, exp or iat, src_tier)
-        else:
-            # Valid JWT without exp: tier 40
-            return (40, iat, src_tier)
+        if is_verified:
+            return (100, freshness, src_tier)
+        return (80, freshness, src_tier)
     else:
-        if is_mock:
-            # Mock or dummy test string: negative tier so it never beats real tokens
-            return (-50, 0.0, src_tier)
-        else:
-            # Non-JWT opaque token: tier 20
-            return (20, 0.0, src_tier)
+        # Non-JWT opaque token
+        return (20, freshness, src_tier)
 
 
-def resolve_upstox_token_with_source(
+def get_token_diagnostic_candidates(
     explicit_token: Optional[str] = None,
     dotenv_path: Optional[str] = None,
-) -> Tuple[str, str]:
-    """Resolve Upstox access token and its precise origin source.
-    
-    Guarantees:
-    - Runtime explicit token (--token) always wins.
-    - Never replaces a real JWT with a mock/dummy string.
-    - Selects the freshest active token across all candidates.
-    - Synchronizes chosen non-mock token to os.environ['UPSTOX_ACCESS_TOKEN'].
-    """
-    # 1. Explicit runtime token
+) -> List[Dict[str, Any]]:
+    """Gather all candidate tokens across all layers with detailed diagnostic metadata."""
+    results: List[Dict[str, Any]] = []
+
+    # Priority 1 candidate: explicit runtime
     if explicit_token and explicit_token.strip():
         tok = explicit_token.strip().strip('"\'').strip()
-        os.environ["UPSTOX_ACCESS_TOKEN"] = tok
-        return tok, "runtime (--token)"
+        jwt = decode_jwt_safe(tok)
+        results.append({
+            "source": "runtime (--token)",
+            "source_key": "runtime",
+            "token": tok,
+            "fingerprint": token_fingerprint(tok),
+            "length": len(tok),
+            "is_jwt": jwt.get("is_jwt", False),
+            "issued_at_iso": jwt.get("issued_at_iso"),
+            "expires_at_iso": jwt.get("expires_at_iso"),
+            "is_expired": jwt.get("is_expired"),
+            "isPlusPlan": jwt.get("isPlusPlan", False),
+            "verified": True,
+            "rejection_reason": "ACTIVE_SELECTION",
+        })
+        return results
 
-    # 2. Collect all candidate tokens
-    db_token = ""
+    # Priority 2 candidate: current verified runtime token
+    v_tok = get_verified_runtime_token()
+    if v_tok and v_tok.get("token"):
+        tok = v_tok["token"]
+        jwt = decode_jwt_safe(tok)
+        results.append({
+            "source": v_tok.get("source", "runtime (verified)"),
+            "source_key": "runtime",
+            "token": tok,
+            "fingerprint": token_fingerprint(tok),
+            "length": len(tok),
+            "is_jwt": jwt.get("is_jwt", False),
+            "issued_at_iso": jwt.get("issued_at_iso"),
+            "expires_at_iso": jwt.get("expires_at_iso"),
+            "is_expired": jwt.get("is_expired"),
+            "isPlusPlan": jwt.get("isPlusPlan", False) or v_tok.get("is_plus_plan", False),
+            "verified": True,
+            "rejection_reason": "ACTIVE_SELECTION",
+        })
+
+    # Priority 3 & 4 candidates: Persisted sources
+    # SQLite
     try:
         from backend.database.db_manager import DatabaseManager
         db = DatabaseManager()
-        db_token = (db.load_token() or "").strip().strip('"\'').strip()
+        db_raw = db.load_token(require_valid=False)
+        db_ver = db.get_setting("upstox_token_verified", "") == "true"
+        if db_raw:
+            jwt = decode_jwt_safe(db_raw)
+            src_label = "database (SQLite verified)" if db_ver else "database (SQLite)"
+            results.append({
+                "source": src_label,
+                "source_key": "database",
+                "token": db_raw,
+                "fingerprint": token_fingerprint(db_raw),
+                "length": len(db_raw),
+                "is_jwt": jwt.get("is_jwt", False),
+                "issued_at_iso": jwt.get("issued_at_iso"),
+                "expires_at_iso": jwt.get("expires_at_iso"),
+                "is_expired": jwt.get("is_expired"),
+                "isPlusPlan": jwt.get("isPlusPlan", False),
+                "verified": db_ver,
+                "rejection_reason": "EXPIRED" if jwt.get("is_expired") is True else None,
+            })
     except Exception:
-        db_token = ""
+        pass
 
-    json_token = ""
-    matched_json_path = ""
+    # JSON files
     for json_p in DEFAULT_TOKEN_JSON_PATHS:
         if os.path.isfile(json_p):
             try:
@@ -360,62 +489,142 @@ def resolve_upstox_token_with_source(
                     d = json.load(f)
                     jt = (d.get("access_token") or "").strip().strip('"\'').strip()
                     if jt:
-                        json_token = jt
-                        matched_json_path = json_p
-                        break
+                        jwt = decode_jwt_safe(jt)
+                        results.append({
+                            "source": f"json ({json_p})",
+                            "source_key": "json",
+                            "token": jt,
+                            "fingerprint": token_fingerprint(jt),
+                            "length": len(jt),
+                            "is_jwt": jwt.get("is_jwt", False),
+                            "issued_at_iso": jwt.get("issued_at_iso"),
+                            "expires_at_iso": jwt.get("expires_at_iso"),
+                            "is_expired": jwt.get("is_expired"),
+                            "isPlusPlan": jwt.get("isPlusPlan", False) or d.get("is_plus_plan", False),
+                            "verified": d.get("verified", False),
+                            "rejection_reason": "EXPIRED" if jwt.get("is_expired") is True else None,
+                        })
             except Exception:
                 pass
 
+    # Environment variable (os.environ)
     env_token = (os.getenv("UPSTOX_ACCESS_TOKEN") or "").strip().strip('"\'').strip()
-    
+    if env_token:
+        jwt = decode_jwt_safe(env_token)
+        results.append({
+            "source": "environment (os.environ)",
+            "source_key": "environment",
+            "token": env_token,
+            "fingerprint": token_fingerprint(env_token),
+            "length": len(env_token),
+            "is_jwt": jwt.get("is_jwt", False),
+            "issued_at_iso": jwt.get("issued_at_iso"),
+            "expires_at_iso": jwt.get("expires_at_iso"),
+            "is_expired": jwt.get("is_expired"),
+            "isPlusPlan": jwt.get("isPlusPlan", False),
+            "verified": False,
+            "rejection_reason": "EXPIRED" if jwt.get("is_expired") is True else None,
+        })
+
+    # Dotenv files
     found_dotenv = find_repo_dotenv_path(dotenv_path)
-    dot_token = ""
     if found_dotenv:
         env_vars = parse_dotenv_file(found_dotenv)
         dot_token = (env_vars.get("UPSTOX_ACCESS_TOKEN") or "").strip().strip('"\'').strip()
+        if dot_token:
+            jwt = decode_jwt_safe(dot_token)
+            results.append({
+                "source": f"dotenv ({found_dotenv})",
+                "source_key": "dotenv",
+                "token": dot_token,
+                "fingerprint": token_fingerprint(dot_token),
+                "length": len(dot_token),
+                "is_jwt": jwt.get("is_jwt", False),
+                "issued_at_iso": jwt.get("issued_at_iso"),
+                "expires_at_iso": jwt.get("expires_at_iso"),
+                "is_expired": jwt.get("is_expired"),
+                "isPlusPlan": jwt.get("isPlusPlan", False),
+                "verified": False,
+                "rejection_reason": "EXPIRED" if jwt.get("is_expired") is True else None,
+            })
 
-    candidates: List[Tuple[str, str]] = [
-        ("database", db_token),
-        ("json", json_token),
-        ("environment", env_token),
-        ("dotenv", dot_token),
-    ]
+    return results
 
-    valid_candidates = [(src, tok) for src, tok in candidates if tok]
-    if not valid_candidates:
+
+def resolve_upstox_token_with_source(
+    explicit_token: Optional[str] = None,
+    dotenv_path: Optional[str] = None,
+    require_valid: bool = False,
+) -> Tuple[str, str]:
+    """Resolve authoritative Upstox access token and its precise origin source.
+    
+    Candidate Priority:
+    1. Explicit runtime token ONLY when explicitly supplied (--token).
+    2. Current verified runtime token (_current_verified_token).
+    3. Persisted token that has been LIVE VERIFIED and is still valid.
+    4. Other unexpired candidates strictly ordered by freshness.
+    
+    Guarantees:
+    - Never selects an expired token when require_valid=True.
+    - If SQLite contains an older/expired token while .env contains a newer valid token,
+      NEVER chooses the older SQLite token.
+    - Only updates os.environ if the chosen token is active and unexpired.
+    """
+    # 1. Explicit runtime token ONLY when explicitly supplied
+    if explicit_token and explicit_token.strip():
+        tok = explicit_token.strip().strip('"\'').strip()
+        os.environ["UPSTOX_ACCESS_TOKEN"] = tok
+        return tok, "runtime (--token)"
+
+    # 2. Current verified runtime token
+    v_tok = get_verified_runtime_token()
+    if v_tok and v_tok.get("token"):
+        tok = v_tok["token"]
+        os.environ["UPSTOX_ACCESS_TOKEN"] = tok
+        return tok, v_tok.get("source", "runtime (verified)")
+
+    # 3. Collect candidates across persisted sources
+    raw_candidates = get_token_diagnostic_candidates(dotenv_path=dotenv_path)
+    if not raw_candidates:
         return "", "none"
 
-    # Score and rank candidates
-    scored = [(_score_candidate(tok, src), src, tok) for src, tok in valid_candidates]
+    # Score candidates
+    scored = []
+    for cand in raw_candidates:
+        tok = cand["token"]
+        src = cand["source_key"]
+        is_ver = cand.get("verified", False)
+        score = _score_candidate(tok, src, is_verified=is_ver)
+        scored.append((score, cand["source"], tok, cand))
+
+    # Sort descending: highest tier, freshest iat/exp, highest source tier
     scored.sort(key=lambda item: item[0], reverse=True)
 
-    best_score, best_src, best_token = scored[0]
+    best_score, best_src_label, best_token, best_cand = scored[0]
+    tier = best_score[0]
 
-    # Map internal source key to human-readable description
-    if best_src == "database":
-        source_label = "database (SQLite)"
-    elif best_src == "json":
-        source_label = f"json ({matched_json_path or 'storage'})"
-    elif best_src == "environment":
-        source_label = "environment (os.environ)"
-    elif best_src == "dotenv":
-        source_label = f"dotenv ({found_dotenv or '.env'})"
-    else:
-        source_label = best_src
+    # If require_valid=True and best tier is <= 0 (expired or mock), abort
+    if require_valid and tier <= 0:
+        logger.warning(
+            "[Token Resolver] No unexpired active token found among %d candidates. Best tier=%s",
+            len(scored), tier
+        )
+        return "", "none"
 
-    # Synchronize selected token to runtime memory if not a mock token
-    if best_token and not (best_token.startswith(("mock-", "test-", "leftover-")) or len(best_token) < 30):
+    # Synchronize chosen unexpired token to runtime memory
+    if tier > 0 and not (best_token.startswith(("mock-", "test-", "leftover-")) or len(best_token) < 30):
         os.environ["UPSTOX_ACCESS_TOKEN"] = best_token
 
-    return best_token, source_label
+    return best_token, best_src_label
 
 
 def resolve_upstox_token(
     explicit_token: Optional[str] = None,
     dotenv_path: Optional[str] = None,
+    require_valid: bool = False,
 ) -> str:
     """Resolve Upstox access token with strict freshness and integrity awareness."""
-    tok, _ = resolve_upstox_token_with_source(explicit_token, dotenv_path=dotenv_path)
+    tok, _ = resolve_upstox_token_with_source(explicit_token, dotenv_path=dotenv_path, require_valid=require_valid)
     return tok
 
 
@@ -493,7 +702,7 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
 
     clean_token = (token or "").strip().strip('"\'').strip()
     if not clean_token:
-        clean_token = resolve_upstox_token(dotenv_path=dotenv_path)
+        clean_token = resolve_upstox_token(dotenv_path=dotenv_path, require_valid=True)
 
     fp = token_fingerprint(clean_token)
 
@@ -517,6 +726,7 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
             "token_fingerprint": "NONE",
         }
 
+    jwt_meta = decode_jwt_safe(clean_token)
     result: Dict[str, Any] = {
         "has_token": True,
         "valid": False,
@@ -533,6 +743,10 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
         "message": "",
         "required_permission": None,
         "token_fingerprint": fp,
+        "is_jwt": jwt_meta.get("is_jwt", False),
+        "jwt_expired": jwt_meta.get("is_expired"),
+        "jwt_expires_at": jwt_meta.get("expires_at_iso"),
+        "is_plus_plan": jwt_meta.get("isPlusPlan", False),
     }
 
     # 1. Probe User Profile API
@@ -554,18 +768,23 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
     except urllib.error.HTTPError as e:
         result["profile_status"] = e.code
         result["profile_verified"] = False
+        parsed_code = None
+        parsed_msg = None
+        try:
+            err_b = json.loads(e.read().decode("utf-8"))
+            if "errors" in err_b and isinstance(err_b["errors"], list) and len(err_b["errors"]) > 0:
+                parsed_code = err_b["errors"][0].get("errorCode") or err_b["errors"][0].get("error_code")
+                parsed_msg = err_b["errors"][0].get("message")
+        except Exception:
+            pass
+
         if e.code == 401:
-            result["error_code"] = "AUTH_INVALID_TOKEN"
-            result["error_message"] = "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token via OAuth."
+            result["error_code"] = parsed_code or "AUTH_INVALID_TOKEN"
+            result["error_message"] = parsed_msg or "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token via OAuth."
             result["required_permission"] = "Valid, unexpired Upstox Access Token (refresh daily via OAuth login)"
         else:
-            try:
-                err_b = json.loads(e.read().decode("utf-8"))
-                result["error_code"] = err_b.get("errors", [{}])[0].get("errorCode") or f"HTTP_{e.code}"
-                result["error_message"] = err_b.get("errors", [{}])[0].get("message") or str(e)
-            except Exception:
-                result["error_code"] = f"HTTP_{e.code}"
-                result["error_message"] = str(e)
+            result["error_code"] = parsed_code or f"HTTP_{e.code}"
+            result["error_message"] = parsed_msg or str(e)
     except Exception as e:
         result["error_code"] = "NETWORK_ERROR"
         result["error_message"] = str(e)
@@ -589,24 +808,34 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
             result["plan_type"] = "Upstox Plus Plan (Expired Derivatives Enabled)"
     except urllib.error.HTTPError as e:
         result["expired_instruments_status"] = e.code
+        parsed_exp_code = None
+        parsed_exp_msg = None
+        try:
+            err_b = json.loads(e.read().decode("utf-8"))
+            if "errors" in err_b and isinstance(err_b["errors"], list) and len(err_b["errors"]) > 0:
+                parsed_exp_code = err_b["errors"][0].get("errorCode") or err_b["errors"][0].get("error_code")
+                parsed_exp_msg = err_b["errors"][0].get("message")
+        except Exception:
+            pass
+
         if e.code == 403:
             result["expired_instruments_entitled"] = False
             result["plan_type"] = "Standard (Upstox Plus Plan Required for Expired Historical Derivatives)"
             if not result.get("error_code"):
-                result["error_code"] = "PERMISSION_DENIED"
-                result["error_message"] = "Access forbidden: Expired Instruments API requires active Upstox Plus Plan."
+                result["error_code"] = parsed_exp_code or "PERMISSION_DENIED"
+                result["error_message"] = parsed_exp_msg or "Access forbidden: Expired Instruments API requires active Upstox Plus Plan."
                 result["required_permission"] = "Upstox Plus Plan subscription required for Expired Instruments historical derivatives API"
         elif e.code == 401:
             result["expired_instruments_entitled"] = False
             if not result.get("error_code"):
-                result["error_code"] = "AUTH_INVALID_TOKEN"
-                result["error_message"] = "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token."
+                result["error_code"] = parsed_exp_code or "AUTH_INVALID_TOKEN"
+                result["error_message"] = parsed_exp_msg or "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token."
                 result["required_permission"] = "Valid, unexpired Upstox Access Token (refresh daily via OAuth login)"
         else:
             result["expired_instruments_entitled"] = False
             if not result.get("error_code"):
-                result["error_code"] = f"HTTP_{e.code}"
-                result["error_message"] = f"Expired Instruments API returned HTTP {e.code}"
+                result["error_code"] = parsed_exp_code or f"HTTP_{e.code}"
+                result["error_message"] = parsed_exp_msg or f"Expired Instruments API returned HTTP {e.code}"
     except Exception as e:
         if not result.get("error_code"):
             result["error_code"] = "NETWORK_ERROR"
@@ -625,6 +854,16 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
         result["error_code"] = None
         result["error_message"] = None
         result["required_permission"] = None
+        set_verified_runtime_token(
+            clean_token,
+            {
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+                "source": "runtime (verified)",
+                "user_name": result.get("user_name", ""),
+                "user_id": result.get("user_id", ""),
+                "is_plus_plan": True,
+            },
+        )
     elif not result.get("error_code"):
         if not is_valid:
             result["error_code"] = "AUTH_INVALID_TOKEN"

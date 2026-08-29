@@ -54,6 +54,7 @@ class UpstoxExpiredAPIError(Exception):
     """Specific error for Upstox Expired Instruments API."""
     def __init__(self, status_code: int, message: str, error_code: Optional[str] = None) -> None:
         self.status_code = status_code
+        self.message = message
         self.error_code = error_code
         super().__init__(f"Upstox Expired API [{status_code}] ({error_code or 'UNKNOWN'}): {message}")
 
@@ -224,12 +225,22 @@ class UpstoxExpiredOptionsClient:
         dotenv_path: Optional[str] = None,
     ) -> None:
         from backend.broker.token_resolver import (
-            resolve_upstox_token,
-            get_token_source,
+            resolve_upstox_token_with_source,
             token_fingerprint,
         )
         self.dotenv_path = dotenv_path
-        self.access_token = (resolve_upstox_token(access_token, dotenv_path=dotenv_path) or "").strip().strip('"\'').strip()
+        if access_token and access_token.strip():
+            # Use the exact verified immutable token without re-resolving
+            self.access_token = access_token.strip().strip('"\'').strip()
+            self.token_source = "explicit_runtime"
+        else:
+            # Resolve authoritative token requiring valid active state
+            self.access_token, self.token_source = resolve_upstox_token_with_source(
+                dotenv_path=dotenv_path,
+                require_valid=True,
+            )
+
+        self.token_fingerprint = token_fingerprint(self.access_token)
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.cache = OptionsDataCache(cache_dir=cache_dir)
@@ -237,8 +248,8 @@ class UpstoxExpiredOptionsClient:
         self._expiries_cache: Dict[str, List[str]] = {}
         self._contracts_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
 
-        src = get_token_source(access_token, dotenv_path=dotenv_path)
-        fp = token_fingerprint(self.access_token)
+        src = self.token_source
+        fp = self.token_fingerprint
         logger.info(
             "[Token Diagnostic] UpstoxExpiredOptionsClient init: token_source=%s, length=%d, fingerprint=%s",
             src, len(self.access_token), fp,
@@ -318,11 +329,17 @@ class UpstoxExpiredOptionsClient:
                     err_msg = parsed_err["errors"][0].get("message") or err_msg
 
                 if status == 401:
-                    raise UpstoxExpiredAPIError(401, "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token.", "AUTH_INVALID_TOKEN")
+                    code = err_code or "AUTH_INVALID_TOKEN"
+                    msg = err_msg or "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token."
+                    raise UpstoxExpiredAPIError(401, msg, code)
                 if status == 403:
-                    raise UpstoxExpiredAPIError(403, "Access forbidden: Expired Instruments API requires active Upstox Plus Plan and historical derivatives permissions.", "PERMISSION_DENIED")
+                    code = err_code or "PERMISSION_DENIED"
+                    msg = err_msg or "Access forbidden: Expired Instruments API requires active Upstox Plus Plan and historical derivatives permissions."
+                    raise UpstoxExpiredAPIError(403, msg, code)
                 if status == 404:
-                    raise UpstoxExpiredAPIError(404, f"Resource not found for endpoint: {endpoint}", "NOT_FOUND")
+                    code = err_code or "NOT_FOUND"
+                    msg = err_msg or f"Resource not found for endpoint: {endpoint}"
+                    raise UpstoxExpiredAPIError(404, msg, code)
                 if status == 429:
                     # Rate limited: retry with exponential backoff
                     if attempt < max_retries - 1:
@@ -412,7 +429,12 @@ class UpstoxExpiredOptionsClient:
                 continue
             strike_val = float(c.get("strike_price", 0.0) or c.get("strike", 0.0))
             opt_type = str(c.get("option_type") or c.get("instrument_type") or "").upper()
-            inst_k = str(c.get("instrument_key") or "")
+            inst_k = str(c.get("expired_instrument_key") or c.get("instrument_key") or "")
+            if inst_k and inst_k.count("|") == 1 and expiry_date:
+                exp_p = expiry_date.split("-")
+                if len(exp_p) == 3 and len(exp_p[0]) == 4:
+                    dd_mm_yyyy = f"{exp_p[2]}-{exp_p[1]}-{exp_p[0]}"
+                    inst_k = f"{inst_k}|{dd_mm_yyyy}"
             tsym = str(c.get("trading_symbol") or c.get("symbol") or "")
             lot = int(c.get("lot_size") or INDEX_STRIKE_INTERVALS.get(und_key, 25))
             
@@ -500,6 +522,46 @@ class UpstoxExpiredOptionsClient:
         )
         return None
 
+    @staticmethod
+    def _resample_to_5min(m1_candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Resample 1-minute OHLCV candles into 5-minute candles."""
+        if not m1_candles:
+            return []
+        from collections import defaultdict
+        from datetime import datetime
+        buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for c in m1_candles:
+            ts_str = c.get("timestamp", "")
+            try:
+                ts_clean = ts_str.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(ts_clean)
+                minute_bucket = (dt.minute // 5) * 5
+                bucket_dt = dt.replace(minute=minute_bucket, second=0, microsecond=0)
+                bucket_key = bucket_dt.isoformat()
+                buckets[bucket_key].append(c)
+            except Exception:
+                buckets[ts_str[:16]].append(c)
+
+        resampled = []
+        for b_ts in sorted(buckets.keys()):
+            b_candles = buckets[b_ts]
+            o = b_candles[0]["open"]
+            h = max(c["high"] for c in b_candles)
+            l = min(c["low"] for c in b_candles)
+            c_val = b_candles[-1]["close"]
+            v = sum(c.get("volume", 0.0) for c in b_candles)
+            oi = b_candles[-1].get("oi")
+            resampled.append({
+                "timestamp": b_ts,
+                "open": round(o, 2),
+                "high": round(h, 2),
+                "low": round(l, 2),
+                "close": round(c_val, 2),
+                "volume": v,
+                "oi": oi,
+            })
+        return resampled
+
     def get_expired_historical_candles(
         self,
         instrument_key: str,
@@ -511,6 +573,20 @@ class UpstoxExpiredOptionsClient:
         
         Endpoint: /v2/expired-instruments/historical-candle/{instrument_key}/{interval}/{to_date}/{from_date}
         """
+        # 1. Ensure correct to_date >= from_date ordering
+        d_to = to_date
+        d_from = from_date
+        if d_to and d_from and d_to < d_from:
+            d_to, d_from = d_from, d_to
+
+        # 2. Ensure expired instrument key conforms to Upstox pattern SEGMENT|TOKEN|DD-MM-YYYY
+        exp_key = instrument_key
+        if exp_key and exp_key.count("|") == 1 and d_to:
+            to_p = d_to.split("-")
+            if len(to_p) == 3 and len(to_p[0]) == 4:
+                dd_mm_yyyy = f"{to_p[2]}-{to_p[1]}-{to_p[0]}"
+                exp_key = f"{exp_key}|{dd_mm_yyyy}"
+
         interval_norm = "5minute" if interval in ("5m", "5min", "5minute") else interval
         if interval_norm in ("1m", "1min"):
             interval_norm = "1minute"
@@ -521,15 +597,24 @@ class UpstoxExpiredOptionsClient:
         elif interval_norm in ("1d", "day", "daily"):
             interval_norm = "day"
 
-        encoded_key = urllib.parse.quote(instrument_key, safe="")
-        endpoint = f"/expired-instruments/historical-candle/{encoded_key}/{interval_norm}/{to_date}/{from_date}"
+        encoded_key = urllib.parse.quote(exp_key, safe="")
+        endpoint = f"/expired-instruments/historical-candle/{encoded_key}/{interval_norm}/{d_to}/{d_from}"
         
         try:
             data = self._get(endpoint)
         except UpstoxExpiredAPIError as e:
+            # Check if 5minute interval is rejected by the API; if so, fallback to 1minute and resample
+            if (e.status_code == 400 or "interval" in str(e).lower()) and interval_norm != "1minute":
+                try:
+                    m1_candles = self.get_expired_historical_candles(exp_key, "1minute", d_to, d_from)
+                    if interval_norm == "5minute":
+                        return self._resample_to_5min(m1_candles)
+                    return m1_candles
+                except Exception:
+                    pass
             if e.status_code == 404:
                 # Try fallback URL structure /v2/historical-candle/expired/...
-                alt_endpoint = f"/historical-candle/expired/{encoded_key}/{interval_norm}/{to_date}/{from_date}"
+                alt_endpoint = f"/historical-candle/expired/{encoded_key}/{interval_norm}/{d_to}/{d_from}"
                 try:
                     data = self._get(alt_endpoint)
                 except Exception:

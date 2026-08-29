@@ -1,11 +1,14 @@
 """Production SQLite database manager for the Upstox trading bot."""
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from backend.database.models import PerformanceSnapshot, Position, Trade
 
@@ -388,54 +391,141 @@ class DatabaseManager:
         except Exception:
             return None
 
-    def save_token(self, token: str) -> None:
-        """Persist access token to SQLite DB, JSON files, repository .env files, and os.environ."""
+    def save_token(
+        self,
+        token: str,
+        verified: bool = False,
+        verified_at: Optional[str] = None,
+        source: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        """Persist access token to SQLite DB, JSON files, repository .env files, and os.environ.
+        
+        Strictly prevents stale-token resurrection:
+        - Never overwrites an unexpired/newer verified token with an expired or older token.
+        - Persists verification state, verification timestamp, and token fingerprint.
+        """
+        from backend.broker.token_resolver import decode_jwt_safe, token_fingerprint
+
         clean_token = (token or "").strip().strip('"\'').strip()
-        self.save_setting("upstox_access_token", clean_token)
+
+        # Handle clearing token (explicit deletion/logout)
+        if not clean_token:
+            self.save_setting("upstox_access_token", "")
+            self.save_setting("upstox_token_verified", "false")
+            self.save_setting("upstox_token_verified_at", "")
+            self.save_setting("upstox_token_source", "none")
+            self.save_setting("upstox_token_fingerprint", "NONE")
+            os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
+            return True
 
         is_mock = clean_token.startswith(("mock-", "test-", "leftover-")) or (0 < len(clean_token) < 30)
 
-        # Do not propagate mock test tokens to environment variables or production disk files
-        if clean_token and not is_mock:
-            os.environ["UPSTOX_ACCESS_TOKEN"] = clean_token
-        elif not clean_token:
-            os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
+        # For unit test mock strings, save directly to isolated DB setting without clobbering disk/env
+        if is_mock:
+            self.save_setting("upstox_access_token", clean_token)
+            self.save_setting("upstox_token_verified", "false")
+            return True
 
-        if not is_mock:
-            import json
-            payload = {
-                "access_token": clean_token,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-                "source": "oauth_callback"
-            }
-            paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
-            if self.db_path and self.db_path != ":memory:":
-                custom_dir = Path(self.db_path).parent
-                if custom_dir != Path.cwd() and custom_dir != Path("/data"):
-                    paths = [str(custom_dir / "upstox_token.json")]
-            for p in paths:
-                try:
-                    parent = Path(p).parent
-                    parent.mkdir(parents=True, exist_ok=True)
-                    with open(p, "w", encoding="utf-8") as f:
-                        json.dump(payload, f, indent=2)
-                except Exception:
-                    pass
+        new_jwt = decode_jwt_safe(clean_token)
+        new_fp = token_fingerprint(clean_token)
 
-            # Also atomically update repository .env files
+        # Check existing token in database for stale-token protection
+        existing_token = self.get_setting("upstox_access_token", "")
+        if existing_token and not force:
+            existing_jwt = decode_jwt_safe(existing_token)
+            existing_fp = token_fingerprint(existing_token)
+
+            # Prevent stale token overwrite:
+            # 1. New token is expired while existing is NOT expired
+            if new_jwt.get("is_expired") is True and existing_jwt.get("is_expired") is not True:
+                logger.warning(
+                    "[DatabaseManager] Prevented overwriting active token (%s) with expired token (%s)",
+                    existing_fp, new_fp
+                )
+                return False
+
+            # 2. Both are JWTs and existing is not expired: check if new token is strictly older
+            if existing_jwt.get("is_jwt") and new_jwt.get("is_jwt") and existing_jwt.get("is_expired") is not True:
+                existing_iat = float(existing_jwt.get("issued_at") or 0.0)
+                new_iat = float(new_jwt.get("issued_at") or 0.0)
+                existing_exp = float(existing_jwt.get("expires_at") or 0.0)
+                new_exp = float(new_jwt.get("expires_at") or 0.0)
+                if new_iat < existing_iat and new_exp <= existing_exp:
+                    logger.warning(
+                        "[DatabaseManager] Prevented overwriting newer token (%s, iat=%s) with older token (%s, iat=%s)",
+                        existing_fp, existing_iat, new_fp, new_iat
+                    )
+                    return False
+
+        # Save authoritative token & metadata to SQLite
+        v_at = verified_at or datetime.now(timezone.utc).isoformat()
+        src = source or ("oauth_verified" if verified else "database")
+        self.save_setting("upstox_access_token", clean_token)
+        self.save_setting("upstox_token_verified", "true" if verified else "false")
+        self.save_setting("upstox_token_verified_at", v_at)
+        self.save_setting("upstox_token_source", src)
+        self.save_setting("upstox_token_fingerprint", new_fp)
+
+        # Update environment variable
+        os.environ["UPSTOX_ACCESS_TOKEN"] = clean_token
+
+        # Update JSON files
+        import json
+        payload = {
+            "access_token": clean_token,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "verified": bool(verified),
+            "verified_at": v_at,
+            "source": src,
+            "fingerprint": new_fp,
+            "is_jwt": new_jwt.get("is_jwt", False),
+            "expires_at": new_jwt.get("expires_at"),
+            "issued_at": new_jwt.get("issued_at"),
+            "is_plus_plan": new_jwt.get("isPlusPlan", False),
+        }
+        paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
+        if self.db_path and self.db_path != ":memory:":
+            custom_dir = Path(self.db_path).parent
+            if custom_dir != Path.cwd() and custom_dir != Path("/data"):
+                paths = [str(custom_dir / "upstox_token.json")]
+        for p in paths:
             try:
+                parent = Path(p).parent
+                parent.mkdir(parents=True, exist_ok=True)
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+            except Exception:
+                pass
+
+        # Also atomically update repository .env files (only for production / default db instances)
+        try:
+            is_default_db = (not self.db_path) or (str(self.db_path) in ("/data/trading_bot.db", str(Path.cwd() / "data" / "trading_bot.db")))
+            if is_default_db:
                 from backend.broker.token_resolver import update_dotenv_file, DEFAULT_REPO_DOTENV_PATHS
                 for env_p in DEFAULT_REPO_DOTENV_PATHS:
                     if os.path.exists(os.path.dirname(os.path.abspath(env_p))):
                         update_dotenv_file(env_p, {"UPSTOX_ACCESS_TOKEN": clean_token})
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-    def load_token(self) -> str:
-        """Load access token from DB or fallback JSON file."""
+        return True
+
+    def load_token(self, require_valid: bool = False) -> str:
+        """Load access token from DB or fallback JSON file.
+        
+        If require_valid=True, rejects any expired token.
+        """
         val = self.get_setting("upstox_access_token", "")
         if val and val.strip():
-            return val.strip().strip('"\'').strip()
+            clean = val.strip().strip('"\'').strip()
+            if require_valid:
+                from backend.broker.token_resolver import decode_jwt_safe
+                jwt = decode_jwt_safe(clean)
+                if jwt.get("is_expired") is True:
+                    return ""
+            return clean
+
         import json
         paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
         if self.db_path and self.db_path != ":memory:":
@@ -449,7 +539,13 @@ class DatabaseManager:
                         d = json.load(f)
                         token = d.get("access_token", "")
                         if token and token.strip():
-                            return token.strip()
+                            clean = token.strip().strip('"\'').strip()
+                            if require_valid:
+                                from backend.broker.token_resolver import decode_jwt_safe
+                                jwt = decode_jwt_safe(clean)
+                                if jwt.get("is_expired") is True:
+                                    continue
+                            return clean
             except Exception:
                 pass
         return ""

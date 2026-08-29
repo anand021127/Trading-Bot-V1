@@ -48,9 +48,15 @@ if PROJECT_ROOT not in sys.path:
 
 from backend.broker.token_resolver import (
     resolve_upstox_token,
+    resolve_upstox_token_with_source,
     get_token_metadata,
     find_repo_dotenv_path,
     load_repo_dotenv,
+    validate_token_live,
+    decode_jwt_safe,
+    token_fingerprint,
+    persist_upstox_token,
+    get_token_diagnostic_candidates,
 )
 from backend.broker.upstox_expired_options import (
     UpstoxExpiredOptionsClient,
@@ -567,20 +573,71 @@ def main():
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
     strategies = [s.strip().upper() for s in args.strategies.split(",")] if args.strategies else None
     
-    # 0. Load dotenv & inspect token metadata safely
+    # 0. Load dotenv & authoritative token resolution
     load_repo_dotenv(args.env_file)
-    meta = get_token_metadata(explicit_token=args.token, dotenv_path=args.env_file)
-    
-    print("=" * 75)
-    print(" UPSTOX HISTORICAL OPTIONS DATA ACQUISITION & VALIDATION PIPELINE")
-    print("=" * 75)
-    print(f"Token Status      : {'PRESENT' if meta['present'] else 'NOT FOUND'}")
-    print(f"Token Length      : {meta['length']} characters")
-    print(f"Token Masked      : {meta['masked']}")
-    print(f"Token Fingerprint : {meta.get('fingerprint', 'NONE')}")
-    print(f"Token Source      : {meta['source']}")
-    print(f"Cache Directory   : {args.cache_dir}")
-    print("-" * 75)
+    candidate_token, token_src = resolve_upstox_token_with_source(
+        explicit_token=args.token,
+        dotenv_path=args.env_file,
+        require_valid=True,
+    )
+
+    # Perform ONE live auth check if candidate token is found
+    val_result: Dict[str, Any] = {}
+    if candidate_token:
+        val_result = validate_token_live(token=candidate_token, dotenv_path=args.env_file)
+        jwt_meta = decode_jwt_safe(candidate_token)
+        fp = token_fingerprint(candidate_token)
+        tok_len = len(candidate_token)
+        iat_iso = jwt_meta.get("issued_at_iso") or "N/A"
+        exp_iso = jwt_meta.get("expires_at_iso") or "N/A"
+        is_exp = "yes" if jwt_meta.get("is_expired") else "no"
+        is_plus = "true" if (val_result.get("expired_instruments_entitled") or jwt_meta.get("isPlusPlan")) else "false"
+        prof_stat = val_result.get("profile_status")
+        prof_ok = val_result.get("profile_verified", False)
+        prof_str = f"verified ({prof_stat})" if prof_ok else f"failed ({prof_stat})"
+        exp_stat = val_result.get("expired_instruments_status")
+        exp_ok = val_result.get("expired_instruments_entitled", False)
+        exp_str = f"entitled ({exp_stat})" if exp_ok else f"not entitled ({exp_stat})"
+    else:
+        diag_candidates = get_token_diagnostic_candidates(explicit_token=args.token, dotenv_path=args.env_file)
+        best_diag = diag_candidates[0] if diag_candidates else {}
+        token_src = best_diag.get("source", "none")
+        fp = best_diag.get("fingerprint", "NONE")
+        tok_len = best_diag.get("length", 0)
+        iat_iso = best_diag.get("issued_at_iso") or "N/A"
+        exp_iso = best_diag.get("expires_at_iso") or "N/A"
+        is_exp = "yes" if best_diag.get("is_expired") else "no"
+        is_plus = "true" if best_diag.get("isPlusPlan") else "false"
+        prof_str = "failed (no active token)"
+        exp_str = "not entitled (no active token)"
+        prof_ok = False
+        exp_ok = False
+
+    # Requirement D: Print ONLY the 9 specified lines at downloader startup
+    print(f"Token source                    : {token_src}")
+    print(f"Token fingerprint               : {fp}")
+    print(f"Token length                    : {tok_len}")
+    print(f"JWT issued-at                   : {iat_iso}")
+    print(f"JWT expiration                  : {exp_iso}")
+    print(f"JWT expired yes/no              : {is_exp}")
+    print(f"isPlusPlan                      : {is_plus}")
+    print(f"Live profile verification       : {prof_str}")
+    print(f"Expired-instruments entitlement : {exp_str}")
+
+    # Requirement F: If no verified token exists or auth/entitlement failed, abort
+    if not (candidate_token and prof_ok and exp_ok):
+        print("\nNO VERIFIED ACTIVE UPSTOX TOKEN AVAILABLE")
+        print("Please complete OAuth from the application Settings to generate and verify an active Upstox access token.")
+        print("Do NOT fall back to stale SQLite/.env/JSON tokens.")
+        sys.exit(1)
+
+    # Immutable verified token for the entire ingestion run
+    immutable_token = candidate_token
+    persist_upstox_token(
+        immutable_token,
+        {"user_name": val_result.get("user_name", ""), "user_id": val_result.get("user_id", "")},
+        verification_info={"verified": True, "source": token_src, "is_plus_plan": True},
+    )
 
     if args.audit_only:
         print("\n[Audit Mode] Running audit on cache directory...")
@@ -589,7 +646,7 @@ def main():
         return
 
     pipeline = HistoricalOptionsIngestionPipeline(
-        access_token=args.token,
+        access_token=immutable_token,
         cache_dir=args.cache_dir,
         dotenv_path=args.env_file,
     )

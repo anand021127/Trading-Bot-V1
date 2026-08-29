@@ -150,10 +150,10 @@ print(json.dumps({'client_id': cid, 'client_secret': sec, 'redirect_uri': red}))
 }
 loadCredentialsFromSQLite();
 
-function syncTokenToSQLite(token: string) {
+function syncTokenToSQLite(token: string, verified = true, source = 'oauth_callback') {
   try {
     const cleanToken = token.trim();
-    const cmd = `python3 -c "import sys; from backend.database.db_manager import DatabaseManager; db = DatabaseManager(); db.save_token(sys.stdin.read().strip())"`;
+    const cmd = `python3 -c "import sys; from backend.database.db_manager import DatabaseManager; db = DatabaseManager(); db.save_token(sys.stdin.read().strip(), verified=${verified ? 'True' : 'False'}, source='${source}')"`;
     execSync(cmd, { input: cleanToken, timeout: 5000, stdio: ['pipe', 'ignore', 'ignore'] });
   } catch (err) {
     // Ignore if sqlite sync command is unavailable
@@ -162,7 +162,7 @@ function syncTokenToSQLite(token: string) {
 
 function loadTokenFromSQLite(): string {
   try {
-    const cmd = `python3 -c "from backend.database.db_manager import DatabaseManager; db = DatabaseManager(); print(db.load_token() or '')"`;
+    const cmd = `python3 -c "from backend.database.db_manager import DatabaseManager; db = DatabaseManager(); print(db.load_token(require_valid=True) or '')"`;
     const out = execSync(cmd, { timeout: 5000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
     return (out || '').trim();
   } catch (err) {
@@ -253,7 +253,20 @@ function updateEnvFile(filePath: string, updates: Record<string, string>) {
   }
 }
 
-function savePersistedToken(token: string, userProfile?: any): boolean {
+function isJwtExpired(token: string): boolean {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return false;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf-8'));
+    if (payload && typeof payload.exp === 'number') {
+      const nowSec = Math.floor(Date.now() / 1000);
+      return payload.exp <= nowSec;
+    }
+  } catch {}
+  return false;
+}
+
+function savePersistedToken(token: string, userProfile?: any, verified = true, source = 'oauth_callback'): boolean {
   const cleanToken = token.trim();
   runtimeTokenOverride = cleanToken;
   process.env.UPSTOX_ACCESS_TOKEN = cleanToken;
@@ -264,7 +277,7 @@ function savePersistedToken(token: string, userProfile?: any): boolean {
     user_name: userProfile?.user_name || '',
     broker: userProfile?.broker || 'UPSTOX',
     saved_at: new Date().toISOString(),
-    source: 'oauth_callback',
+    source,
   };
 
   for (const filePath of TOKEN_FILE_PATHS) {
@@ -288,7 +301,7 @@ function savePersistedToken(token: string, userProfile?: any): boolean {
     } catch {}
   }
 
-  syncTokenToSQLite(cleanToken);
+  syncTokenToSQLite(cleanToken, verified, source);
   return true;
 }
 
@@ -330,31 +343,35 @@ export function resolveUpstoxToken(): { token: string; source: 'runtime' | 'data
   // Priority 1: Fresh runtime token override
   if (runtimeTokenOverride && runtimeTokenOverride.trim()) {
     const t = runtimeTokenOverride.trim();
-    const sha = crypto.createHash('sha256').update(t).digest('hex');
-    return {
-      token: t,
-      source: 'runtime',
-      fingerprint: `${sha.slice(0, 6)}...${sha.slice(-6)}`,
-      length: t.length,
-    };
+    if (!isJwtExpired(t)) {
+      const sha = crypto.createHash('sha256').update(t).digest('hex');
+      return {
+        token: t,
+        source: 'runtime',
+        fingerprint: `${sha.slice(0, 6)}...${sha.slice(-6)}`,
+        length: t.length,
+      };
+    }
   }
 
   // Priority 2: Persistent database / storage token
   const persisted = loadPersistedToken();
   if (persisted && persisted.access_token && persisted.access_token.trim()) {
     const t = persisted.access_token.trim();
-    const sha = crypto.createHash('sha256').update(t).digest('hex');
-    return {
-      token: t,
-      source: 'database',
-      fingerprint: `${sha.slice(0, 6)}...${sha.slice(-6)}`,
-      length: t.length,
-    };
+    if (!isJwtExpired(t)) {
+      const sha = crypto.createHash('sha256').update(t).digest('hex');
+      return {
+        token: t,
+        source: 'database',
+        fingerprint: `${sha.slice(0, 6)}...${sha.slice(-6)}`,
+        length: t.length,
+      };
+    }
   }
 
   // Priority 3: Environment variable fallback
   const envToken = process.env.UPSTOX_ACCESS_TOKEN?.trim() || '';
-  if (envToken) {
+  if (envToken && !isJwtExpired(envToken)) {
     const sha = crypto.createHash('sha256').update(envToken).digest('hex');
     return {
       token: envToken,
@@ -2618,7 +2635,7 @@ app.all('/api/settings/token-callback', async (req, res) => {
     } catch {}
 
     // Step 3: Token verified with HTTP 200 — Save to persistent storage (DB, JSON, .env)
-    savePersistedToken(accessToken, profileData.data);
+    savePersistedToken(accessToken, profileData.data, true, 'oauth_callback');
     process.env.UPSTOX_ACCESS_TOKEN = accessToken;
     
     lastOAuthExchange = {

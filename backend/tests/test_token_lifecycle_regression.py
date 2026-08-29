@@ -44,13 +44,18 @@ def _make_dummy_jwt(payload: dict) -> str:
 class TestTokenLifecycleRegression(unittest.TestCase):
 
     def setUp(self):
+        from backend.broker.token_resolver import clear_verified_runtime_token
         self.original_env_token = os.environ.get("UPSTOX_ACCESS_TOKEN")
+        os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
+        clear_verified_runtime_token()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp_dir.name, "test_trading_bot.db")
         self.cache_dir = os.path.join(self.temp_dir.name, "options_cache")
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def tearDown(self):
+        from backend.broker.token_resolver import clear_verified_runtime_token
+        clear_verified_runtime_token()
         if self.original_env_token is not None:
             os.environ["UPSTOX_ACCESS_TOKEN"] = self.original_env_token
         else:
@@ -173,6 +178,90 @@ class TestTokenLifecycleRegression(unittest.TestCase):
         client = UpstoxExpiredOptionsClient(access_token=quoted_token, cache_dir=self.cache_dir)
         self.assertEqual(client.access_token, inner_token)
         self.assertEqual(client._headers()["Authorization"], f"Bearer {inner_token}")
+
+    def test_database_token_overwrite_protection_prevents_stale_token_resurrection(self):
+        """Proves that DatabaseManager.save_token rejects stale/expired tokens when an active token exists."""
+        db = DatabaseManager(db_path=self.db_path)
+
+        # 1. Save an active verified token
+        active_jwt = _make_dummy_jwt({"user_id": "U100", "iat": 1700000000, "exp": 9999999999})
+        saved = db.save_token(active_jwt, verified=True, source="oauth_callback")
+        self.assertTrue(saved)
+        self.assertEqual(db.load_token(require_valid=True), active_jwt)
+
+        # 2. Attempt to overwrite with an expired token
+        expired_jwt = _make_dummy_jwt({"user_id": "U100", "iat": 1600000000, "exp": 1600001000})
+        saved_expired = db.save_token(expired_jwt, verified=False, source="stale_source")
+        self.assertFalse(saved_expired)
+        # Active token still intact
+        self.assertEqual(db.load_token(require_valid=True), active_jwt)
+
+        # 3. Attempt to overwrite with an older iat unverified token
+        older_jwt = _make_dummy_jwt({"user_id": "U100", "iat": 1690000000, "exp": 9999999999})
+        saved_older = db.save_token(older_jwt, verified=False, source="legacy_import")
+        self.assertFalse(saved_older)
+        self.assertEqual(db.load_token(require_valid=True), active_jwt)
+
+        # 4. Overwrite with a fresher verified token succeeds
+        fresher_jwt = _make_dummy_jwt({"user_id": "U100", "iat": 1750000000, "exp": 9999999999})
+        saved_fresher = db.save_token(fresher_jwt, verified=True, source="oauth_callback")
+        self.assertTrue(saved_fresher)
+        self.assertEqual(db.load_token(require_valid=True), fresher_jwt)
+
+    def test_tiered_scoring_priority_enforces_authoritative_resolution(self):
+        """Proves strict resolution priority: Runtime Verified > Persisted Verified > Others."""
+        from backend.broker.token_resolver import (
+            set_verified_runtime_token,
+            clear_verified_runtime_token,
+            resolve_upstox_token_with_source,
+        )
+
+        db = DatabaseManager(db_path=self.db_path)
+        persisted_verified = _make_dummy_jwt({"user_id": "U_DB", "iat": 1700000000, "exp": 9999999999})
+        db.save_token(persisted_verified, verified=True, source="database (SQLite verified)")
+
+        # When runtime verified token is set, it takes priority
+        runtime_verified = _make_dummy_jwt({"user_id": "U_RUN", "iat": 1710000000, "exp": 9999999999})
+        set_verified_runtime_token(runtime_verified, {"verified": True, "source": "runtime (in-memory verified)"})
+
+        with patch("backend.database.db_manager.DatabaseManager", return_value=db), \
+             patch("backend.broker.token_resolver.find_repo_dotenv_path", return_value=None):
+            resolved, src = resolve_upstox_token_with_source(require_valid=True)
+            self.assertEqual(resolved, runtime_verified)
+            self.assertEqual(src, "runtime (in-memory verified)")
+
+            # When runtime verified is cleared, persisted verified wins
+            clear_verified_runtime_token()
+            resolved2, src2 = resolve_upstox_token_with_source(require_valid=True)
+            self.assertEqual(resolved2, persisted_verified)
+            self.assertIn("verified", src2)
+
+    def test_client_immutability_and_no_reresolution(self):
+        """Proves UpstoxExpiredOptionsClient preserves the passed access_token immutably."""
+        explicit_tok = _make_dummy_jwt({"user_id": "U_IMMUTABLE", "exp": 9999999999})
+        os.environ["UPSTOX_ACCESS_TOKEN"] = "stale-env-token-should-not-be-used"
+
+        client = UpstoxExpiredOptionsClient(access_token=explicit_tok, cache_dir=self.cache_dir)
+        self.assertEqual(client.access_token, explicit_tok)
+        self.assertEqual(client.token_source, "explicit_runtime")
+        self.assertEqual(client._headers()["Authorization"], f"Bearer {explicit_tok}")
+
+    def test_failsafe_abort_when_no_active_token(self):
+        """Proves resolve_upstox_token(require_valid=True) returns empty when only expired tokens exist."""
+        from backend.broker.token_resolver import clear_verified_runtime_token
+        clear_verified_runtime_token()
+        os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
+
+        expired_tok = _make_dummy_jwt({"user_id": "U_DEAD", "exp": 1500000000})
+        db = DatabaseManager(db_path=self.db_path)
+        # Bypassing protection to force-store an expired token
+        db.save_setting("upstox_access_token", expired_tok)
+
+        with patch("backend.database.db_manager.DatabaseManager", return_value=db), \
+             patch("backend.broker.token_resolver.find_repo_dotenv_path", return_value=None):
+            resolved, src = resolve_upstox_token_with_source(require_valid=True)
+            self.assertEqual(resolved, "")
+            self.assertEqual(src, "none")
 
 
 if __name__ == "__main__":
