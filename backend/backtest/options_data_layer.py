@@ -292,16 +292,18 @@ class HistoricalOptionsDataLoader:
         spot_price: float,
         option_type: str,
         strike_interval: Optional[float] = None,
+        target_expiry: Optional[str] = None,
+        target_strike: Optional[float] = None,
     ) -> Optional[Tuple[str, str, float, str]]:
         """Resolve historical expiry, strike, and contract key for a given spot and date.
         
         Returns:
-            (contract_key, expiry_str, atm_strike, option_type) if resolvable, else None (DATA_UNAVAILABLE).
+            (contract_key, expiry_str, strike, option_type) if resolvable, else None (DATA_UNAVAILABLE).
         """
         und_key = normalize_underlying(underlying)
         opt_type = option_type.upper()
         step = strike_interval or INDEX_STRIKE_INTERVALS.get(und_key, 50.0)
-        atm_strike = float(round(spot_price / step) * step)
+        desired_strike = target_strike if target_strike is not None else float(round(spot_price / step) * step)
 
         # 1. Authoritative resolution via Upstox API client if available
         if self.upstox_client:
@@ -312,20 +314,23 @@ class HistoricalOptionsDataLoader:
                     spot_price=spot_price,
                     option_type=opt_type,
                     strike_interval=strike_interval,
+                    target_expiry=target_expiry,
+                    target_strike=desired_strike,
                 )
                 if resolved_info and resolved_info.get("instrument_key"):
                     inst_key = resolved_info["instrument_key"]
                     exp_str = resolved_info.get("expiry_date") or resolved_info.get("expiry", "")
+                    resolved_strike = float(resolved_info.get("strike", desired_strike))
                     
                     # If already in memory:
                     if inst_key in self._contracts_data and len(self._contracts_data[inst_key]) > 0:
-                        return inst_key, exp_str, atm_strike, opt_type
+                        return inst_key, exp_str, resolved_strike, opt_type
 
                     # Otherwise fetch from Upstox and load into memory:
                     ok, err, data = self.upstox_client.fetch_and_cache_contract(
                         underlying=und_key,
                         expiry=exp_str,
-                        strike=atm_strike,
+                        strike=resolved_strike,
                         option_type=opt_type,
                         from_date=target_date.isoformat(),
                         to_date=exp_str,
@@ -336,12 +341,12 @@ class HistoricalOptionsDataLoader:
                         self.load_contract_candles(
                             underlying=und_key,
                             expiry=exp_str,
-                            strike=atm_strike,
+                            strike=resolved_strike,
                             option_type=opt_type,
                             instrument_key=inst_key,
                             candles=data["candles"],
                         )
-                        return inst_key, exp_str, atm_strike, opt_type
+                        return inst_key, exp_str, resolved_strike, opt_type
             except Exception as e:
                 logger.warning("Could not authoritatively resolve option contract via Upstox: %s", e)
 
@@ -350,13 +355,13 @@ class HistoricalOptionsDataLoader:
         target_date_str = target_date.isoformat()
         matching_entries = [
             k for k in self._lookup_index.keys()
-            if k[0] == und_key and k[1] >= target_date_str and abs(k[2] - atm_strike) < 0.01 and k[3] == opt_type
+            if k[0] == und_key and (k[1] == target_expiry if target_expiry else k[1] >= target_date_str) and abs(k[2] - desired_strike) < 0.01 and k[3] == opt_type
         ]
         if matching_entries:
             matching_entries.sort(key=lambda x: x[1])  # Nearest expiry
             best_tuple = matching_entries[0]
             contract_key = self._lookup_index[best_tuple]
-            return contract_key, best_tuple[1], atm_strike, opt_type
+            return contract_key, best_tuple[1], desired_strike, opt_type
 
         return None
 

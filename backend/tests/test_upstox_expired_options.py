@@ -203,6 +203,106 @@ class TestUpstoxExpiredOptions(unittest.TestCase):
         self.assertNotEqual(trade["entry_price"], 24505.0)
         self.assertEqual(trade["symbol"], "NSE_FO|NIFTY2462724500CE")
 
+    def test_authoritative_contract_resolution_workflow_exact_match(self):
+        """Workflow: Match strike, CE/PE, expiry exactly, and use Upstox expired instrument key."""
+        client = UpstoxExpiredOptionsClient(access_token="test_token_123456789012345")
+        mock_contracts_response = {
+            "status": "success",
+            "data": [
+                {
+                    "trading_symbol": "NIFTY24JAN21700PE",
+                    "strike_price": 21700.0,
+                    "instrument_type": "PE",
+                    "expiry": "2024-01-18",
+                    "expired_instrument_key": "NSE_FO|52420|18-01-2024",
+                },
+                {
+                    "trading_symbol": "NIFTY24JAN21750PE",
+                    "strike_price": 21750.0,
+                    "instrument_type": "PE",
+                    "expiry": "2024-01-18",
+                    "expired_instrument_key": "NSE_FO|52422|18-01-2024",
+                },
+                {
+                    "trading_symbol": "NIFTY24JAN21750CE",
+                    "strike_price": 21750.0,
+                    "instrument_type": "CE",
+                    "expiry": "2024-01-18",
+                    "expired_instrument_key": "NSE_FO|52421|18-01-2024",
+                },
+            ]
+        }
+
+        with patch.object(client, "_get", return_value=mock_contracts_response):
+            contracts = client.get_option_contracts("NIFTY50", "2024-01-18")
+            self.assertEqual(len(contracts), 3)
+
+            # Match 21750 PE exactly
+            resolved = client.resolve_option_contract(
+                underlying="NIFTY50",
+                target_date=date(2024, 1, 15),
+                spot_price=21748.0,
+                option_type="PE",
+                target_expiry="2024-01-18",
+                target_strike=21750.0,
+            )
+            self.assertIsNotNone(resolved)
+            self.assertEqual(resolved["strike"], 21750.0)
+            self.assertEqual(resolved["option_type"], "PE")
+            self.assertEqual(resolved["expiry"], "2024-01-18")
+            # Strict rule 8: Use returned expired_instrument_key directly
+            self.assertEqual(resolved["instrument_key"], "NSE_FO|52422|18-01-2024")
+
+    def test_authoritative_contract_resolution_data_unavailable_when_absent(self):
+        """When requested contract is absent, return DATA_UNAVAILABLE without fabricating a contract."""
+        client = UpstoxExpiredOptionsClient(access_token="test_token_123456789012345")
+        mock_contracts_response = {
+            "status": "success",
+            "data": [
+                {
+                    "trading_symbol": "NIFTY24JAN21700PE",
+                    "strike_price": 21700.0,
+                    "instrument_type": "PE",
+                    "expiry": "2024-01-18",
+                    "expired_instrument_key": "NSE_FO|52420|18-01-2024",
+                },
+                {
+                    "trading_symbol": "NIFTY24JAN21800PE",
+                    "strike_price": 21800.0,
+                    "instrument_type": "PE",
+                    "expiry": "2024-01-18",
+                    "expired_instrument_key": "NSE_FO|52424|18-01-2024",
+                },
+            ]
+        }
+
+        with patch.object(client, "_get", return_value=mock_contracts_response):
+            # 21750 PE is NOT in the response
+            resolved = client.resolve_option_contract(
+                underlying="NIFTY50",
+                target_date=date(2024, 1, 15),
+                spot_price=21750.0,
+                option_type="PE",
+                target_expiry="2024-01-18",
+                target_strike=21750.0,
+            )
+            # Rule 9: Never fabricate a contract if absent
+            self.assertIsNone(resolved)
+
+            # fetch_and_cache_contract returns DATA_UNAVAILABLE with available summary
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                client.cache = OptionsDataCache(cache_dir=tmp_dir)
+                ok, err, data = client.fetch_and_cache_contract(
+                    underlying="NIFTY50",
+                    expiry="2024-01-18",
+                    strike=21750.0,
+                    option_type="PE",
+                )
+                self.assertFalse(ok)
+                self.assertIsNone(data)
+                self.assertIn("DATA_UNAVAILABLE", err)
+                self.assertIn("21700.0", err) # mentions available strikes for diagnosis
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,7 +46,16 @@ from scripts.download_historical_options import (
 )
 
 
-def run_e2e_single_contract_test():
+def run_e2e_single_contract_test(
+    explicit_token: Optional[str] = None,
+    underlying: str = "NIFTY50",
+    expiry: str = "2024-01-18",
+    strike: float = 21750.0,
+    option_type: str = "PE",
+    from_date: str = "2024-01-17",
+    to_date: str = "2024-01-18",
+    interval: str = "5minute",
+):
     print("=" * 80)
     print("CONTROLLED END-TO-END HISTORICAL OPTION API TEST (SINGLE CONTRACT)")
     print("=" * 80)
@@ -54,7 +63,7 @@ def run_e2e_single_contract_test():
     # ---------------------------------------------------------
     # 1. Resolved Token Fingerprint
     # ---------------------------------------------------------
-    token, source = resolve_upstox_token_with_source()
+    token, source = resolve_upstox_token_with_source(explicit_token=explicit_token)
     token_fp = token_fingerprint(token)
     meta = get_token_metadata(token)
     print(f"\n[1] Token Resolution & Properties:")
@@ -91,15 +100,16 @@ def run_e2e_single_contract_test():
     # ---------------------------------------------------------
     # Contract Selection from Discovered Requirements
     # ---------------------------------------------------------
-    # Choose a known NIFTY50 contract requirement from the backtest signals
-    chosen_underlying = "NIFTY50"
-    chosen_expiry = "2024-01-18"
-    chosen_strike = 21750.0
-    chosen_opt_type = "PE"
-    chosen_from_date = "2024-01-17"
-    chosen_to_date = "2024-01-18"
-    chosen_interval = "5minute"
-    expected_cache_fn = "NIFTY50_20240118_21750_PE_5minute_20240117_20240118.json"
+    chosen_underlying = underlying.upper()
+    chosen_expiry = expiry
+    chosen_strike = float(strike)
+    chosen_opt_type = option_type.upper()
+    chosen_from_date = from_date
+    chosen_to_date = to_date
+    chosen_interval = interval
+    expected_cache_fn = OptionsDataCache.get_cache_filename(
+        chosen_underlying, chosen_expiry, chosen_strike, chosen_opt_type, chosen_interval, chosen_from_date, chosen_to_date
+    )
 
     print(f"\nTarget Contract Selected:")
     print(f"    - Underlying: {chosen_underlying}")
@@ -162,7 +172,9 @@ def run_e2e_single_contract_test():
     # 5. Historical Option Contract Resolution
     # ---------------------------------------------------------
     print(f"\n[5] Historical Option Contract Resolution:")
-    contract_info = None
+    target_contract = None
+    selected_contract = None
+    target_21750_pe_exists = False
     contracts_list = []
     contract_err = None
     try:
@@ -170,12 +182,42 @@ def run_e2e_single_contract_test():
         print(f"    - Contract Discovery Status: SUCCESS (Found {len(contracts_list)} contracts for {chosen_expiry})")
         for c in contracts_list:
             if abs(c["strike"] - chosen_strike) < 0.01 and c["option_type"] == chosen_opt_type:
-                contract_info = c
+                target_contract = c
                 break
-        if contract_info:
-            print(f"    - Resolved Contract: {contract_info}")
+        
+        if target_contract:
+            target_21750_pe_exists = True
+            selected_contract = target_contract
+            print(f"    - Target Contract 21750 PE exists in Upstox: YES")
+            print(f"    - Authoritative Instrument Key: {target_contract['instrument_key']}")
         else:
-            print(f"    - Contract {chosen_strike} {chosen_opt_type} not found among {len(contracts_list)} contracts")
+            target_21750_pe_exists = False
+            pe_strikes = sorted(list({c["strike"] for c in contracts_list if c.get("option_type") == "PE"}))
+            ce_strikes = sorted(list({c["strike"] for c in contracts_list if c.get("option_type") == "CE"}))
+            print(f"    - Target Contract 21750 PE exists in Upstox: NO (DATA_UNAVAILABLE)")
+            print(f"    - Total available PE strikes on {chosen_expiry}: {len(pe_strikes)}")
+            if pe_strikes:
+                print(f"    - PE strike range: {pe_strikes[0]:.1f} to {pe_strikes[-1]:.1f}")
+                nearest_pe = min(pe_strikes, key=lambda s: abs(s - chosen_strike))
+                print(f"    - Nearest available PE strike to 21750: {nearest_pe:.1f}")
+            print(f"    - Note: Contract absence in exchange catalogue is NOT an authentication failure.")
+
+            # Automatically select a known contract from actual Upstox response for same underlying/expiry
+            matching_type = [c for c in contracts_list if c.get("option_type") == chosen_opt_type]
+            if matching_type:
+                selected_contract = min(matching_type, key=lambda c: abs(c["strike"] - chosen_strike))
+            elif contracts_list:
+                selected_contract = contracts_list[0]
+            
+            if selected_contract:
+                print(f"\n    - Controlled E2E Test Contract Selected from actual response:")
+                print(f"      * Underlying: {selected_contract['underlying']}")
+                print(f"      * Expiry: {selected_contract['expiry']}")
+                print(f"      * Strike: {selected_contract['strike']:.1f}")
+                print(f"      * Option Type: {selected_contract['option_type']}")
+                print(f"      * Symbol: {selected_contract.get('trading_symbol')}")
+                print(f"      * Expired Instrument Key: {selected_contract['instrument_key']}")
+
     except UpstoxExpiredAPIError as e:
         contract_err = e
         print(f"    - Contract Discovery Failed: HTTP {e.status_code} ErrorCode={e.error_code} Detail={e.message}")
@@ -187,25 +229,43 @@ def run_e2e_single_contract_test():
     # 6. Historical Candle API Request & 7-10 Pipeline Execution
     # ---------------------------------------------------------
     print(f"\n[6-10] Executing fetch_and_cache_contract via UpstoxExpiredOptionsClient:")
-    success, err_msg, cached_data = client.fetch_and_cache_contract(
-        underlying=chosen_underlying,
-        expiry=chosen_expiry,
-        strike=chosen_strike,
-        option_type=chosen_opt_type,
-        interval=chosen_interval,
-        from_date=chosen_from_date,
-        to_date=chosen_to_date,
-        spot_price_ref=chosen_strike,
-    )
+    success = False
+    err_msg = None
+    cached_data = None
+    cache_path = ""
+    cache_exists = False
 
-    cache_path = os.path.join("real_data/options_cache", expected_cache_fn)
-    cache_exists = os.path.exists(cache_path)
+    if selected_contract:
+        sel_und = selected_contract["underlying"]
+        sel_exp = selected_contract["expiry"]
+        sel_stk = selected_contract["strike"]
+        sel_type = selected_contract["option_type"]
+        test_cache_fn = OptionsDataCache.get_cache_filename(
+            sel_und, sel_exp, sel_stk, sel_type, chosen_interval, chosen_from_date, chosen_to_date
+        )
+        cache_path = os.path.join("real_data/options_cache", test_cache_fn)
+
+        success, err_msg, cached_data = client.fetch_and_cache_contract(
+            underlying=sel_und,
+            expiry=sel_exp,
+            strike=sel_stk,
+            option_type=sel_type,
+            interval=chosen_interval,
+            from_date=chosen_from_date,
+            to_date=chosen_to_date,
+            spot_price_ref=sel_stk,
+            contract_info_ref=selected_contract,
+        )
+        cache_exists = os.path.exists(cache_path)
+    else:
+        err_msg = "No authoritative contract available in Upstox catalogue to test"
 
     print(f"\n[Results]")
     print(f"    - Fetch & Cache Success: {success}")
     print(f"    - Error (if any): {err_msg}")
     print(f"    - Cache File Exists ({cache_path}): {cache_exists}")
 
+    candles = []
     if success and cached_data:
         candles = cached_data.get("candles", [])
         print(f"\n[7] Candle Data Validation:")
@@ -234,7 +294,7 @@ def run_e2e_single_contract_test():
             # Validator check
             print(f"\n[9] OptionsDataValidator Acceptance:")
             validator = OptionsDataValidator()
-            val_res = validator.validate(cached_data, spot_price_ref=chosen_strike)
+            val_res = validator.validate(cached_data, spot_price_ref=selected_contract["strike"])
             print(f"    - Validator Result: Valid={val_res.is_valid}, Anomalies={len(val_res.anomalies)}")
             if val_res.anomalies:
                 for a in val_res.anomalies:
@@ -262,7 +322,10 @@ def run_e2e_single_contract_test():
         "token_fingerprint": token_fp,
         "client_fingerprint": client_fp,
         "auth_header_valid": auth_header == f"Bearer {client.access_token}",
+        "target_21750_pe_exists": target_21750_pe_exists,
+        "selected_contract": selected_contract,
         "success": success,
+        "candles_count": len(candles) if candles else 0,
         "error_message": err_msg,
         "cache_exists": cache_exists,
         "expiry_error": str(expiry_err) if expiry_err else None,
@@ -272,4 +335,25 @@ def run_e2e_single_contract_test():
 
 
 if __name__ == "__main__":
-    run_e2e_single_contract_test()
+    import argparse
+    parser = argparse.ArgumentParser(description="Controlled E2E API Test for ONE Historical Option Contract")
+    parser.add_argument("--token", type=str, default=None, help="Explicit Upstox access token")
+    parser.add_argument("--underlying", type=str, default="NIFTY50", help="Underlying symbol (default: NIFTY50)")
+    parser.add_argument("--expiry", type=str, default="2024-01-18", help="Expiry date (default: 2024-01-18)")
+    parser.add_argument("--strike", type=float, default=21750.0, help="Target strike price (default: 21750.0)")
+    parser.add_argument("--type", type=str, default="PE", choices=["CE", "PE"], help="Option type (default: PE)")
+    parser.add_argument("--from-date", type=str, default="2024-01-17", help="From date (default: 2024-01-17)")
+    parser.add_argument("--to-date", type=str, default="2024-01-18", help="To date (default: 2024-01-18)")
+    parser.add_argument("--interval", type=str, default="5minute", help="Interval (default: 5minute)")
+    args = parser.parse_args()
+
+    run_e2e_single_contract_test(
+        explicit_token=args.token,
+        underlying=args.underlying,
+        expiry=args.expiry,
+        strike=args.strike,
+        option_type=args.type,
+        from_date=args.from_date,
+        to_date=args.to_date,
+        interval=args.interval,
+    )

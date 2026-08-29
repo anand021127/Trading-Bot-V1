@@ -19,7 +19,8 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.backtest.historical_contract_resolver import (
@@ -211,6 +212,119 @@ class OptionsDataCache:
             "candles": candles,
         }
         return save_dataset_atomic(path, payload, min_records=1 if candles else 0)
+
+
+def normalize_contract_item(
+    c: Dict[str, Any],
+    underlying_key: str,
+    und_key: str,
+    default_expiry: str,
+) -> Dict[str, Any]:
+    """Normalize a raw contract dict returned from Upstox Expired Option Contracts API."""
+    tsym = str(c.get("trading_symbol") or c.get("symbol") or "").strip()
+
+    # 1. Strike extraction (numeric or string, with fallback to trading_symbol regex)
+    strike_val = 0.0
+    for k in ("strike_price", "strike", "strikePrice", "strike_rate"):
+        val = c.get(k)
+        if val is not None and val != "":
+            try:
+                strike_val = float(val)
+                if strike_val > 500000.0:
+                    strike_val = strike_val / 100.0
+                break
+            except (ValueError, TypeError):
+                pass
+
+    # 2. Option type extraction (checking option_type, instrument_type, and trading_symbol)
+    opt_type = ""
+    for k in ("option_type", "optionType"):
+        val = c.get(k)
+        if val:
+            s = str(val).strip().upper()
+            if s in ("CE", "CALL", "C"):
+                opt_type = "CE"
+                break
+            elif s in ("PE", "PUT", "P"):
+                opt_type = "PE"
+                break
+
+    if not opt_type:
+        inst_t = str(c.get("instrument_type") or c.get("instrumentType") or "").strip().upper()
+        if inst_t in ("CE", "CALL", "C"):
+            opt_type = "CE"
+        elif inst_t in ("PE", "PUT", "P"):
+            opt_type = "PE"
+
+    # Regex parse from trading symbol if either strike or option_type is missing
+    if (not opt_type or strike_val <= 0.0) and tsym:
+        clean_sym = tsym.upper().split(".")[0].strip()
+        m = re.search(r'(\d+(?:\.\d+)?)\s*[-_]?\s*(CE|PE|CALL|PUT)', clean_sym)
+        if m:
+            if strike_val <= 0.0:
+                try:
+                    strike_val = float(m.group(1))
+                except ValueError:
+                    pass
+            if not opt_type:
+                t = m.group(2)
+                opt_type = "CE" if t in ("CE", "CALL") else "PE"
+
+    if not opt_type and tsym:
+        upper_sym = tsym.strip().upper()
+        if upper_sym.endswith("CE"):
+            opt_type = "CE"
+        elif upper_sym.endswith("PE"):
+            opt_type = "PE"
+
+    # 3. Instrument Key extraction:
+    # Strictly prefer expired_instrument_key returned by Upstox.
+    # Never construct the expired instrument_key ourselves if Upstox has returned one.
+    upstox_expired_key = str(c.get("expired_instrument_key") or c.get("expiredInstrumentKey") or "").strip()
+    raw_k = str(c.get("instrument_key") or c.get("instrumentKey") or "").strip()
+
+    if upstox_expired_key:
+        inst_k = upstox_expired_key
+    elif raw_k:
+        if raw_k.count("|") >= 2:
+            inst_k = raw_k
+        elif raw_k.count("|") == 1 and default_expiry:
+            exp_p = default_expiry.split("-")
+            if len(exp_p) == 3 and len(exp_p[0]) == 4:
+                dd_mm_yyyy = f"{exp_p[2]}-{exp_p[1]}-{exp_p[0]}"
+                inst_k = f"{raw_k}|{dd_mm_yyyy}"
+            else:
+                inst_k = raw_k
+        else:
+            inst_k = raw_k
+    else:
+        inst_k = ""
+
+    # 4. Expiry extraction
+    exp_str = str(c.get("expiry_date") or c.get("expiryDate") or c.get("expiry") or default_expiry or "").strip()
+    if exp_str.isdigit() and len(exp_str) >= 10:
+        try:
+            ts_sec = int(exp_str) / 1000.0 if len(exp_str) >= 13 else int(exp_str)
+            exp_str = datetime.fromtimestamp(ts_sec).date().isoformat()
+        except Exception:
+            exp_str = default_expiry
+
+    lot = int(c.get("lot_size") or c.get("lotSize") or INDEX_STRIKE_INTERVALS.get(und_key, 25))
+
+    return {
+        "instrument_key": inst_k,
+        "expired_instrument_key": inst_k,
+        "trading_symbol": tsym,
+        "strike": strike_val,
+        "strike_price": strike_val,
+        "option_type": opt_type,
+        "expiry": exp_str,
+        "expiry_date": exp_str,
+        "lot_size": lot,
+        "underlying": und_key,
+        "underlying_key": underlying_key,
+        "raw_response": c,
+    }
 
 
 class UpstoxExpiredOptionsClient:
@@ -411,45 +525,37 @@ class UpstoxExpiredOptionsClient:
         }
         
         try:
-            data = self._get("/expired-instruments/option/contracts", params=params)
+            data = self._get("/expired-instruments/option/contract", params=params)
         except UpstoxExpiredAPIError as e:
             if e.status_code == 404:
-                # Fallback to singular endpoint if necessary
-                data = self._get("/expired-instruments/option/contract", params=params)
+                try:
+                    data = self._get("/expired-instruments/option/contracts", params=params)
+                except UpstoxExpiredAPIError as e2:
+                    if e2.status_code == 404:
+                        data = self._get("/option/contract", params=params)
+                    else:
+                        raise
             else:
                 raise
 
-        raw_contracts = data.get("data", [])
-        if not isinstance(raw_contracts, list):
-            raw_contracts = []
+        raw_contracts = []
+        if isinstance(data, dict):
+            inner = data.get("data")
+            if isinstance(inner, list):
+                raw_contracts = inner
+            elif isinstance(inner, dict):
+                raw_contracts = inner.get("contracts") or inner.get("options") or inner.get("data") or []
+            elif "contracts" in data and isinstance(data["contracts"], list):
+                raw_contracts = data["contracts"]
+        elif isinstance(data, list):
+            raw_contracts = data
 
         normalized_contracts: List[Dict[str, Any]] = []
         for c in raw_contracts:
             if not isinstance(c, dict):
                 continue
-            strike_val = float(c.get("strike_price", 0.0) or c.get("strike", 0.0))
-            opt_type = str(c.get("option_type") or c.get("instrument_type") or "").upper()
-            inst_k = str(c.get("expired_instrument_key") or c.get("instrument_key") or "")
-            if inst_k and inst_k.count("|") == 1 and expiry_date:
-                exp_p = expiry_date.split("-")
-                if len(exp_p) == 3 and len(exp_p[0]) == 4:
-                    dd_mm_yyyy = f"{exp_p[2]}-{exp_p[1]}-{exp_p[0]}"
-                    inst_k = f"{inst_k}|{dd_mm_yyyy}"
-            tsym = str(c.get("trading_symbol") or c.get("symbol") or "")
-            lot = int(c.get("lot_size") or INDEX_STRIKE_INTERVALS.get(und_key, 25))
-            
-            normalized_contracts.append({
-                "instrument_key": inst_k,
-                "trading_symbol": tsym,
-                "strike": strike_val,
-                "strike_price": strike_val,
-                "option_type": opt_type,
-                "expiry": expiry_date,
-                "expiry_date": expiry_date,
-                "lot_size": lot,
-                "underlying": und_key,
-                "underlying_key": inst_key,
-            })
+            item = normalize_contract_item(c, inst_key, und_key, expiry_date)
+            normalized_contracts.append(item)
 
         if normalized_contracts:
             self._contracts_cache[cache_key] = normalized_contracts
@@ -458,67 +564,90 @@ class UpstoxExpiredOptionsClient:
     def resolve_option_contract(
         self,
         underlying: str,
-        target_date: date,
-        spot_price: float,
-        option_type: str,
+        target_date: Optional[date] = None,
+        spot_price: Optional[float] = None,
+        option_type: str = "CE",
         strike_interval: Optional[float] = None,
+        target_expiry: Optional[str] = None,
+        target_strike: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """Authoritatively resolve the real expired option contract from Upstox.
         
         Flow:
-        1. Query Upstox expired expiries for underlying.
-        2. Select nearest historical expiry >= target_date.
-        3. Calculate nearest round ATM strike.
-        4. Query Upstox expired option contracts for (underlying, expiry).
-        5. Find exact matching contract by strike and option_type.
+        1. Determine target expiry (explicit target_expiry or nearest from get_expiries).
+        2. Determine target strike (explicit target_strike or nearest round ATM strike).
+        3. Query Upstox expired option contracts for (underlying, expiry).
+        4. Find exact matching contract by strike and option_type.
+        5. Return authoritative contract with real instrument_key from Upstox.
         
         Returns:
             Authoritative contract dict containing real instrument_key, trading_symbol, etc.
             or None (DATA_UNAVAILABLE) if not resolvable.
         """
         und_key = underlying.upper()
-        step = strike_interval or INDEX_STRIKE_INTERVALS.get(und_key, 50.0)
-        atm_strike = float(round(spot_price / step) * step)
         opt_type = option_type.upper()
 
-        try:
-            expiries = self.get_expiries(und_key)
-        except Exception as e:
-            logger.warning("Could not fetch expired expiries for %s: %s", und_key, e)
-            expiries = []
+        # 1. Determine target expiry
+        nearest_expiry = target_expiry
+        if not nearest_expiry:
+            if target_date is None:
+                logger.warning("resolve_option_contract requires target_date or target_expiry")
+                return None
+            try:
+                expiries = self.get_expiries(und_key)
+            except Exception as e:
+                logger.warning("Could not fetch expired expiries for %s: %s", und_key, e)
+                expiries = []
 
-        target_date_str = target_date.isoformat()
-        # Enforce maximum proximity threshold: nearest weekly expiry must be within 10 calendar days
-        # This prevents distant expiries (e.g. Oct 2024 for a June 2024 trade) from being paired incorrectly
-        valid_expiries = [
-            e for e in expiries
-            if target_date_str <= e <= (target_date + timedelta(days=10)).isoformat()
-        ]
-        
-        if not valid_expiries:
-            logger.warning(
-                "No historical expiry within 10 days of %s found for %s in Upstox (available range: %s to %s)",
-                target_date_str, und_key, expiries[0] if expiries else "none", expiries[-1] if expiries else "none"
-            )
+            target_date_str = target_date.isoformat()
+            valid_expiries = [
+                e for e in expiries
+                if target_date_str <= e <= (target_date + timedelta(days=10)).isoformat()
+            ]
+            if not valid_expiries:
+                logger.warning(
+                    "No historical expiry within 10 days of %s found for %s in Upstox (available range: %s to %s)",
+                    target_date_str, und_key, expiries[0] if expiries else "none", expiries[-1] if expiries else "none"
+                )
+                return None
+            nearest_expiry = valid_expiries[0]
+
+        # 2. Determine target strike
+        if target_strike is not None:
+            desired_strike = float(target_strike)
+        elif spot_price is not None:
+            step = strike_interval or INDEX_STRIKE_INTERVALS.get(und_key, 50.0)
+            desired_strike = float(round(spot_price / step) * step)
+        else:
+            logger.warning("resolve_option_contract requires target_strike or spot_price")
             return None
 
-        nearest_expiry = valid_expiries[0]
-
+        # 3. Query contracts
         try:
             contracts = self.get_option_contracts(und_key, nearest_expiry)
         except Exception as e:
             logger.warning("Could not fetch expired contracts for %s on %s: %s", und_key, nearest_expiry, e)
             return None
 
-        # Exact match on strike and option_type
+        # 4. Exact match on strike and option_type
         for c in contracts:
-            if abs(c["strike"] - atm_strike) < 0.01 and c["option_type"] == opt_type:
+            if abs(c["strike"] - desired_strike) < 0.01 and c["option_type"] == opt_type:
                 if c.get("instrument_key"):
                     return c
 
+        # 5. Not found - log diagnostic information
+        matching_type_strikes = sorted(list({c["strike"] for c in contracts if c["option_type"] == opt_type}))
+        if matching_type_strikes:
+            nearest_avail = min(matching_type_strikes, key=lambda s: abs(s - desired_strike))
+            diag = f"Available {opt_type} strikes: {matching_type_strikes[0]:.1f}..{matching_type_strikes[-1]:.1f} (count={len(matching_type_strikes)}, nearest={nearest_avail:.1f})"
+        elif contracts:
+            diag = f"No {opt_type} contracts found on {nearest_expiry} (total other contracts: {len(contracts)})"
+        else:
+            diag = f"0 contracts returned by Upstox for {und_key} on {nearest_expiry}"
+
         logger.warning(
-            "Contract not found in Upstox for %s %s Strike %.1f %s",
-            und_key, nearest_expiry, atm_strike, opt_type,
+            "Contract not found in Upstox for %s %s Strike %.1f %s. %s",
+            und_key, nearest_expiry, desired_strike, opt_type, diag,
         )
         return None
 
@@ -670,18 +799,34 @@ class UpstoxExpiredOptionsClient:
 
         # 2. Authoritatively resolve the real contract if not provided
         c_info = contract_info_ref
+        available_summary = ""
         if c_info is None:
             try:
                 contracts = self.get_option_contracts(underlying, expiry)
-                for c in contracts:
-                    if abs(c["strike"] - strike) < 0.01 and c["option_type"] == option_type.upper():
+                matching_type = [c for c in contracts if c.get("option_type") == option_type.upper()]
+                for c in matching_type:
+                    if abs(c["strike"] - strike) < 0.01:
                         c_info = c
                         break
+
+                if not c_info:
+                    avail_strikes = sorted(list({c["strike"] for c in matching_type}))
+                    if avail_strikes:
+                        nearest = min(avail_strikes, key=lambda s: abs(s - strike))
+                        available_summary = (
+                            f" (Available {option_type.upper()} strikes on {expiry}: "
+                            f"{avail_strikes[0]:.1f}..{avail_strikes[-1]:.1f} [count={len(avail_strikes)}], "
+                            f"nearest={nearest:.1f})"
+                        )
+                    elif contracts:
+                        available_summary = f" (No {option_type.upper()} contracts on {expiry}. Total other contracts: {len(contracts)})"
+                    else:
+                        available_summary = f" (0 contracts returned by Upstox for {underlying} on {expiry})"
             except Exception as e:
                 return False, f"Could not query Upstox expired option contracts: {e}", None
 
         if not c_info or not c_info.get("instrument_key"):
-            return False, f"DATA_UNAVAILABLE — Authoritative contract not found in Upstox for {underlying} {expiry} {strike} {option_type}", None
+            return False, f"DATA_UNAVAILABLE — Authoritative contract not found in Upstox for {underlying} {expiry} {strike:.1f} {option_type}{available_summary}", None
 
         instrument_key = c_info["instrument_key"]
         trading_symbol = c_info.get("trading_symbol", "")
@@ -732,10 +877,4 @@ class UpstoxExpiredOptionsClient:
             "contract": full_contract_info,
             "candles": clean_candles,
         }
-
-    def test_access(self) -> Dict[str, Any]:
-        """Comprehensive self-test for API connectivity, token validity, and Expired Instruments entitlement."""
-        from backend.broker.token_resolver import validate_token_live, resolve_upstox_token
-        token = self.access_token or resolve_upstox_token(dotenv_path=self.dotenv_path)
-        return validate_token_live(token, dotenv_path=self.dotenv_path)
 

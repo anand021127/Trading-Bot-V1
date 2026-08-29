@@ -37,6 +37,7 @@ import logging
 import os
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -94,6 +95,12 @@ class ContractRequirement:
     interval: str = "5minute"
     signal_timestamps: List[str] = field(default_factory=list)
     spot_prices: List[float] = field(default_factory=list)
+    instrument_key: Optional[str] = None
+    trading_symbol: Optional[str] = None
+    lot_size: Optional[int] = None
+    status: str = "PENDING"
+    unavailability_reason: Optional[str] = None
+    contract_info: Optional[Dict[str, Any]] = None
 
     @property
     def key(self) -> str:
@@ -334,9 +341,68 @@ class HistoricalOptionsIngestionPipeline:
             from_date=req.from_date,
             to_date=req.to_date,
             spot_price_ref=ref_spot,
+            contract_info_ref=req.contract_info,
         )
 
         return success, err, data
+
+    def resolve_requirements_against_catalogue(
+        self,
+        requirements: List[ContractRequirement],
+    ) -> Tuple[List[ContractRequirement], List[ContractRequirement]]:
+        """Resolve required contracts against Upstox's authoritative expired-contract catalogue.
+        
+        Returns:
+            (available_reqs, unavailable_reqs)
+        """
+        available: List[ContractRequirement] = []
+        unavailable: List[ContractRequirement] = []
+        
+        # Group by (underlying, expiry) to query catalogue once per expiry
+        grouped: Dict[Tuple[str, str], List[ContractRequirement]] = defaultdict(list)
+        for req in requirements:
+            grouped[(req.underlying.upper(), req.expiry)].append(req)
+
+        for (und, exp), req_list in grouped.items():
+            contracts: List[Dict[str, Any]] = []
+            try:
+                contracts = self.client.get_option_contracts(und, exp)
+            except Exception as e:
+                logger.warning("Failed to query catalogue for %s on %s: %s", und, exp, e)
+                contracts = []
+
+            for req in req_list:
+                matched = None
+                matching_type = [c for c in contracts if c.get("option_type") == req.option_type.upper()]
+                for c in matching_type:
+                    if abs(c["strike"] - req.strike) < 0.01:
+                        matched = c
+                        break
+
+                if matched and matched.get("instrument_key"):
+                    req.instrument_key = matched["instrument_key"]
+                    req.trading_symbol = matched.get("trading_symbol")
+                    req.lot_size = matched.get("lot_size")
+                    req.status = "AVAILABLE"
+                    req.contract_info = matched
+                    available.append(req)
+                else:
+                    req.status = "DATA_UNAVAILABLE"
+                    avail_strikes = sorted(list({c["strike"] for c in matching_type}))
+                    if avail_strikes:
+                        nearest = min(avail_strikes, key=lambda s: abs(s - req.strike))
+                        reason = (
+                            f"Authoritative contract not found in Upstox for {req.underlying} {req.expiry} {req.strike:.1f} {req.option_type}. "
+                            f"(Available {req.option_type.upper()} strikes on {req.expiry}: {avail_strikes[0]:.1f}..{avail_strikes[-1]:.1f} [count={len(avail_strikes)}], nearest={nearest:.1f})"
+                        )
+                    elif contracts:
+                        reason = f"No {req.option_type.upper()} contracts on {req.expiry} in Upstox. (Total other contracts: {len(contracts)})"
+                    else:
+                        reason = f"0 expired contracts returned by Upstox for {req.underlying} on {req.expiry}"
+                    req.unavailability_reason = reason
+                    unavailable.append(req)
+
+        return available, unavailable
 
     def run_ingestion(
         self,
@@ -418,12 +484,35 @@ class HistoricalOptionsIngestionPipeline:
         if limit:
             targets = targets[:limit]
 
-        logger.info("Starting ingestion of %d contracts...", len(targets))
+        # Authoritative resolution of requirements against Upstox catalogue
+        logger.info("Resolving %d required contracts against Upstox authoritative catalogue...", len(targets))
+        available_reqs, unavailable_reqs = self.resolve_requirements_against_catalogue(targets)
+        logger.info(
+            "Catalogue Resolution: %d available, %d DATA_UNAVAILABLE",
+            len(available_reqs), len(unavailable_reqs)
+        )
+
+        for unavail in unavailable_reqs:
+            summary["failed"] += 1
+            summary["error_categories"]["DATA_UNAVAILABLE"] += 1
+            summary["errors"].append({
+                "contract": unavail.key,
+                "underlying": unavail.underlying,
+                "expiry": unavail.expiry,
+                "strike": unavail.strike,
+                "option_type": unavail.option_type,
+                "from_date": unavail.from_date,
+                "to_date": unavail.to_date,
+                "error": f"DATA_UNAVAILABLE — {unavail.unavailability_reason}",
+            })
+            logger.warning("  -> DATA_UNAVAILABLE: %s (%s)", unavail.key, unavail.unavailability_reason)
+
+        logger.info("Starting ingestion of %d available contracts...", len(available_reqs))
         
-        for idx, req in enumerate(targets, 1):
+        for idx, req in enumerate(available_reqs, 1):
             logger.info(
                 "[%d/%d] Ingesting %s %s Strike %.1f %s (%s to %s)...",
-                idx, len(targets), req.underlying, req.expiry, req.strike, req.option_type, req.from_date, req.to_date,
+                idx, len(available_reqs), req.underlying, req.expiry, req.strike, req.option_type, req.from_date, req.to_date,
             )
 
             success, err, data = self.download_requirement(req, force=force)
