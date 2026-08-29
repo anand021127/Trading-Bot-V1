@@ -21,6 +21,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, date
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
