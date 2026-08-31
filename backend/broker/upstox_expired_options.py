@@ -503,7 +503,15 @@ class UpstoxExpiredOptionsClient:
         try:
             data = self._get("/expired-instruments/expiries", params={"instrument_key": inst_key})
             expiries = data.get("data", [])
-            clean_expiries = sorted([str(e) for e in expiries])
+            clean_expiries = []
+            for e in expiries:
+                if isinstance(e, dict):
+                    val = e.get("expiry") or e.get("expiry_date") or e.get("date")
+                    if val:
+                        clean_expiries.append(str(val))
+                elif isinstance(e, str):
+                    clean_expiries.append(e)
+            clean_expiries = sorted(list(set(clean_expiries)))
             self._expiries_cache[und_key] = clean_expiries
             return clean_expiries
         except Exception as e:
