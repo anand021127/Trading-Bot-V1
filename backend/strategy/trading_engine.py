@@ -39,6 +39,7 @@ from backend.orders.order_models import OrderRequest, OrderStatus
 from backend.risk.position_sizer import PositionSizer
 from backend.risk.risk_manager import RiskManager
 from backend.strategy.exit_manager import ExitManager, TrailingStopManager
+from backend.strategy.session_manager import session_manager
 from backend.strategy.strategy_engine import MultiStrategyEngine
 
 logger = logging.getLogger(__name__)
@@ -450,25 +451,15 @@ class TradingEngine:
 
     @staticmethod
     def _is_market_open() -> bool:
-        now = datetime.now(IST)
-        if now.weekday() >= 5:
-            return False
-        open_t  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
-        close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        return open_t <= now <= close_t
+        return session_manager.is_market_open()
 
     @staticmethod
     def _is_entry_window() -> bool:
-        now = datetime.now(IST)
-        entry_start = now.replace(hour=9,  minute=30, second=0, microsecond=0)
-        entry_end   = now.replace(hour=12, minute=30, second=0, microsecond=0)
-        return entry_start <= now <= entry_end
+        return session_manager.is_valid_entry_time()
 
     @staticmethod
     def _is_exit_all_time() -> bool:
-        now = datetime.now(IST)
-        exit_t = now.replace(hour=14, minute=45, second=0, microsecond=0)
-        return now >= exit_t
+        return session_manager.is_mandatory_square_off()
 
     # ─── ORB calculation ──────────────────────────────────────────────────────
 
@@ -998,11 +989,11 @@ class TradingEngine:
                 if self._open_positions:
                     await self._monitor_open_positions()
 
-                # Force exit all at 14:45
+                # Mandatory square-off at 15:15 IST
                 if self._is_exit_all_time() and self._open_positions:
-                    logger.info("14:45 — forcing exit of all positions")
+                    logger.info("15:15 IST mandatory square-off — forcing exit of all open positions")
                     for sym in list(self._open_positions.keys()):
-                        await self._close_position(sym, "TIME_FORCE_EXIT")
+                        await self._close_position(sym, "INTRADAY_SQUARE_OFF")
 
                 # Main entry loop
                 if self._is_entry_window() and self._is_market_open():

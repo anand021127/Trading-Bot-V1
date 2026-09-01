@@ -355,13 +355,26 @@ class HistoricalOptionsDataLoader:
         target_date_str = target_date.isoformat()
         matching_entries = [
             k for k in self._lookup_index.keys()
-            if k[0] == und_key and (k[1] == target_expiry if target_expiry else k[1] >= target_date_str) and abs(k[2] - desired_strike) < 0.01 and k[3] == opt_type
+            if k[0] == und_key and (k[1] == target_expiry if target_expiry else k[1] >= target_date_str) and k[3] == opt_type
         ]
         if matching_entries:
-            matching_entries.sort(key=lambda x: x[1])  # Nearest expiry
-            best_tuple = matching_entries[0]
-            contract_key = self._lookup_index[best_tuple]
-            return contract_key, best_tuple[1], desired_strike, opt_type
+            # 2a. First try exact strike match
+            exact_matches = [k for k in matching_entries if abs(k[2] - desired_strike) < 0.01]
+            if exact_matches:
+                exact_matches.sort(key=lambda x: x[1])  # Nearest expiry
+                best_tuple = exact_matches[0]
+                contract_key = self._lookup_index[best_tuple]
+                return contract_key, best_tuple[1], desired_strike, opt_type
+
+            # 2b. If exact strike is not preloaded, check nearest available strike within search radius (e.g. ±3 strikes)
+            max_strike_diff = step * 3.5
+            nearby_matches = [k for k in matching_entries if abs(k[2] - desired_strike) <= max_strike_diff]
+            if nearby_matches:
+                # Sort by nearest expiry first, then by closest strike distance to spot
+                nearby_matches.sort(key=lambda x: (x[1], abs(x[2] - desired_strike)))
+                best_tuple = nearby_matches[0]
+                contract_key = self._lookup_index[best_tuple]
+                return contract_key, best_tuple[1], best_tuple[2], opt_type
 
         return None
 

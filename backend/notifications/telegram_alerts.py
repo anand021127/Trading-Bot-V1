@@ -1,11 +1,17 @@
 """Telegram notifications — production grade with error handling."""
 from __future__ import annotations
 
+import json
 import logging
 import os
+import urllib.error
+import urllib.request
 from typing import Optional
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +35,19 @@ class TelegramAlerts:
             logger.debug("Telegram not configured — message skipped")
             return False
         try:
-            url  = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            resp = requests.post(
-                url,
-                json={"chat_id": self.chat_id, "text": message},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            return True
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            payload = json.dumps({"chat_id": self.chat_id, "text": message}).encode("utf-8")
+            if requests is not None:
+                resp = requests.post(
+                    url,
+                    json={"chat_id": self.chat_id, "text": message},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                return True
+            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status == 200
         except Exception as e:
             logger.warning("Telegram send failed: %s", e)
             return False

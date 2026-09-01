@@ -10,9 +10,64 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+def _parse_simple_yaml(text: str) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    stack: List[Tuple[int, Any, Optional[str]]] = [(-1, result, None)]
+    
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        stripped = line.strip()
+        
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+            
+        current_container = stack[-1][1]
+        
+        if stripped.startswith("- "):
+            val = stripped[2:].strip().strip('"').strip("'")
+            if isinstance(current_container, list):
+                current_container.append(val)
+            continue
+            
+        if ":" in stripped:
+            key, rest = stripped.split(":", 1)
+            key = key.strip()
+            rest = rest.strip()
+            
+            if not rest:
+                # Could be a dict or list coming next
+                new_dict: Dict[str, Any] = {}
+                if isinstance(current_container, dict):
+                    current_container[key] = new_dict
+                stack.append((indent, new_dict, key))
+            else:
+                if rest.lower() == "true":
+                    val_parsed: Any = True
+                elif rest.lower() == "false":
+                    val_parsed = False
+                elif rest.startswith('"') and rest.endswith('"'):
+                    val_parsed = rest[1:-1]
+                elif rest.startswith("'") and rest.endswith("'"):
+                    val_parsed = rest[1:-1]
+                else:
+                    try:
+                        val_parsed = int(rest) if "." not in rest else float(rest)
+                    except ValueError:
+                        val_parsed = rest
+                if isinstance(current_container, dict):
+                    current_container[key] = val_parsed
+    return result
 
 
 class ConfigLoader:
@@ -53,7 +108,9 @@ class ConfigLoader:
             raise FileNotFoundError(f"Settings file not found: {path}")
 
         with path.open("r", encoding="utf-8") as fh:
-            return yaml.safe_load(fh) or {}
+            if yaml is not None:
+                return yaml.safe_load(fh) or {}
+            return _parse_simple_yaml(fh.read())
 
     def load(self) -> Dict[str, object]:
         config: Dict[str, object] = {}

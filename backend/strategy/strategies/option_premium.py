@@ -51,12 +51,15 @@ from typing import Any, Dict, List, Optional
 
 from backend.indicators.atr import atr as calc_atr
 from backend.indicators.vwap import vwap as calc_vwap
+from backend.strategy.confidence_scoring import ConfidenceScorer
+from backend.strategy.session_manager import session_manager
 from backend.strategy.signal import StrategySignal, SignalType, build_condition_summary
 from backend.strategy.strategies.base import Strategy
 
 REASON_TEXT = {
     "contract_resolved": "Could not resolve a liquid ATM CE/PE contract (missing spot price, option chain, clear underlying trend, or every nearby strike failed liquidity/theta checks)",
     "not_expiry_day": "Today is this contract's expiry day — gamma risk is too high to open a new premium-buying position",
+    "session_entry_window": "Outside valid intraday entry window (09:20–14:45 IST, midday 11:30–13:00 restricted)",
     "momentum_ok": "Premium momentum below the required threshold",
     "vwap_confirmed": "Premium trading below its own session VWAP",
 }
@@ -71,9 +74,9 @@ class OptionPremiumStrategy(Strategy):
         momentum_lookback: int = 5,
         min_momentum_pct: float = 1.0,
         atr_period: int = 10,
-        atr_multiplier: float = 1.2,
-        target_r_multiple: float = 1.5,
-        min_confidence_to_trade: float = 100.0,  # options are unforgiving — require all conditions
+        atr_multiplier: float = 1.5,
+        target_r_multiple: float = 2.0,
+        min_confidence_to_trade: float = 70.0,  # default tradeable confidence threshold (0-100)
         min_open_interest: int = 500,
         max_bid_ask_spread_pct: float = 8.0,
         max_theta_pct_of_premium: float = 10.0,
@@ -92,6 +95,7 @@ class OptionPremiumStrategy(Strategy):
         self.max_theta_pct_of_premium = max_theta_pct_of_premium
         self.allow_expiry_day_entries = allow_expiry_day_entries
         self.strike_search_radius = strike_search_radius
+        self.scorer = ConfidenceScorer()
 
     # ── liquidity / risk checks on a single contract ──────────────────────
 
@@ -277,25 +281,13 @@ class OptionPremiumStrategy(Strategy):
             return sig
 
         # 2. Pure underlying evaluation flow (Backtests / Technical Directional Intent)
-        # Does not require a live option chain to establish directional intent.
-        trend = context.get("underlying_trend")
-        if not trend or trend not in ("BULLISH", "BEARISH"):
-            sig.conditions = {"trend_confirmed": False}
-            sig.rejected_reasons = ["Underlying trend is NEUTRAL/UNCONFIRMED — no directional option intent"]
-            sig.entry_reason = "NO TRADE — underlying trend not directional"
-            return sig
-
+        # Uses ConfidenceScorer to dynamically classify setup and assess confidence
         is_expiry_day = self._is_expiry_day(context, candles)
         expiry_ok = self.allow_expiry_day_entries or not is_expiry_day
 
         if len(candles) < self.min_candles:
             insufficient = self._insufficient_data(symbol, len(candles))
-            insufficient.conditions = {"trend_confirmed": True, "not_expiry_day": expiry_ok}
-            insufficient.indicators = {
-                "underlying_trend": trend,
-                "directional_intent": "CE" if trend == "BULLISH" else "PE",
-                "option_type": "CE" if trend == "BULLISH" else "PE",
-            }
+            insufficient.conditions = {"sufficient_data": False, "not_expiry_day": expiry_ok}
             if not expiry_ok:
                 insufficient.rejected_reasons.append(REASON_TEXT["not_expiry_day"])
             return insufficient
@@ -305,81 +297,114 @@ class OptionPremiumStrategy(Strategy):
         lows = [float(c["low"]) for c in candles]
         volumes = [float(c.get("volume", 0)) for c in candles]
 
-        lb = min(self.momentum_lookback, len(closes) - 1)
-        momentum_pct = (
-            (closes[-1] - closes[-1 - lb]) / closes[-1 - lb] * 100.0
-            if lb > 0 and closes[-1 - lb] > 0 else 0.0
-        )
+        # Multi-factor setup evaluation
+        setup_res = self.scorer.evaluate(candles, context)
+        opt_type = setup_res.direction if setup_res.direction in ("CE", "PE") else None
+        
+        # Override direction from explicit context if provided
+        ctx_trend = context.get("underlying_trend")
+        if ctx_trend == "BULLISH":
+            opt_type = "CE"
+        elif ctx_trend == "BEARISH":
+            opt_type = "PE"
 
-        vwap_vals = calc_vwap(highs, lows, closes, volumes)
+        if not opt_type:
+            sig.confidence = setup_res.confidence
+            sig.conditions = setup_res.conditions
+            sig.rejected_reasons = setup_res.rejected_reasons or ["Underlying market is choppy or has no clear directional structure"]
+            sig.entry_reason = f"NO TRADE — {setup_res.summary_text or 'No directional setup identified'}"
+            sig.indicators = dict(setup_res.indicators)
+            sig.indicators["spot_price"] = closes[-1]
+            return sig
+
+        trend = "BULLISH" if opt_type == "CE" else "BEARISH"
         atr_vals = calc_atr(highs, lows, closes, self.atr_period)
-        current_vwap = vwap_vals[-1] if vwap_vals else closes[-1]
         current_atr = atr_vals[-1] if atr_vals else 0.0
 
-        if trend == "BULLISH":
-            opt_type = "CE"
-            momentum_ok = momentum_pct >= self.min_momentum_pct
-            vwap_confirmed = closes[-1] > current_vwap
-        else:  # BEARISH
-            opt_type = "PE"
-            momentum_ok = momentum_pct <= -self.min_momentum_pct
-            vwap_confirmed = closes[-1] < current_vwap
+        # Check session entry window
+        current_ts = context.get("current_bar_timestamp") or (candles[-1].get("timestamp") if candles else None)
+        valid_session, session_reason = session_manager.is_valid_entry_time(
+            current_ts,
+            setup_name=setup_res.setup_name,
+            confidence=setup_res.confidence,
+            is_choppy=bool(setup_res.indicators.get("choppiness_index", 50.0) > 61.8),
+        )
+        conditions = dict(setup_res.conditions)
+        conditions["session_entry_window"] = valid_session
+        if not valid_session:
+            rejected_reasons = list(setup_res.rejected_reasons)
+            rejected_reasons.append(session_reason)
+            sig.rejected_reasons = rejected_reasons
+            sig.conditions = conditions
+            sig.indicators = dict(setup_res.indicators)
+            sig.indicators.update({
+                "directional_intent": opt_type,
+                "option_type": opt_type,
+                "underlying_trend": trend,
+                "spot_price": closes[-1],
+                "atr": round(current_atr, 4),
+                "is_expiry_day": is_expiry_day,
+                "expiry_date": context.get("expiry_date"),
+                "setup_name": setup_res.setup_name,
+                "setup_confidence": setup_res.confidence,
+                "factor_scores": setup_res.factor_scores,
+            })
+            sig.signal = SignalType.NONE
+            sig.entry_reason = f"NO TRADE — {session_reason}"
+            return sig
 
-        conditions = {
-            "trend_confirmed": True,
-            "not_expiry_day": expiry_ok,
-            "momentum_ok": momentum_ok,
-            "vwap_confirmed": vwap_confirmed,
-        }
-        confidence = 100.0 * sum(conditions.values()) / len(conditions)
+        conditions = dict(setup_res.conditions)
+        conditions["not_expiry_day"] = expiry_ok
+        conditions["session_entry_window"] = True
 
-        sig.confidence = confidence
+        sig.confidence = setup_res.confidence
         sig.conditions = conditions
-        sig.indicators = {
+        sig.indicators = dict(setup_res.indicators)
+        sig.indicators.update({
             "directional_intent": opt_type,
             "option_type": opt_type,
-            "spot_price": closes[-1],
             "underlying_trend": trend,
-            "momentum_pct": round(momentum_pct, 2),
-            "vwap": round(current_vwap, 2),
+            "spot_price": closes[-1],
             "atr": round(current_atr, 4),
             "is_expiry_day": is_expiry_day,
             "expiry_date": context.get("expiry_date"),
-        }
+            "setup_name": setup_res.setup_name,
+            "setup_confidence": setup_res.confidence,
+            "factor_scores": setup_res.factor_scores,
+        })
 
-        sig.rejected_reasons = []
+        sig.rejected_reasons = list(setup_res.rejected_reasons)
         if not expiry_ok:
             sig.rejected_reasons.append(REASON_TEXT["not_expiry_day"])
-        if not momentum_ok:
-            sig.rejected_reasons.append(
-                f"Underlying momentum ({momentum_pct:.2f}%) did not meet "
-                f"{'positive' if opt_type == 'CE' else 'negative'} threshold ({self.min_momentum_pct}%)"
-            )
-        if not vwap_confirmed:
-            sig.rejected_reasons.append(
-                f"Underlying close ({closes[-1]:.2f}) failed VWAP confirmation ({current_vwap:.2f})"
-            )
 
         if current_atr > 0:
             sig.entry_price = closes[-1]
             if opt_type == "CE":
-                sig.stop_loss = round(max(0.05, closes[-1] - self.atr_multiplier * current_atr), 2)
-                risk = sig.entry_price - sig.stop_loss
+                sl_calc = round(max(0.05, closes[-1] - self.atr_multiplier * current_atr), 2)
+                risk = sig.entry_price - sl_calc
+                sig.stop_loss = sl_calc
                 sig.target = round(sig.entry_price + self.target_r_multiple * risk, 2) if risk > 0 else sig.entry_price
             else:
-                sig.stop_loss = round(closes[-1] + self.atr_multiplier * current_atr, 2)
-                risk = sig.stop_loss - sig.entry_price
+                sl_calc = round(closes[-1] + self.atr_multiplier * current_atr, 2)
+                risk = sl_calc - sig.entry_price
+                sig.stop_loss = sl_calc
                 sig.target = round(max(0.05, sig.entry_price - self.target_r_multiple * risk), 2) if risk > 0 else sig.entry_price
 
-        if confidence >= self.min_confidence_to_trade and all(conditions.values()):
+        # Check confidence against threshold and expiry filter
+        if expiry_ok and setup_res.confidence >= self.min_confidence_to_trade:
             sig.signal = SignalType.BUY
             sig.entry_reason = (
-                f"DIRECTIONAL INTENT {opt_type} CONFIRMED — {trend} trend, "
-                f"momentum {momentum_pct:.1f}% over {lb} bars, VWAP confirmed."
+                f"DIRECTIONAL INTENT {opt_type} CONFIRMED [{setup_res.setup_name}] — "
+                f"Confidence {setup_res.confidence:.1f}% ({setup_res.summary_text})"
             )
         else:
             sig.signal = SignalType.NONE
-            sig.entry_reason = "NO TRADE — " + build_condition_summary(conditions)
+            if not expiry_ok:
+                sig.entry_reason = "NO TRADE — Expiry day risk gating blocked entry"
+            else:
+                sig.entry_reason = (
+                    f"NO TRADE — Confidence ({setup_res.confidence:.1f}%) below minimum required ({self.min_confidence_to_trade:.1f}%)"
+                )
 
         return sig
 
@@ -390,12 +415,23 @@ class OptionPremiumStrategy(Strategy):
         context: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         context = context or {}
-        if self._is_expiry_day(context, candles) and not self.allow_expiry_day_entries:
-            # Force out of any option position by the risk cutoff on
-            # expiry day itself — see TradingEngine's expiry-day square-off
-            # for the actual time-based enforcement; this is the strategy-
-            # level signal that it's time regardless of price action.
-            return "EXPIRY_DAY_RISK_EXIT — closing ahead of extreme gamma risk into settlement"
+        # 1. Mandatory 15:15 IST Square-off
+        current_ts = context.get("current_bar_timestamp") or (candles[-1].get("timestamp") if candles else None)
+        if session_manager.is_mandatory_square_off(current_ts):
+            return "INTRADAY_SQUARE_OFF"
+
+        is_expiry = context.get("is_expiry_day") or self._is_expiry_day(context, candles)
+        if is_expiry:
+            if current_ts:
+                try:
+                    dt = datetime.fromisoformat(current_ts) if isinstance(current_ts, str) else current_ts
+                    if dt.hour > 14 or (dt.hour == 14 and dt.minute >= 30):
+                        return "EXPIRY_DAY_RISK_EXIT"
+                except Exception:
+                    pass
+            if not self.allow_expiry_day_entries:
+                return "EXPIRY_DAY_RISK_EXIT"
+
         if len(candles) < 2:
             return None
         closes = [float(c["close"]) for c in candles]

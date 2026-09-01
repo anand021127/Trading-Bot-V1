@@ -3,9 +3,32 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+try:
+    from pydantic import BaseModel, Field
+except ImportError:
+    class BaseModel:
+        def __init__(self, **data: Any) -> None:
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    setattr(self, k, BaseModel(**v))
+                else:
+                    setattr(self, k, v)
+        def dict(self) -> Dict[str, Any]:
+            res: Dict[str, Any] = {}
+            for k, v in self.__dict__.items():
+                if isinstance(v, BaseModel):
+                    res[k] = v.dict()
+                else:
+                    res[k] = v
+            return res
+        def __getattr__(self, name: str) -> Any:
+            return None
+    def Field(default: Any = None, default_factory: Any = None, **kwargs: Any) -> Any:
+        if default_factory is not None:
+            return default_factory()
+        return default
 
 from backend.config.loader import load_config
 

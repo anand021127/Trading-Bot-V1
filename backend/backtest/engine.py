@@ -26,6 +26,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from backend.strategy.exit_manager import TrailingStopManager
+from backend.strategy.session_manager import session_manager
 from backend.strategy.strategy_engine import MultiStrategyEngine
 from backend.strategy.signal import StrategySignal, SignalType
 from backend.backtest.historical_contract_resolver import (
@@ -258,6 +259,7 @@ class BacktestResult:
     orders_created: int = 0
     trades_opened: int = 0
     trades_closed: int = 0
+    setups_breakdown: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -283,6 +285,7 @@ class BacktestResult:
             "data_source": self.data_source,
             "execution_resolution_mode": self.execution_resolution_mode,
             "data_quality": self.data_quality.to_dict() if self.data_quality else None,
+            "setups_breakdown": self.setups_breakdown,
             # Diagnostic counters
             "candles_loaded": self.candles_loaded,
             "warmup_bars": self.warmup_bars,
@@ -491,7 +494,6 @@ class BacktestEngine:
                             "timestamp": bar.get("timestamp", ""), "equity": round(equity, 2),
                         })
                         position = None
-                    continue  # already in position (or just exited) — skip new entries this bar
 
                 signals = self.strategy_engine.evaluate(
                     symbol, window, context=bar_context, strategy_names=strategy_names,
@@ -508,6 +510,9 @@ class BacktestEngine:
                                 symbol=symbol, timestamp=bar.get("timestamp", ""),
                                 strategy=sig.strategy_name, reasons=sig.rejected_reasons,
                             ))
+
+                if position is not None:
+                    continue  # already in active position — do not open new position on this bar
 
                 if best is not None:
                     signals_generated += 1
@@ -586,9 +591,9 @@ class BacktestEngine:
                             reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
                             continue
 
-                        # 20% stop loss on option premium
-                        opt_stop_loss = round(max(1.0, opt_entry_price * 0.8), 2)
-                        opt_target = round(opt_entry_price + 2 * (opt_entry_price - opt_stop_loss), 2)
+                        # Dynamic ATR / risk-percentage stop (18% premium stop) with min 2.0R target
+                        opt_stop_loss = round(max(0.5, opt_entry_price * 0.82), 2)
+                        opt_target = round(opt_entry_price + 2.0 * (opt_entry_price - opt_stop_loss), 2)
                         
                         lot_size = INDEX_LOT_SIZES.get(symbol.upper(), 25)
                         risk_per_unit = opt_entry_price - opt_stop_loss
@@ -617,8 +622,27 @@ class BacktestEngine:
                             reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
                             continue
 
+                        # Expectancy vs Friction Filter
+                        est_brokerage = 40.0
+                        est_stt = 0.0015 * opt_entry_price * opt_qty
+                        est_statutory = 15.0
+                        est_total_friction = est_brokerage + est_stt + est_statutory
+                        expected_gain = (opt_target - opt_entry_price) * opt_qty
+
+                        if expected_gain < 2.5 * est_total_friction:
+                            result.risk_rejections += 1
+                            result.risk_rejections_breakdown["low_expectancy_friction"] = (
+                                result.risk_rejections_breakdown.get("low_expectancy_friction", 0) + 1
+                            )
+                            rej_reason = f"EXPECTANCY_TOO_LOW — Expected gain (₹{expected_gain:.2f}) insufficient for transaction friction (₹{est_total_friction:.2f})"
+                            rejected_total += 1
+                            reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                            continue
+
                         result.orders_created += 1
                         result.trades_opened += 1
+                        setup_name_tag = best.indicators.get("setup_name", "MOMENTUM_CONTINUATION")
+                        result.setups_breakdown[setup_name_tag] = result.setups_breakdown.get(setup_name_tag, 0) + 1
                         
                         opt_trading_sym = c_key
                         try:
@@ -646,6 +670,7 @@ class BacktestEngine:
                             "quantity": opt_qty,
                             "lot_size": lot_size,
                             "confidence": best.confidence,
+                            "setup_name": setup_name_tag,
                         }
                         continue
 
@@ -831,10 +856,15 @@ class BacktestEngine:
         """Conservative deterministic exit check.
         
         Execution Resolution Mode: CONSERVATIVE_STOP_FIRST
-        If both stop loss and target are breached in the same candle:
-        the stop loss is evaluated against the pre-existing stop level at bar open.
-        If bar['low'] <= pre-existing stop, STOP_LOSS_HIT / TRAILING_STOP_HIT triggers first.
+        1. Mandatory 15:15 IST Square-off.
+        2. If both stop loss and target are breached in the same candle:
+           the stop loss is evaluated against the pre-existing stop level at bar open.
+           If bar['low'] <= pre-existing stop, STOP_LOSS_HIT / TRAILING_STOP_HIT triggers first.
         """
+        bar_ts = bar.get("timestamp") or (context.get("current_bar_timestamp") if context else "")
+        if session_manager.is_mandatory_square_off(bar_ts):
+            return "INTRADAY_SQUARE_OFF"
+
         current_stop_at_bar_start = position.get("trailing_stop", position["stop_loss"])
         target = position.get("target", 0.0)
 
