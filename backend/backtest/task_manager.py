@@ -163,8 +163,11 @@ class BacktestTask:
                 max_consec_wins = max(max_consec_wins, current_wins)
                 max_consec_losses = max(max_consec_losses, current_losses)
 
-            total_slippage = sum(t.get("charges", 0) * 0.25 for t in trade_log)  # approximate
-            total_fees = sum(t.get("charges", 0) * 0.75 for t in trade_log)  # approximate
+            total_slippage = sum(t.get("slippage", 0) for t in trade_log)
+            total_brokerage = sum(t.get("brokerage", 0) for t in trade_log)
+            total_stt = sum(t.get("stt", 0) for t in trade_log)
+            total_gst = sum(t.get("gst", 0) for t in trade_log)
+            total_fees = sum(t.get("charges", 0) - t.get("slippage", 0) for t in trade_log)
 
             summary_fields.extend([
                 ("Expectancy", f"{expectancy:.2f}"),
@@ -172,9 +175,32 @@ class BacktestTask:
                 ("Average Loss", f"{avg_loss:.2f}"),
                 ("Max Consecutive Wins", max_consec_wins),
                 ("Max Consecutive Losses", max_consec_losses),
-                ("Total Fees (est)", f"{total_fees:.2f}"),
-                ("Total Slippage (est)", f"{total_slippage:.2f}"),
+                ("Total Fees", f"{total_fees:.2f}"),
+                ("Total Brokerage", f"{total_brokerage:.2f}"),
+                ("Total STT", f"{total_stt:.2f}"),
+                ("Total GST", f"{total_gst:.2f}"),
+                ("Total Slippage", f"{total_slippage:.2f}"),
             ])
+
+        # Symbol breakdown section
+        symbol_summary = result.get("symbol_summary", {})
+        if symbol_summary:
+            summary_fields.append(("", ""))
+            summary_fields.append(("=== SYMBOL BREAKDOWN ===", ""))
+            for sym, s_data in symbol_summary.items():
+                if s_data.get("skipped"):
+                    summary_fields.append((
+                        f"{sym} (SKIPPED)",
+                        f"Candles={s_data.get('candles', 0)} | Reason={s_data.get('skip_reason', 'Skipped')}"
+                    ))
+                else:
+                    summary_fields.append((
+                        f"{sym}",
+                        f"Trades={s_data.get('trades', 0)} | Wins={s_data.get('wins', 0)} | "
+                        f"Losses={s_data.get('losses', 0)} | WinRate={s_data.get('win_rate', 0):.1f}% | "
+                        f"NetPnL=₹{s_data.get('net_pnl', 0):.2f} | PF={s_data.get('profit_factor', 0):.2f} | "
+                        f"Charges=₹{s_data.get('charges', 0):.2f}"
+                    ))
 
         # Rejection reasons
         rejection_counts = result.get("rejection_reason_counts", {})
@@ -200,10 +226,13 @@ class BacktestTask:
             net_pnl = trade.get("net_pnl", 0)
             qty = trade.get("quantity", 1)
             r_multiple = (net_pnl / (risk_per_share * qty)) if risk_per_share and qty else ""
+            charges = trade.get("charges", 0)
+            slippage = trade.get("slippage", 0)
+            fees = trade.get("fees", round(charges - slippage, 2))
 
             writer.writerow([
                 trade.get("entry_time", ""),             # timestamp
-                trade.get("symbol", ""),                  # underlying
+                trade.get("underlying", trade.get("symbol", "")),  # underlying
                 trade.get("instrument_key", ""),          # instrument_key
                 trade.get("option_symbol", ""),            # option_symbol
                 trade.get("strike", ""),                   # strike
@@ -220,11 +249,11 @@ class BacktestTask:
                 trade.get("trailing_stop", ""),             # trailing_stop
                 trade.get("exit_reason", ""),              # exit_reason
                 trade.get("gross_pnl", 0),                 # gross_pnl
-                trade.get("charges", 0),                   # fees (= charges)
-                "",                                        # slippage (included in charges)
+                fees,                                      # fees (statutory + brokerage)
+                slippage,                                  # slippage
                 net_pnl,                                   # net_pnl
                 f"{r_multiple:.2f}" if isinstance(r_multiple, (int, float)) else "",  # r_multiple
-                trade.get("confidence", ""),                # setup_score
+                trade.get("confidence", trade.get("setup_score", "")),  # setup_score
                 trade.get("strategy", ""),                  # strategy
             ])
 

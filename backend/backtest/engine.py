@@ -260,6 +260,10 @@ class BacktestResult:
     trades_opened: int = 0
     trades_closed: int = 0
     setups_breakdown: Dict[str, int] = field(default_factory=dict)
+    symbol_summary: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    portfolio_summary: Dict[str, Any] = field(default_factory=dict)
+    max_simultaneous_positions: int = 0
+    total_portfolio_risk: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -286,6 +290,10 @@ class BacktestResult:
             "execution_resolution_mode": self.execution_resolution_mode,
             "data_quality": self.data_quality.to_dict() if self.data_quality else None,
             "setups_breakdown": self.setups_breakdown,
+            "symbol_summary": self.symbol_summary,
+            "portfolio_summary": self.portfolio_summary,
+            "max_simultaneous_positions": self.max_simultaneous_positions,
+            "total_portfolio_risk": self.total_portfolio_risk,
             # Diagnostic counters
             "candles_loaded": self.candles_loaded,
             "warmup_bars": self.warmup_bars,
@@ -322,6 +330,8 @@ class BacktestEngine:
         min_candles_required: int = 60,
         rejected_sample_size: int = 200,
         max_window_bars: int = 400,
+        max_simultaneous_positions: int = 6,
+        allow_same_bar_reentry: bool = False,
     ) -> None:
         self.strategy_engine = strategy_engine or MultiStrategyEngine()
         self.costs = costs or CostConfig()
@@ -330,14 +340,9 @@ class BacktestEngine:
         self.risk_pct_per_trade = risk_pct_per_trade
         self.min_candles_required = min_candles_required
         self.rejected_sample_size = rejected_sample_size
-        # Bounds how much history each strategy evaluation looks back over.
-        # 400 5-minute bars ≈ 5-6 trading sessions — enough for EMA50/RSI14/
-        # ATR14 warmup AND for ORB to always have the *current* day's first
-        # bars in view. Without this bound, a full year of 5-minute candles
-        # means every single bar re-scans the entire dataset-to-date, which
-        # is both O(n²) slow and (before the day-aware ORB fix) part of why
-        # ORB was anchored to day-1's range for the whole year.
         self.max_window_bars = max_window_bars
+        self.max_simultaneous_positions = max_simultaneous_positions
+        self.allow_same_bar_reentry = allow_same_bar_reentry
 
     def run(
         self,
@@ -348,28 +353,22 @@ class BacktestEngine:
         options_data_loader: Optional[HistoricalOptionsDataLoader] = None,
         require_real_options: bool = False,
     ) -> BacktestResult:
-        """`progress_callback(dict)` — if given, called periodically with
-        {"phase": "processing", "symbol": ..., "symbol_index": ..., "total_symbols": ...,
-         "bar_index": ..., "total_bars": ...} so a long-running backtest (e.g. a full
-        year of 5-minute NIFTY data) can report real progress to a polling
-        client instead of the caller just waiting on a single request."""
+        """Chronological multi-symbol event-driven backtest simulation.
+        
+        Evaluates all requested symbols simultaneously across a single unified
+        chronological timeline. Maintains strict separation between:
+          1. Per-symbol state (positions, indicators, windows, cooldowns)
+          2. Portfolio-wide state (capital, equity, risk allocation, limits)
+        """
         result = BacktestResult()
         result.candles_loaded = sum(len(c) for c in symbol_candles.values())
-        equity = self.capital
-        peak = self.capital
-        equity_curve: List[Dict[str, Any]] = [{"timestamp": "start", "equity": round(equity, 2)}]
-        all_trades: List[BacktestTrade] = []
-        rejected_sample: List[RejectedSignal] = []
-        reason_counts: Dict[str, int] = {}
-        rejected_total = 0
-        signals_generated = 0
-        candles_scanned = 0
-
+        result.total_candles_scanned = result.candles_loaded
         strategy_names = strategy_names or ["OPTION_PREMIUM"]
         option_contexts = option_contexts or {}
-        total_symbols = len(symbol_candles)
 
-        for symbol_index, (symbol, candles) in enumerate(symbol_candles.items()):
+        # ── 1. Validate & Filter Symbols ──
+        valid_symbols: List[str] = []
+        for symbol, candles in symbol_candles.items():
             if len(candles) < self.min_candles_required:
                 result.skipped_symbols.append({
                     "symbol": symbol,
@@ -377,49 +376,255 @@ class BacktestEngine:
                               f"need at least {self.min_candles_required}. "
                               f"Not padded with synthetic data.",
                 })
-                continue
+            else:
+                valid_symbols.append(symbol)
 
-            result.warmup_bars += self.min_candles_required
-            candles_scanned += len(candles)
-            position: Optional[Dict[str, Any]] = None
-            total_bars = len(candles)
+        # Sort symbol names alphabetically to guarantee deterministic, symbol-order invariant results
+        valid_symbols.sort()
 
-            symbol_context = option_contexts.get(symbol, {})
-            trend_series = symbol_context.get("underlying_trend_series")
-            trend_series_keys = sorted(trend_series.keys()) if trend_series else []
+        if not valid_symbols:
+            result.symbol_summary = {
+                sym: {
+                    "candles": len(symbol_candles.get(sym, [])),
+                    "signals": 0, "trades": 0, "wins": 0, "losses": 0,
+                    "net_pnl": 0.0, "charges": 0.0, "win_rate": 0.0,
+                    "profit_factor": 0.0, "gross_profit": 0.0, "gross_loss": 0.0,
+                    "skipped": True,
+                    "skip_reason": f"Insufficient candles (< {self.min_candles_required})",
+                }
+                for sym in symbol_candles
+            }
+            result.portfolio_summary = {
+                "starting_capital": round(self.capital, 2),
+                "ending_equity": round(self.capital, 2),
+                "net_profit": 0.0,
+                "net_profit_pct": 0.0,
+                "total_trades": 0,
+                "total_charges": 0.0,
+                "max_drawdown_pct": 0.0,
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "win_rate": 0.0,
+                "profit_factor": 0.0,
+                "max_simultaneous_positions": 0,
+                "total_portfolio_risk": 0.0,
+            }
+            return result
 
-            for i in range(self.min_candles_required, len(candles)):
-                result.candles_evaluated += 1
-                if progress_callback and (i % 200 == 0 or i == len(candles) - 1):
-                    try:
-                        progress_callback({
-                            "phase": "processing",
-                            "symbol": symbol,
-                            "symbol_index": symbol_index + 1,
-                            "total_symbols": total_symbols,
-                            "bar_index": total_bars if i == len(candles) - 1 else i,
-                            "total_bars": total_bars,
-                            "trades_so_far": len(all_trades),
-                        })
-                    except Exception:
-                        pass  # progress reporting must never break the backtest itself
+        # ── 2. Pre-index Symbol Candles and Build Unified Timeline ──
+        symbol_sorted_candles: Dict[str, List[Dict[str, Any]]] = {}
+        symbol_candle_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        symbol_trend_series: Dict[str, Dict[str, str]] = {}
+        symbol_trend_keys: Dict[str, List[str]] = {}
 
-                window = candles[max(0, i + 1 - self.max_window_bars): i + 1]
-                bar = candles[i]
-                bar_timestamp = bar.get("timestamp", "")
-                bar_date = bar_timestamp[:10] if bar_timestamp else ""
+        # Per-symbol state tracking
+        symbol_bars_seen: Dict[str, List[Dict[str, Any]]] = {sym: [] for sym in valid_symbols}
+        symbol_positions: Dict[str, Optional[Dict[str, Any]]] = {sym: None for sym in valid_symbols}
+        symbol_last_exit_ts: Dict[str, Optional[str]] = {sym: None for sym in valid_symbols}
+        symbol_last_entry_ts: Dict[str, Optional[str]] = {sym: None for sym in valid_symbols}
+        symbol_stats: Dict[str, Dict[str, Any]] = {
+            sym: {
+                "candles": 0, "signals": 0, "trades": 0, "wins": 0, "losses": 0,
+                "net_pnl": 0.0, "charges": 0.0, "risk_rejections": 0,
+                "data_unavailable": 0, "trades_list": [],
+            }
+            for sym in valid_symbols
+        }
+
+        for sym in valid_symbols:
+            candles = sorted(symbol_candles[sym], key=lambda x: x.get("timestamp", ""))
+            symbol_sorted_candles[sym] = candles
+            symbol_candle_map[sym] = {
+                bar.get("timestamp"): bar for bar in candles if bar.get("timestamp")
+            }
+            sym_ctx = option_contexts.get(sym, {})
+            ts_series = sym_ctx.get("underlying_trend_series")
+            if ts_series:
+                symbol_trend_series[sym] = ts_series
+                symbol_trend_keys[sym] = sorted(ts_series.keys())
+            else:
+                symbol_trend_series[sym] = {}
+                symbol_trend_keys[sym] = []
+
+        # Chronological timeline across all valid symbols
+        all_timestamps = sorted(set(
+            bar.get("timestamp")
+            for sym in valid_symbols
+            for bar in symbol_sorted_candles[sym]
+            if bar.get("timestamp")
+        ))
+
+        # ── 3. Portfolio State ──
+        equity = self.capital
+        peak_equity = self.capital
+        max_simultaneous_seen = 0
+        all_trades: List[BacktestTrade] = []
+        equity_curve: List[Dict[str, Any]] = [{"timestamp": "start", "equity": round(equity, 2)}]
+        rejected_sample: List[RejectedSignal] = []
+        reason_counts: Dict[str, int] = {}
+        rejected_total = 0
+        signals_generated = 0
+        bars_evaluated_total = 0
+        total_bars_all = sum(len(c) for c in symbol_sorted_candles.values())
+
+        # ── 4. Unified Chronological Event Loop ──
+        for ts_idx, ts in enumerate(all_timestamps):
+            bar_date = ts[:10] if ts else ""
+            symbols_at_ts = [sym for sym in valid_symbols if ts in symbol_candle_map[sym]]
+            # Sort active symbols at this bar alphabetically for deterministic evaluation
+            symbols_at_ts.sort()
+
+            # 4.1 Ingest current bar for all present symbols
+            for sym in symbols_at_ts:
+                bar = symbol_candle_map[sym][ts]
+                symbol_bars_seen[sym].append(bar)
+                symbol_stats[sym]["candles"] += 1
+                bars_evaluated_total += 1
+
+                if len(symbol_bars_seen[sym]) <= self.min_candles_required:
+                    result.warmup_bars += 1
+                else:
+                    result.candles_evaluated += 1
+
+            # Progress reporting
+            if progress_callback and (ts_idx % 50 == 0 or ts_idx == len(all_timestamps) - 1):
+                try:
+                    progress_callback({
+                        "phase": "processing",
+                        "symbol": symbols_at_ts[0] if symbols_at_ts else valid_symbols[0],
+                        "symbol_index": 1,
+                        "total_symbols": len(valid_symbols),
+                        "bar_index": bars_evaluated_total,
+                        "total_bars": total_bars_all,
+                        "trades_so_far": len(all_trades),
+                    })
+                except Exception:
+                    pass
+
+            # 4.2 Phase 1: Position Exit Checks (evaluated first on the current bar)
+            for sym in symbols_at_ts:
+                position = symbol_positions[sym]
+                if position is None:
+                    continue
+
+                bar = symbol_candle_map[sym][ts]
+                window = symbol_bars_seen[sym][max(0, len(symbol_bars_seen[sym]) - self.max_window_bars):]
+                sym_ctx = option_contexts.get(sym, {})
+                bar_context = {
+                    **sym_ctx,
+                    "symbol": sym,
+                    "current_bar_date": bar_date,
+                    "current_bar_timestamp": ts,
+                    "evaluation_date": bar_date,
+                    "spot_price": float(bar["close"]),
+                }
+
+                # In real options mode, check exit on verified historical option contract candle
+                opt_bar = bar
+                if position.get("is_real_option") and options_data_loader:
+                    c_key = position.get("contract_key", "")
+                    candle_rec = options_data_loader.get_candle_at(c_key, ts)
+                    if candle_rec:
+                        opt_bar = {
+                            "timestamp": candle_rec.timestamp,
+                            "open": candle_rec.open,
+                            "high": candle_rec.high,
+                            "low": candle_rec.low,
+                            "close": candle_rec.close,
+                            "volume": candle_rec.volume,
+                        }
+
+                exit_reason = self._check_exit(position, opt_bar, window, context=bar_context)
+                if exit_reason:
+                    exit_price = self._exit_price_for(position, opt_bar, exit_reason)
+                    qty = position["quantity"]
+                    costs = self.costs.apply(
+                        position["entry_price"], exit_price, qty,
+                        is_option=position["strategy"] == "OPTION_PREMIUM" or position.get("is_real_option", False),
+                    )
+                    trade = BacktestTrade(
+                        symbol=position.get("contract_symbol", sym),
+                        strategy=position["strategy"],
+                        entry_time=position["entry_time"],
+                        exit_time=ts,
+                        entry_price=position["entry_price"],
+                        exit_price=round(exit_price, 2),
+                        quantity=qty,
+                        exit_reason=exit_reason,
+                        gross_pnl=costs["gross_pnl"],
+                        net_pnl=costs["net_pnl"],
+                        charges=costs["charges"],
+                        confidence=position["confidence"],
+                        brokerage=costs["brokerage"],
+                        stt=costs["stt"],
+                        exchange_charges=costs["exchange_charges"],
+                        gst=costs["gst"],
+                        sebi_charges=costs["sebi_charges"],
+                        stamp_duty=costs["stamp_duty"],
+                        slippage=costs["slippage"],
+                        total_cost=costs["total_cost"],
+                        underlying=position.get("underlying", sym),
+                        instrument_key=position.get("contract_key", position.get("contract_symbol", sym)),
+                        option_symbol=position.get("option_symbol", position.get("contract_symbol", "")),
+                        strike=position.get("strike"),
+                        option_type=position.get("option_type", ""),
+                        expiry=position.get("expiry", ""),
+                        lot_size=position.get("lot_size", INDEX_LOT_SIZES.get(sym.upper(), 25)),
+                        stop_loss=position.get("stop_loss", 0.0),
+                        target=position.get("target", 0.0),
+                        trailing_stop=position.get("trailing_stop", 0.0),
+                        setup_score=position.get("confidence", 0.0),
+                    )
+                    all_trades.append(trade)
+                    result.trades_closed += 1
+                    symbol_stats[sym]["trades"] += 1
+                    symbol_stats[sym]["trades_list"].append(trade)
+                    symbol_stats[sym]["net_pnl"] = round(symbol_stats[sym]["net_pnl"] + costs["net_pnl"], 2)
+                    symbol_stats[sym]["charges"] = round(symbol_stats[sym]["charges"] + costs["charges"], 2)
+                    if costs["net_pnl"] > 0:
+                        symbol_stats[sym]["wins"] += 1
+                    else:
+                        symbol_stats[sym]["losses"] += 1
+
+                    # Portfolio equity update
+                    equity = round(equity + costs["net_pnl"], 2)
+                    peak_equity = max(peak_equity, equity)
+                    dd = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
+                    result.max_drawdown_pct = max(result.max_drawdown_pct, dd)
+                    equity_curve.append({
+                        "timestamp": ts,
+                        "equity": round(equity, 2),
+                    })
+
+                    # Clear symbol position and set same-bar exit timestamp
+                    symbol_positions[sym] = None
+                    symbol_last_exit_ts[sym] = ts
+
+            # 4.3 Phase 2: Candidate Signal Evaluation
+            candidate_signals: List[Tuple[str, StrategySignal, Dict[str, Any], Dict[str, Any]]] = []
+
+            for sym in symbols_at_ts:
+                # Require sufficient warmup history (e.g. at least min_candles_required bars before current bar)
+                if len(symbol_bars_seen[sym]) <= self.min_candles_required:
+                    continue
+
+                bar = symbol_candle_map[sym][ts]
+                window = symbol_bars_seen[sym][max(0, len(symbol_bars_seen[sym]) - self.max_window_bars):]
+                sym_ctx = option_contexts.get(sym, {})
                 spot_close = float(bar["close"])
 
                 bar_context = {
-                    **symbol_context,
-                    "symbol": symbol,
+                    **sym_ctx,
+                    "symbol": sym,
                     "current_bar_date": bar_date,
+                    "current_bar_timestamp": ts,
                     "evaluation_date": bar_date,
                     "spot_price": spot_close,
                 }
-                if trend_series:
+
+                if symbol_trend_series[sym]:
                     trend = self._trend_at(
-                        trend_series, trend_series_keys, bar_timestamp,
+                        symbol_trend_series[sym], symbol_trend_keys[sym], ts,
                     )
                 else:
                     trend = "NEUTRAL"
@@ -432,71 +637,8 @@ class BacktestEngine:
                 else:
                     result.trend_neutral += 1
 
-                if position is not None:
-                    # In real options mode, check exit on option contract candles if available
-                    opt_bar = bar
-                    if position.get("is_real_option") and options_data_loader:
-                        c_key = position.get("contract_key", "")
-                        candle_rec = options_data_loader.get_candle_at(c_key, bar_timestamp)
-                        if candle_rec:
-                            opt_bar = {
-                                "timestamp": candle_rec.timestamp,
-                                "open": candle_rec.open,
-                                "high": candle_rec.high,
-                                "low": candle_rec.low,
-                                "close": candle_rec.close,
-                                "volume": candle_rec.volume,
-                            }
-
-                    exit_reason = self._check_exit(position, opt_bar, window, context=bar_context)
-                    if exit_reason:
-                        exit_price = self._exit_price_for(position, opt_bar, exit_reason)
-                        qty = position["quantity"]
-                        costs = self.costs.apply(
-                            position["entry_price"], exit_price, qty,
-                            is_option=position["strategy"] == "OPTION_PREMIUM" or position.get("is_real_option", False),
-                        )
-                        trade = BacktestTrade(
-                            symbol=position.get("contract_symbol", symbol),
-                            strategy=position["strategy"],
-                            entry_time=position["entry_time"], exit_time=bar.get("timestamp", ""),
-                            entry_price=position["entry_price"], exit_price=round(exit_price, 2),
-                            quantity=qty, exit_reason=exit_reason,
-                            gross_pnl=costs["gross_pnl"], net_pnl=costs["net_pnl"],
-                            charges=costs["charges"], confidence=position["confidence"],
-                            brokerage=costs["brokerage"],
-                            stt=costs["stt"],
-                            exchange_charges=costs["exchange_charges"],
-                            gst=costs["gst"],
-                            sebi_charges=costs["sebi_charges"],
-                            stamp_duty=costs["stamp_duty"],
-                            slippage=costs["slippage"],
-                            total_cost=costs["total_cost"],
-                            underlying=position.get("underlying", symbol),
-                            instrument_key=position.get("contract_key", position.get("contract_symbol", symbol)),
-                            option_symbol=position.get("option_symbol", position.get("contract_symbol", "")),
-                            strike=position.get("strike"),
-                            option_type=position.get("option_type", ""),
-                            expiry=position.get("expiry", ""),
-                            lot_size=position.get("lot_size", INDEX_LOT_SIZES.get(symbol.upper(), 25)),
-                            stop_loss=position.get("stop_loss", 0.0),
-                            target=position.get("target", 0.0),
-                            trailing_stop=position.get("trailing_stop", 0.0),
-                            setup_score=position.get("confidence", 0.0),
-                        )
-                        all_trades.append(trade)
-                        result.trades_closed += 1
-                        equity += costs["net_pnl"]
-                        peak = max(peak, equity)
-                        dd = (peak - equity) / peak * 100 if peak > 0 else 0
-                        result.max_drawdown_pct = max(result.max_drawdown_pct, dd)
-                        equity_curve.append({
-                            "timestamp": bar.get("timestamp", ""), "equity": round(equity, 2),
-                        })
-                        position = None
-
                 signals = self.strategy_engine.evaluate(
-                    symbol, window, context=bar_context, strategy_names=strategy_names,
+                    sym, window, context=bar_context, strategy_names=strategy_names,
                 )
                 best = MultiStrategyEngine.best_signal(signals)
 
@@ -507,15 +649,13 @@ class BacktestEngine:
                             reason_counts[reason] = reason_counts.get(reason, 0) + 1
                         if len(rejected_sample) < self.rejected_sample_size:
                             rejected_sample.append(RejectedSignal(
-                                symbol=symbol, timestamp=bar.get("timestamp", ""),
+                                symbol=sym, timestamp=ts,
                                 strategy=sig.strategy_name, reasons=sig.rejected_reasons,
                             ))
 
-                if position is not None:
-                    continue  # already in active position — do not open new position on this bar
-
                 if best is not None:
                     signals_generated += 1
+                    symbol_stats[sym]["signals"] += 1
                     result.directional_signals += 1
                     opt_type_intent = best.indicators.get("directional_intent") or best.indicators.get("option_type")
                     if not opt_type_intent:
@@ -524,83 +664,134 @@ class BacktestEngine:
                         result.ce_intents += 1
                     else:
                         result.pe_intents += 1
-                    
+
+                    # Check position conflict
+                    if symbol_positions[sym] is not None:
+                        rej_reason = f"POSITION_ALREADY_OPEN — Position already active for {sym}"
+                        rejected_total += 1
+                        reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                        if len(rejected_sample) < self.rejected_sample_size:
+                            rejected_sample.append(RejectedSignal(
+                                symbol=sym, timestamp=ts, strategy=best.strategy_name, reasons=[rej_reason],
+                            ))
+                        continue
+
+                    # Same-Bar Rule: Must not have exited on the exact same bar unless configured
+                    if not self.allow_same_bar_reentry and symbol_last_exit_ts[sym] == ts:
+                        rej_reason = f"SAME_BAR_COOLDOWN — Position for {sym} exited on current bar ({ts})"
+                        rejected_total += 1
+                        reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                        if len(rejected_sample) < self.rejected_sample_size:
+                            rejected_sample.append(RejectedSignal(
+                                symbol=sym, timestamp=ts, strategy=best.strategy_name, reasons=[rej_reason],
+                            ))
+                        continue
+
+                    candidate_signals.append((sym, best, bar, bar_context))
+
+            # 4.4 Phase 3: Simultaneous Signal Resolution & Deterministic Portfolio Risk Allocation
+            if candidate_signals:
+                # Deterministic sorting: highest confidence first; symbol name as tie-breaker (eliminates symbol-order bias)
+                candidate_signals.sort(key=lambda item: (-item[1].confidence, item[0]))
+
+                for sym, best, bar, bar_context in candidate_signals:
+                    current_open_count = sum(1 for p in symbol_positions.values() if p is not None)
+                    if current_open_count >= self.max_simultaneous_positions:
+                        rej_reason = f"PORTFOLIO_RISK_LIMIT — Max simultaneous positions reached ({self.max_simultaneous_positions})"
+                        result.risk_rejections += 1
+                        result.risk_rejections_breakdown["max_simultaneous_positions"] = (
+                            result.risk_rejections_breakdown.get("max_simultaneous_positions", 0) + 1
+                        )
+                        rejected_total += 1
+                        reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                        symbol_stats[sym]["risk_rejections"] += 1
+                        if len(rejected_sample) < self.rejected_sample_size:
+                            rejected_sample.append(RejectedSignal(
+                                symbol=sym, timestamp=ts, strategy=best.strategy_name, reasons=[rej_reason],
+                            ))
+                        continue
+
+                    spot_close = float(bar["close"])
+                    opt_type_intent = best.indicators.get("directional_intent") or best.indicators.get("option_type")
+                    if not opt_type_intent:
+                        opt_type_intent = "PE" if best.signal in (SignalType.SELL, getattr(SignalType, "BUY_PUT", SignalType.SELL)) else "CE"
+
                     # ── Strict Real Options Execution Handling ──
                     if require_real_options:
-                        # Signal must resolve to a real historical option contract candle
                         result.contract_resolution_attempts += 1
                         option_type = opt_type_intent
                         bar_dt = datetime.fromisoformat(bar_date).date() if bar_date else date.today()
-                        
+
                         if options_data_loader is None or not options_data_loader.is_data_available():
-                            # Strictly flag DATA_UNAVAILABLE — Never create trade, never substitute spot
                             result.contract_resolution_failures += 1
                             result.contract_resolution_failures_breakdown["missing_option_data"] = (
                                 result.contract_resolution_failures_breakdown.get("missing_option_data", 0) + 1
                             )
-                            unavail_reason = f"DATA_UNAVAILABLE — No verified historical option contract dataset loaded for {symbol}"
+                            unavail_reason = f"DATA_UNAVAILABLE — No verified historical option contract dataset loaded for {sym}"
                             rejected_total += 1
                             reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
+                            symbol_stats[sym]["data_unavailable"] += 1
                             if len(rejected_sample) < self.rejected_sample_size:
                                 rejected_sample.append(RejectedSignal(
-                                    symbol=symbol, timestamp=bar_timestamp,
+                                    symbol=sym, timestamp=ts,
                                     strategy=best.strategy_name, reasons=[unavail_reason],
                                 ))
                             continue
 
-                        contract_res = options_data_loader.resolve_contract(symbol, bar_dt, spot_close, option_type)
+                        contract_res = options_data_loader.resolve_contract(sym, bar_dt, spot_close, option_type)
                         if contract_res is None:
                             result.contract_resolution_failures += 1
                             result.contract_resolution_failures_breakdown["no_matching_contract"] = (
                                 result.contract_resolution_failures_breakdown.get("no_matching_contract", 0) + 1
                             )
-                            unavail_reason = f"DATA_UNAVAILABLE — Cannot resolve historical contract for {symbol} on {bar_date}"
+                            unavail_reason = f"DATA_UNAVAILABLE — Cannot resolve historical contract for {sym} on {bar_date}"
                             rejected_total += 1
                             reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
+                            symbol_stats[sym]["data_unavailable"] += 1
                             if len(rejected_sample) < self.rejected_sample_size:
                                 rejected_sample.append(RejectedSignal(
-                                    symbol=symbol, timestamp=bar_timestamp,
+                                    symbol=sym, timestamp=ts,
                                     strategy=best.strategy_name, reasons=[unavail_reason],
                                 ))
                             continue
 
                         result.contracts_resolved += 1
                         c_key, exp_str, strike_val, opt_type = contract_res
-                        
+
                         result.option_premium_lookup_attempts += 1
-                        opt_candle = options_data_loader.get_candle_at(c_key, bar_timestamp)
+                        opt_candle = options_data_loader.get_candle_at(c_key, ts)
                         if opt_candle is None:
                             result.option_premium_missing += 1
-                            unavail_reason = f"DATA_UNAVAILABLE — Missing historical option candle for {c_key} at {bar_timestamp}"
+                            unavail_reason = f"DATA_UNAVAILABLE — Missing historical option candle for {c_key} at {ts}"
                             rejected_total += 1
                             reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
+                            symbol_stats[sym]["data_unavailable"] += 1
                             if len(rejected_sample) < self.rejected_sample_size:
                                 rejected_sample.append(RejectedSignal(
-                                    symbol=symbol, timestamp=bar_timestamp,
+                                    symbol=sym, timestamp=ts,
                                     strategy=best.strategy_name, reasons=[unavail_reason],
                                 ))
                             continue
 
                         result.option_premiums_found += 1
-                        # Real Option entry execution using verified historical option premium
                         opt_entry_price = float(opt_candle.close)
                         if opt_entry_price <= 0.0:
                             result.option_premium_missing += 1
-                            unavail_reason = f"DATA_UNAVAILABLE — Invalid non-positive option premium for {c_key} at {bar_timestamp}"
+                            unavail_reason = f"DATA_UNAVAILABLE — Invalid non-positive option premium for {c_key} at {ts}"
                             rejected_total += 1
                             reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
+                            symbol_stats[sym]["data_unavailable"] += 1
                             continue
 
-                        # Dynamic ATR / risk-percentage stop (18% premium stop) with min 2.0R target
                         opt_stop_loss = round(max(0.5, opt_entry_price * 0.82), 2)
                         opt_target = round(opt_entry_price + 2.0 * (opt_entry_price - opt_stop_loss), 2)
-                        
-                        lot_size = INDEX_LOT_SIZES.get(symbol.upper(), 25)
+
+                        lot_size = INDEX_LOT_SIZES.get(sym.upper(), 25)
                         risk_per_unit = opt_entry_price - opt_stop_loss
                         risk_amount = equity * self.risk_pct_per_trade
                         num_lots = max(1, int(risk_amount / (risk_per_unit * lot_size))) if risk_per_unit > 0 else 1
                         opt_qty = num_lots * lot_size
-                        
+
                         max_affordable_qty = int(equity / opt_entry_price) if opt_entry_price > 0 else 0
                         if max_affordable_qty < lot_size:
                             result.risk_rejections += 1
@@ -610,6 +801,7 @@ class BacktestEngine:
                             rej_reason = f"RISK_REJECTED — Insufficient equity (₹{equity:.2f}) for 1 lot ({lot_size}) of {c_key} @ ₹{opt_entry_price:.2f}"
                             rejected_total += 1
                             reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                            symbol_stats[sym]["risk_rejections"] += 1
                             continue
                         opt_qty = min(opt_qty, (max_affordable_qty // lot_size) * lot_size)
                         if opt_qty <= 0:
@@ -620,9 +812,9 @@ class BacktestEngine:
                             rej_reason = "RISK_REJECTED — Sized quantity is 0 lots"
                             rejected_total += 1
                             reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                            symbol_stats[sym]["risk_rejections"] += 1
                             continue
 
-                        # Expectancy vs Friction Filter
                         est_brokerage = 40.0
                         est_stt = 0.0015 * opt_entry_price * opt_qty
                         est_statutory = 15.0
@@ -637,24 +829,25 @@ class BacktestEngine:
                             rej_reason = f"EXPECTANCY_TOO_LOW — Expected gain (₹{expected_gain:.2f}) insufficient for transaction friction (₹{est_total_friction:.2f})"
                             rejected_total += 1
                             reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                            symbol_stats[sym]["risk_rejections"] += 1
                             continue
 
                         result.orders_created += 1
                         result.trades_opened += 1
                         setup_name_tag = best.indicators.get("setup_name", "MOMENTUM_CONTINUATION")
                         result.setups_breakdown[setup_name_tag] = result.setups_breakdown.get(setup_name_tag, 0) + 1
-                        
+
                         opt_trading_sym = c_key
                         try:
                             exp_date_obj = datetime.fromisoformat(exp_str).date() if exp_str and "-" in exp_str else bar_dt
-                            opt_trading_sym = build_trading_symbol(symbol, exp_date_obj, strike_val, opt_type)
+                            opt_trading_sym = build_trading_symbol(sym, exp_date_obj, strike_val, opt_type)
                         except Exception:
                             opt_trading_sym = c_key
 
-                        position = {
+                        symbol_positions[sym] = {
                             "strategy": best.strategy_name,
-                            "symbol": symbol,
-                            "underlying": symbol,
+                            "symbol": sym,
+                            "underlying": sym,
                             "contract_symbol": c_key,
                             "contract_key": c_key,
                             "option_symbol": opt_trading_sym or c_key,
@@ -662,7 +855,7 @@ class BacktestEngine:
                             "strike": strike_val,
                             "option_type": opt_type,
                             "is_real_option": True,
-                            "entry_time": bar_timestamp,
+                            "entry_time": ts,
                             "entry_price": opt_entry_price,
                             "stop_loss": opt_stop_loss,
                             "trailing_stop": opt_stop_loss,
@@ -672,6 +865,8 @@ class BacktestEngine:
                             "confidence": best.confidence,
                             "setup_name": setup_name_tag,
                         }
+                        symbol_last_entry_ts[sym] = ts
+                        max_simultaneous_seen = max(max_simultaneous_seen, current_open_count + 1)
                         continue
 
                     # Spot / Equity default execution (when require_real_options=False)
@@ -686,24 +881,27 @@ class BacktestEngine:
                             result.risk_rejections_breakdown["insufficient_capital"] = (
                                 result.risk_rejections_breakdown.get("insufficient_capital", 0) + 1
                             )
-                            position = None
+                            rej_reason = "RISK_REJECTED — Insufficient capital"
+                            rejected_total += 1
+                            reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                            symbol_stats[sym]["risk_rejections"] += 1
                             continue
                         qty = min(qty, max_affordable_qty)
 
                         result.orders_created += 1
                         result.trades_opened += 1
-                        position = {
+                        symbol_positions[sym] = {
                             "strategy": best.strategy_name,
-                            "symbol": symbol,
-                            "underlying": symbol,
-                            "contract_symbol": symbol,
-                            "contract_key": symbol,
+                            "symbol": sym,
+                            "underlying": sym,
+                            "contract_symbol": sym,
+                            "contract_key": sym,
                             "option_symbol": "",
                             "expiry": "",
                             "strike": None,
                             "option_type": "",
                             "is_real_option": False,
-                            "entry_time": bar.get("timestamp", ""),
+                            "entry_time": ts,
                             "entry_price": best.entry_price,
                             "stop_loss": best.stop_loss,
                             "trailing_stop": best.stop_loss,
@@ -712,35 +910,43 @@ class BacktestEngine:
                             "lot_size": 1,
                             "confidence": best.confidence,
                         }
+                        symbol_last_entry_ts[sym] = ts
+                        max_simultaneous_seen = max(max_simultaneous_seen, current_open_count + 1)
 
-            # Close any position still open at the end of this symbol's data.
-            if position is not None and candles:
-                last_bar = candles[-1]
+        # ── 5. End of Simulation Closeout (close any remaining open positions) ──
+        for sym in valid_symbols:
+            pos = symbol_positions[sym]
+            if pos is not None and symbol_sorted_candles[sym]:
+                last_bar = symbol_sorted_candles[sym][-1]
                 last_ts = last_bar.get("timestamp", "")
-                exit_price = last_bar["close"]
-                
-                if position.get("is_real_option") and options_data_loader:
-                    c_key = position.get("contract_key", "")
+                exit_price = float(last_bar["close"])
+
+                if pos.get("is_real_option") and options_data_loader:
+                    c_key = pos.get("contract_key", "")
                     candle_rec = options_data_loader.get_candle_at(c_key, last_ts)
                     if candle_rec:
-                        exit_price = candle_rec.close
+                        exit_price = float(candle_rec.close)
                     else:
-                        # Fallback to entry price or last known option price if candle missing at backtest end
-                        exit_price = position["entry_price"]
+                        exit_price = pos["entry_price"]
 
-                qty = position["quantity"]
+                qty = pos["quantity"]
                 costs = self.costs.apply(
-                    position["entry_price"], exit_price, qty,
-                    is_option=position["strategy"] == "OPTION_PREMIUM" or position.get("is_real_option", False),
+                    pos["entry_price"], exit_price, qty,
+                    is_option=pos["strategy"] == "OPTION_PREMIUM" or pos.get("is_real_option", False),
                 )
                 trade = BacktestTrade(
-                    symbol=position.get("contract_symbol", symbol),
-                    strategy=position["strategy"],
-                    entry_time=position["entry_time"], exit_time=last_ts,
-                    entry_price=position["entry_price"], exit_price=round(exit_price, 2),
-                    quantity=qty, exit_reason="BACKTEST_END",
-                    gross_pnl=costs["gross_pnl"], net_pnl=costs["net_pnl"],
-                    charges=costs["charges"], confidence=position["confidence"],
+                    symbol=pos.get("contract_symbol", sym),
+                    strategy=pos["strategy"],
+                    entry_time=pos["entry_time"],
+                    exit_time=last_ts,
+                    entry_price=pos["entry_price"],
+                    exit_price=round(exit_price, 2),
+                    quantity=qty,
+                    exit_reason="BACKTEST_END",
+                    gross_pnl=costs["gross_pnl"],
+                    net_pnl=costs["net_pnl"],
+                    charges=costs["charges"],
+                    confidence=pos["confidence"],
                     brokerage=costs["brokerage"],
                     stt=costs["stt"],
                     exchange_charges=costs["exchange_charges"],
@@ -749,26 +955,43 @@ class BacktestEngine:
                     stamp_duty=costs["stamp_duty"],
                     slippage=costs["slippage"],
                     total_cost=costs["total_cost"],
-                    underlying=position.get("underlying", symbol),
-                    instrument_key=position.get("contract_key", position.get("contract_symbol", symbol)),
-                    option_symbol=position.get("option_symbol", position.get("contract_symbol", "")),
-                    strike=position.get("strike"),
-                    option_type=position.get("option_type", ""),
-                    expiry=position.get("expiry", ""),
-                    lot_size=position.get("lot_size", INDEX_LOT_SIZES.get(symbol.upper(), 25)),
-                    stop_loss=position.get("stop_loss", 0.0),
-                    target=position.get("target", 0.0),
-                    trailing_stop=position.get("trailing_stop", 0.0),
-                    setup_score=position.get("confidence", 0.0),
+                    underlying=pos.get("underlying", sym),
+                    instrument_key=pos.get("contract_key", pos.get("contract_symbol", sym)),
+                    option_symbol=pos.get("option_symbol", pos.get("contract_symbol", "")),
+                    strike=pos.get("strike"),
+                    option_type=pos.get("option_type", ""),
+                    expiry=pos.get("expiry", ""),
+                    lot_size=pos.get("lot_size", INDEX_LOT_SIZES.get(sym.upper(), 25)),
+                    stop_loss=pos.get("stop_loss", 0.0),
+                    target=pos.get("target", 0.0),
+                    trailing_stop=pos.get("trailing_stop", 0.0),
+                    setup_score=pos.get("confidence", 0.0),
                 )
                 all_trades.append(trade)
                 result.trades_closed += 1
-                equity += costs["net_pnl"]
-                peak = max(peak, equity)
+                symbol_stats[sym]["trades"] += 1
+                symbol_stats[sym]["trades_list"].append(trade)
+                symbol_stats[sym]["net_pnl"] = round(symbol_stats[sym]["net_pnl"] + costs["net_pnl"], 2)
+                symbol_stats[sym]["charges"] = round(symbol_stats[sym]["charges"] + costs["charges"], 2)
+                if costs["net_pnl"] > 0:
+                    symbol_stats[sym]["wins"] += 1
+                else:
+                    symbol_stats[sym]["losses"] += 1
 
+                equity = round(equity + costs["net_pnl"], 2)
+                peak_equity = max(peak_equity, equity)
+                dd = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
+                result.max_drawdown_pct = max(result.max_drawdown_pct, dd)
+                equity_curve.append({
+                    "timestamp": last_ts,
+                    "equity": round(equity, 2),
+                })
+                symbol_positions[sym] = None
 
-        # ── aggregate metrics ──────────────────────────────────────────────
-        result.total_candles_scanned = candles_scanned
+        # Ensure all_trades is globally sorted chronologically
+        all_trades.sort(key=lambda t: (t.entry_time, t.exit_time, t.symbol))
+
+        # ── 6. Aggregate Metrics, Invariant Checks & Summaries ──
         result.signals_generated = signals_generated
         result.trades_taken = len(all_trades)
         result.rejected_signals_sample = [
@@ -780,46 +1003,108 @@ class BacktestEngine:
             sorted(reason_counts.items(), key=lambda kv: -kv[1])
         )
 
-        if all_trades:
-            wins = [t for t in all_trades if t.net_pnl > 0]
-            losses = [t for t in all_trades if t.net_pnl <= 0]
-            gross_win = sum(t.net_pnl for t in wins)
-            gross_loss = abs(sum(t.net_pnl for t in losses))
+        wins = [t for t in all_trades if t.net_pnl > 0]
+        losses = [t for t in all_trades if t.net_pnl <= 0]
+        gross_win = sum(t.net_pnl for t in wins)
+        gross_loss = abs(sum(t.net_pnl for t in losses))
 
-            result.winning_trades = len(wins)
-            result.losing_trades = len(losses)
-            result.accuracy_pct = len(wins) / len(all_trades) * 100
-            result.profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (
-                float("inf") if gross_win > 0 else 0.0
-            )
-            result.net_profit = sum(t.net_pnl for t in all_trades)
-            result.net_profit_pct = result.net_profit / self.capital * 100
-            result.total_charges = sum(t.charges for t in all_trades)
-            result.trade_log = [t.to_dict() for t in all_trades]
-            result.equity_curve = equity_curve
-
-        # profit_factor of inf isn't JSON-safe — cap it for the response.
+        result.winning_trades = len(wins)
+        result.losing_trades = len(losses)
+        result.accuracy_pct = (len(wins) / len(all_trades) * 100) if all_trades else 0.0
+        result.profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (
+            999.99 if gross_win > 0 else 0.0
+        )
         if result.profit_factor == float("inf"):
             result.profit_factor = 999.99
 
-        # Build comprehensive data quality report
+        result.net_profit = sum(t.net_pnl for t in all_trades)
+        result.net_profit_pct = (result.net_profit / self.capital * 100) if self.capital > 0 else 0.0
+        result.total_charges = sum(t.charges for t in all_trades)
+        result.trade_log = [t.to_dict() for t in all_trades]
+        result.equity_curve = equity_curve
+        result.max_simultaneous_positions = max_simultaneous_seen
+        result.total_portfolio_risk = round(self.capital * self.risk_pct_per_trade * max(1, max_simultaneous_seen), 2)
+
+        # ── 7. Build Symbol Summary ──
+        symbol_summary: Dict[str, Dict[str, Any]] = {}
+        for sym in symbol_candles.keys():
+            if sym in valid_symbols:
+                st = symbol_stats[sym]
+                sym_trades = sorted(st["trades_list"], key=lambda t: (t.entry_time, t.exit_time, t.symbol))
+                sym_wins = [t for t in sym_trades if t.net_pnl > 0]
+                sym_losses = [t for t in sym_trades if t.net_pnl <= 0]
+                sym_gross_win = sum(t.net_pnl for t in sym_wins)
+                sym_gross_loss = abs(sum(t.net_pnl for t in sym_losses))
+                sym_pf = (sym_gross_win / sym_gross_loss) if sym_gross_loss > 0 else (
+                    999.99 if sym_gross_win > 0 else 0.0
+                )
+                sym_wr = (len(sym_wins) / len(sym_trades) * 100) if sym_trades else 0.0
+                symbol_summary[sym] = {
+                    "candles": st["candles"],
+                    "signals": st["signals"],
+                    "trades": st["trades"],
+                    "wins": st["wins"],
+                    "losses": st["losses"],
+                    "net_pnl": round(st["net_pnl"], 2),
+                    "charges": round(st["charges"], 2),
+                    "win_rate": round(sym_wr, 2),
+                    "profit_factor": round(sym_pf, 2),
+                    "gross_profit": round(sym_gross_win, 2),
+                    "gross_loss": round(sym_gross_loss, 2),
+                    "risk_rejections": st["risk_rejections"],
+                    "data_unavailable": st["data_unavailable"],
+                    "skipped": False,
+                }
+            else:
+                skip_reason = next(
+                    (s["reason"] for s in result.skipped_symbols if s["symbol"] == sym),
+                    f"Insufficient candles (< {self.min_candles_required})"
+                )
+                symbol_summary[sym] = {
+                    "candles": len(symbol_candles.get(sym, [])),
+                    "signals": 0, "trades": 0, "wins": 0, "losses": 0,
+                    "net_pnl": 0.0, "charges": 0.0, "win_rate": 0.0,
+                    "profit_factor": 0.0, "gross_profit": 0.0, "gross_loss": 0.0,
+                    "risk_rejections": 0, "data_unavailable": 0,
+                    "skipped": True, "skip_reason": skip_reason,
+                }
+        result.symbol_summary = symbol_summary
+
+        # ── 8. Build Portfolio Summary ──
+        result.portfolio_summary = {
+            "starting_capital": round(self.capital, 2),
+            "ending_equity": round(equity, 2),
+            "net_profit": round(result.net_profit, 2),
+            "net_profit_pct": round(result.net_profit_pct, 2),
+            "total_trades": result.trades_taken,
+            "total_charges": round(result.total_charges, 2),
+            "max_drawdown_pct": round(result.max_drawdown_pct, 2),
+            "winning_trades": result.winning_trades,
+            "losing_trades": result.losing_trades,
+            "win_rate": round(result.accuracy_pct, 2),
+            "profit_factor": round(result.profit_factor, 2),
+            "max_simultaneous_positions": max_simultaneous_seen,
+            "total_portfolio_risk": result.total_portfolio_risk,
+        }
+
+        # ── 9. Build Data Quality Report ──
         dq = DataQualityReport()
         dq.lookahead_protection = True
         dq.synthetic_data_used = False
-        dq.total_bars = candles_scanned
+        dq.total_bars = result.total_candles_scanned
         dq.rejection_reasons = result.rejection_reason_counts
         if require_real_options and options_data_loader:
             dq.historical_contract_data = options_data_loader.is_data_available()
             avail_cnt = options_data_loader.available_candles_count() if callable(getattr(options_data_loader, "available_candles_count", None)) else 0
-            avail_int = avail_cnt if isinstance(avail_cnt, int) else candles_scanned
-            dq.bars_with_real_data = min(candles_scanned, avail_int)
+            avail_int = avail_cnt if isinstance(avail_cnt, int) else result.total_candles_scanned
+            dq.bars_with_real_data = min(result.total_candles_scanned, avail_int)
             dq.contracts_resolved = len(all_trades)
             dq.contracts_unavailable = sum(
                 count for r_name, count in result.rejection_reason_counts.items() if "DATA_UNAVAILABLE" in r_name
             )
         else:
             dq.historical_contract_data = False
-            dq.bars_with_real_data = candles_scanned
+            dq.bars_with_real_data = result.total_candles_scanned
             dq.contracts_resolved = len(all_trades)
             dq.contracts_unavailable = 0
         result.data_quality = dq
