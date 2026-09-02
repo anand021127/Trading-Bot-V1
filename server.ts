@@ -2388,27 +2388,38 @@ app.get(['/api/upstox/auth/status', '/api/settings/auth-state'], async (req, res
 const DEFAULT_REDIRECT_URI = 'https://upstoxbot-anand.duckdns.org/api/settings/token-callback';
 
 app.post('/api/settings/regenerate-token', (req, res) => {
-  const clientId = (req.body?.client_id as string) || (req.query?.client_id as string) || process.env.UPSTOX_CLIENT_ID;
+  const rawClientId = (req.body?.client_id as string) || (req.query?.client_id as string) || process.env.UPSTOX_CLIENT_ID || process.env.UPSTOX_API_KEY || '';
+  const clientId = rawClientId.trim().replace(/^["']|["']$/g, '');
   if (!clientId || clientId.startsWith('your_client_id')) {
     return res.status(400).json({
+      detail: 'UPSTOX_CLIENT_ID not configured.',
       error: 'UPSTOX_CLIENT_ID is not configured. Enter your Upstox API Key / Client ID.',
     });
   }
-  const envRedirect = process.env.UPSTOX_REDIRECT_URI;
-  const redirectUri = (req.body?.redirect_uri as string) || (req.query?.redirect_uri as string) || (envRedirect && !envRedirect.includes('your-api') && !envRedirect.includes('dummy') ? envRedirect : DEFAULT_REDIRECT_URI);
+  const envRedirect = (process.env.UPSTOX_REDIRECT_URI || '').trim().replace(/^["']|["']$/g, '');
+  const redirectUri = (
+    (req.body?.redirect_uri as string) ||
+    (req.query?.redirect_uri as string) ||
+    (envRedirect && !envRedirect.includes('your-api') && !envRedirect.includes('dummy') ? envRedirect : DEFAULT_REDIRECT_URI)
+  ).trim().replace(/^["']|["']$/g, '');
   const authUrl = `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}`;
   res.json({ auth_url: authUrl, redirect_uri: redirectUri });
 });
 
 app.get(['/api/settings/auth-url', '/api/settings/login-url', '/api/settings/regenerate-token'], (req, res) => {
-  const clientId = (req.query?.client_id as string) || process.env.UPSTOX_CLIENT_ID;
+  const rawClientId = (req.query?.client_id as string) || process.env.UPSTOX_CLIENT_ID || process.env.UPSTOX_API_KEY || '';
+  const clientId = rawClientId.trim().replace(/^["']|["']$/g, '');
   if (!clientId || clientId.startsWith('your_client_id')) {
     return res.status(400).json({
+      detail: 'UPSTOX_CLIENT_ID not configured.',
       error: 'UPSTOX_CLIENT_ID is not configured.',
     });
   }
-  const envRedirect = process.env.UPSTOX_REDIRECT_URI;
-  const redirectUri = (req.query?.redirect_uri as string) || (envRedirect && !envRedirect.includes('your-api') && !envRedirect.includes('dummy') ? envRedirect : DEFAULT_REDIRECT_URI);
+  const envRedirect = (process.env.UPSTOX_REDIRECT_URI || '').trim().replace(/^["']|["']$/g, '');
+  const redirectUri = (
+    (req.query?.redirect_uri as string) ||
+    (envRedirect && !envRedirect.includes('your-api') && !envRedirect.includes('dummy') ? envRedirect : DEFAULT_REDIRECT_URI)
+  ).trim().replace(/^["']|["']$/g, '');
   const authUrl = `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}`;
   res.json({ auth_url: authUrl, redirect_uri: redirectUri });
 });

@@ -132,15 +132,20 @@ async def update_settings(body: Dict[str, Any]) -> Dict[str, Any]:
 @router.get("/env-status")
 async def get_env_status() -> Dict[str, bool]:
     """Return which env vars are set (never expose values)."""
-    # Also check DB-stored token
     db_token = ""
+    db_cid = ""
+    db_sec = ""
     try:
         db_token = _db.load_token()
+        db_cid = _db.get_setting("upstox_client_id", "") or _db.get_setting("upstox_api_key", "")
+        db_sec = _db.get_setting("upstox_client_secret", "") or _db.get_setting("upstox_api_secret", "")
     except Exception:
         pass
+    has_cid = bool((os.getenv("UPSTOX_CLIENT_ID") or os.getenv("UPSTOX_API_KEY") or db_cid) and not (os.getenv("UPSTOX_CLIENT_ID", "").startswith("your_") or os.getenv("UPSTOX_API_KEY", "").startswith("your_")))
+    has_sec = bool((os.getenv("UPSTOX_CLIENT_SECRET") or os.getenv("UPSTOX_API_SECRET") or db_sec) and not (os.getenv("UPSTOX_CLIENT_SECRET", "").startswith("your_") or os.getenv("UPSTOX_API_SECRET", "").startswith("your_")))
     return {
-        "UPSTOX_CLIENT_ID":     bool(os.getenv("UPSTOX_CLIENT_ID")),
-        "UPSTOX_CLIENT_SECRET": bool(os.getenv("UPSTOX_CLIENT_SECRET")),
+        "UPSTOX_CLIENT_ID":     has_cid,
+        "UPSTOX_CLIENT_SECRET": has_sec,
         "UPSTOX_ACCESS_TOKEN":  bool(os.getenv("UPSTOX_ACCESS_TOKEN") or db_token),
         "EMAIL_PASSWORD":       bool(os.getenv("EMAIL_PASSWORD")),
         "SENDER_EMAIL":         bool(os.getenv("SENDER_EMAIL") or os.getenv("NOTIFICATION_EMAIL")),
@@ -171,19 +176,20 @@ async def regenerate_token(
         except Exception:
             pass
 
-    cid = client_id or body_data.get("client_id") or os.getenv("UPSTOX_CLIENT_ID", "")
+    raw_cid = client_id or body_data.get("client_id") or os.getenv("UPSTOX_CLIENT_ID", "") or os.getenv("UPSTOX_API_KEY", "")
+    cid = (raw_cid or "").strip().strip('"\'')
     if not cid or cid.startswith("your_client_id"):
         try:
-            db_cid = _db.get_setting("upstox_client_id", "")
+            db_cid = _db.get_setting("upstox_client_id", "") or _db.get_setting("upstox_api_key", "")
             if db_cid and not db_cid.startswith("your_client_id"):
-                cid = db_cid
+                cid = db_cid.strip().strip('"\'')
         except Exception:
             pass
 
-    env_redirect = os.getenv("UPSTOX_REDIRECT_URI", "")
+    env_redirect = os.getenv("UPSTOX_REDIRECT_URI", "").strip().strip('"\'')
     r_uri = (
-        redirect_uri
-        or body_data.get("redirect_uri")
+        (redirect_uri or "").strip().strip('"\'')
+        or (body_data.get("redirect_uri") or "").strip().strip('"\'')
         or (env_redirect if (env_redirect and "your-api" not in env_redirect and "dummy" not in env_redirect) else DEFAULT_REDIRECT_URI)
     )
 
@@ -258,8 +264,23 @@ async def token_callback(
 
     try:
         import httpx
-        client_id     = os.getenv("UPSTOX_CLIENT_ID", "")
-        client_secret = os.getenv("UPSTOX_CLIENT_SECRET", "")
+        client_id     = (os.getenv("UPSTOX_CLIENT_ID", "") or os.getenv("UPSTOX_API_KEY", "")).strip().strip('"\'')
+        if not client_id or client_id.startswith("your_"):
+            try:
+                db_cid = _db.get_setting("upstox_client_id", "") or _db.get_setting("upstox_api_key", "")
+                if db_cid and not db_cid.startswith("your_"):
+                    client_id = db_cid.strip().strip('"\'')
+            except Exception:
+                pass
+
+        client_secret = (os.getenv("UPSTOX_CLIENT_SECRET", "") or os.getenv("UPSTOX_API_SECRET", "")).strip().strip('"\'')
+        if not client_secret or client_secret.startswith("your_"):
+            try:
+                db_sec = _db.get_setting("upstox_client_secret", "") or _db.get_setting("upstox_api_secret", "")
+                if db_sec and not db_sec.startswith("your_"):
+                    client_secret = db_sec.strip().strip('"\'')
+            except Exception:
+                pass
 
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
@@ -574,8 +595,25 @@ async def request_token_push_endpoint(request: Request) -> Dict[str, Any]:
     """Initiate Upstox API v3 semi-automated Access Token Request flow."""
     from backend.broker.auth import request_token_approval
 
-    client_id = os.getenv("UPSTOX_CLIENT_ID", "")
-    client_secret = os.getenv("UPSTOX_CLIENT_SECRET", "")
+    raw_client_id = os.getenv("UPSTOX_CLIENT_ID", "") or os.getenv("UPSTOX_API_KEY", "")
+    client_id = (raw_client_id or "").strip().strip('"\'')
+    if not client_id or client_id.startswith("your_client_id"):
+        try:
+            db_cid = _db.get_setting("upstox_client_id", "") or _db.get_setting("upstox_api_key", "")
+            if db_cid and not db_cid.startswith("your_client_id"):
+                client_id = db_cid.strip().strip('"\'')
+        except Exception:
+            pass
+
+    raw_client_secret = os.getenv("UPSTOX_CLIENT_SECRET", "") or os.getenv("UPSTOX_API_SECRET", "")
+    client_secret = (raw_client_secret or "").strip().strip('"\'')
+    if not client_secret or client_secret.startswith("your_client_secret"):
+        try:
+            db_sec = _db.get_setting("upstox_client_secret", "") or _db.get_setting("upstox_api_secret", "")
+            if db_sec and not db_sec.startswith("your_client_secret"):
+                client_secret = db_sec.strip().strip('"\'')
+        except Exception:
+            pass
 
     if not client_id or client_id.startswith("your_client_id"):
         raise HTTPException(status_code=400, detail="UPSTOX_CLIENT_ID is not configured.")

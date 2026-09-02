@@ -24,16 +24,29 @@ UPSTOX_TOKEN_URL = TOKEN_URL
 def _get_required_env(name: str) -> str:
     """Return an environment variable value or fallback to database settings."""
     value = os.getenv(name)
-    if value and not value.startswith("your_") and "your-api" not in value:
-        return value
+    if not value and name == "UPSTOX_CLIENT_ID":
+        value = os.getenv("UPSTOX_API_KEY")
+    elif not value and name == "UPSTOX_CLIENT_SECRET":
+        value = os.getenv("UPSTOX_API_SECRET")
+
+    if value:
+        cleaned = value.strip().strip('"\'')
+        if cleaned and not cleaned.startswith("your_") and "your-api" not in cleaned:
+            return cleaned
 
     try:
         from backend.database.db_manager import DatabaseManager
         db = DatabaseManager()
         setting_key = name.lower()
         db_val = db.get_setting(setting_key, "")
-        if db_val and not db_val.startswith("your_"):
-            return db_val
+        if not db_val and name == "UPSTOX_CLIENT_ID":
+            db_val = db.get_setting("upstox_api_key", "")
+        elif not db_val and name == "UPSTOX_CLIENT_SECRET":
+            db_val = db.get_setting("upstox_api_secret", "")
+        if db_val:
+            cleaned_db = db_val.strip().strip('"\'')
+            if cleaned_db and not cleaned_db.startswith("your_"):
+                return cleaned_db
     except Exception:
         pass
 
@@ -42,14 +55,14 @@ def _get_required_env(name: str) -> str:
 
     if not value or value.startswith("your_"):
         raise ValueError(f"Missing required environment variable: {name}")
-    return value
+    return value.strip().strip('"\'')
 
 
 def _get_redirect_uri(override: Optional[str] = None) -> str:
     """Resolve redirect URI with fallback to production DuckDNS endpoint."""
     if override and override.strip():
-        return override.strip()
-    env_uri = os.getenv("UPSTOX_REDIRECT_URI", "").strip()
+        return override.strip().strip('"\'')
+    env_uri = os.getenv("UPSTOX_REDIRECT_URI", "").strip().strip('"\'')
     if env_uri and "your-api" not in env_uri and "dummy" not in env_uri:
         return env_uri
     try:
@@ -57,7 +70,7 @@ def _get_redirect_uri(override: Optional[str] = None) -> str:
         db = DatabaseManager()
         db_uri = db.get_setting("upstox_redirect_uri", "")
         if db_uri and "your-api" not in db_uri and "dummy" not in db_uri:
-            return db_uri
+            return db_uri.strip().strip('"\'')
     except Exception:
         pass
     return DEFAULT_REDIRECT_URI
