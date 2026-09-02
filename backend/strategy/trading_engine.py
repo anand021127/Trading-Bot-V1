@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -45,6 +47,10 @@ from backend.strategy.strategy_engine import MultiStrategyEngine
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 settings = load_settings()
+
+# Process-level idempotent guard for shutdown notifications
+_shutdown_lock = threading.Lock()
+_process_shutdown_notification_sent_pid: Optional[int] = None
 
 # V21-FINAL: configurable max option tick age in seconds
 MAX_OPTION_TICK_AGE_SECONDS = 30
@@ -434,14 +440,50 @@ class TradingEngine:
     # ─── Bot lifecycle ────────────────────────────────────────────────────────
 
     def start(self) -> None:
+        global _process_shutdown_notification_sent_pid
+        with _shutdown_lock:
+            _process_shutdown_notification_sent_pid = None
         BotState.start()
         logger.info("Trading engine started. Mode: %s", settings.mode)
         self.notify("🟢 Trading bot started. Mode: " + settings.mode.upper())
 
     def stop(self, reason: str = "Manual stop") -> None:
+        was_running = BotState.is_running()
         BotState.stop(reason)
-        logger.info("Trading engine stopped: %s", reason)
-        self.notify(f"🔴 Trading bot stopped: {reason}")
+        logger.info("Trading engine stopped: %s (was_running=%s)", reason, was_running)
+
+        is_shutdown = "shutdown" in reason.lower()
+        if is_shutdown:
+            pid = os.getpid()
+            global _process_shutdown_notification_sent_pid
+            with _shutdown_lock:
+                if _process_shutdown_notification_sent_pid == pid:
+                    logger.info(
+                        "SHUTDOWN_NOTIFICATION_SKIPPED reason=already_sent_for_this_process pid=%d",
+                        pid,
+                    )
+                    return
+                _process_shutdown_notification_sent_pid = pid
+
+            notification_sent = False
+            try:
+                self.notify(f"🔴 Trading bot stopped: {reason}")
+                notification_sent = True
+            except Exception as e:
+                logger.warning("Failed to send shutdown notification via notify: %s", e)
+                notification_sent = False
+
+            logger.info(
+                "SHUTDOWN_EVENT detected reason=%s pid=%d notification_sent=%s",
+                reason,
+                pid,
+                notification_sent,
+            )
+        else:
+            if was_running:
+                self.notify(f"🔴 Trading bot stopped: {reason}")
+            else:
+                logger.info("Stop notification skipped: Bot was not running (reason: %s)", reason)
 
     def kill(self, reason: str = "Emergency kill switch activated") -> None:
         BotState.kill(reason)
