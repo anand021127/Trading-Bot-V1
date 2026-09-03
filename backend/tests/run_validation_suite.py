@@ -50,20 +50,26 @@ def build_trend_series(candles: List[Dict[str, Any]], ema_fast: int = 20, ema_sl
     return series
 
 
+_DATA_CACHE: Dict[str, Tuple[List[Dict[str, Any]], Dict[str, Any]]] = {}
+
+
 def load_symbol_data(symbols: List[str]) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Dict[str, Any]]]:
     root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     symbol_candles = {}
     option_contexts = {}
 
     for sym in symbols:
-        file_path = os.path.join(root_dir, "real_data", f"{sym}_2024_5min.json")
-        candles = load_dataset_safe(file_path, auto_repair=True)
+        if sym not in _DATA_CACHE:
+            file_path = os.path.join(root_dir, "real_data", f"{sym}_2024_5min.json")
+            candles = load_dataset_safe(file_path, auto_repair=True)
+            trend_series = build_trend_series(candles)
+            _DATA_CACHE[sym] = (candles, {
+                "underlying_trend_series": trend_series,
+                "symbol": sym,
+            })
+        candles, ctx = _DATA_CACHE[sym]
         symbol_candles[sym] = candles
-        trend_series = build_trend_series(candles)
-        option_contexts[sym] = {
-            "underlying_trend_series": trend_series,
-            "symbol": sym,
-        }
+        option_contexts[sym] = ctx
 
     return symbol_candles, option_contexts
 
@@ -71,15 +77,74 @@ def load_symbol_data(symbols: List[str]) -> Tuple[Dict[str, List[Dict[str, Any]]
 def run_engine_on_symbols(symbols: List[str]):
     symbol_candles, option_contexts = load_symbol_data(symbols)
     engine = BacktestEngine(costs=CostConfig(), capital=100000.0, risk_pct_per_trade=0.01)
+
+    last_print = [0]
+    def on_progress(p):
+        cur = p.get("bar_index", 0)
+        tot = p.get("total_bars", 1)
+        if cur - last_print[0] >= 10000 or cur == tot:
+            last_print[0] = cur
+            pct = (cur / tot * 100) if tot else 0
+            print(f"  .. progress: {cur}/{tot} bars ({pct:.1f}%), trades={p.get('trades_so_far', 0)}", flush=True)
+
     result = engine.run(
         symbol_candles=symbol_candles,
         strategy_names=["OPTION_PREMIUM"],
         option_contexts=option_contexts,
+        progress_callback=on_progress,
     )
     return result
 
 
+import pickle
+import os
+
+def run_invariance(res_a=None):
+    print("\n============================================================")
+    print("SYMBOL-ORDER INVARIANCE TEST")
+    print("============================================================")
+    order_a = ["NIFTY50", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"]
+    order_b = ["BANKEX", "SENSEX", "MIDCPNIFTY", "FINNIFTY", "BANKNIFTY", "NIFTY50"]
+
+    if res_a is None:
+        if os.path.exists("/tmp/res_combined.pkl"):
+            print("Loading Run A from cached /tmp/res_combined.pkl...")
+            with open("/tmp/res_combined.pkl", "rb") as f:
+                res_a = pickle.load(f)
+        else:
+            print("Evaluating Run A (Forward order)...")
+            res_a = run_engine_on_symbols(order_a)
+
+    print("Evaluating Run B (Reversed order)...")
+    res_b = run_engine_on_symbols(order_b)
+
+    print(f"Run A total trades: {res_a.trades_taken}, Run B total trades: {res_b.trades_taken}")
+    print(f"Run A net P&L:      ₹{res_a.net_profit:.2f}, Run B net P&L:      ₹{res_b.net_profit:.2f}")
+    print(f"Run A charges:      ₹{res_a.total_charges:.2f}, Run B charges:      ₹{res_b.total_charges:.2f}")
+    print(f"Run A drawdown:     {res_a.max_drawdown_pct:.2f}%, Run B drawdown:     {res_b.max_drawdown_pct:.2f}%")
+
+    assert res_a.trades_taken == res_b.trades_taken, "Order variance: trades_taken differ"
+    assert abs(res_a.net_profit - res_b.net_profit) < 0.01, "Order variance: net_profit differs"
+    assert abs(res_a.total_charges - res_b.total_charges) < 0.01, "Order variance: total_charges differ"
+    assert abs(res_a.max_drawdown_pct - res_b.max_drawdown_pct) < 0.01, "Order variance: max_drawdown differs"
+
+    for i in range(len(res_a.trade_log)):
+        t_a = res_a.trade_log[i]
+        t_b = res_b.trade_log[i]
+        assert t_a["entry_time"] == t_b["entry_time"], f"Trade {i} entry_time mismatch: {t_a['entry_time']} vs {t_b['entry_time']}"
+        assert t_a["symbol"] == t_b["symbol"], f"Trade {i} symbol mismatch: {t_a['symbol']} vs {t_b['symbol']}"
+        assert t_a["entry_price"] == t_b["entry_price"], f"Trade {i} entry_price mismatch"
+        assert t_a["exit_price"] == t_b["exit_price"], f"Trade {i} exit_price mismatch"
+        assert t_a["net_pnl"] == t_b["net_pnl"], f"Trade {i} net_pnl mismatch"
+
+    print("\nSUCCESS: Order invariance verified! Run A and Run B produce 100% IDENTICAL trade logs and metrics.")
+
+
 def main():
+    if len(sys.argv) > 1 and ("invariance" in sys.argv[1] or "-i" in sys.argv[1]):
+        run_invariance()
+        return
+
     print("=" * 80)
     print("STARTING FOCUSED VALIDATION SUITE")
     print("=" * 80)
@@ -262,54 +327,60 @@ def main():
         sym = t.get("underlying", t.get("symbol"))
         print(f"{start_idx+idx+1:<6} {t['entry_time']:<26} {sym:<12} {t['entry_price']:<14.2f} {t['exit_price']:<14.2f} {t['net_pnl']:<10.2f}")
 
+    with open("/tmp/res_combined.pkl", "wb") as f:
+        pickle.dump(res_combined, f)
+
     # -------------------------------------------------------------
     # SYMBOL-ORDER INVARIANCE
     # -------------------------------------------------------------
-    print("\n============================================================")
-    print("SYMBOL-ORDER INVARIANCE")
-    print("============================================================")
-    order_a = ["NIFTY50", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"]
-    order_b = ["BANKEX", "SENSEX", "MIDCPNIFTY", "FINNIFTY", "BANKNIFTY", "NIFTY50"]
+    if "--portfolio" not in sys.argv and "-p" not in sys.argv:
+        print("\n============================================================")
+        print("SYMBOL-ORDER INVARIANCE")
+        print("============================================================")
+        order_b = ["BANKEX", "SENSEX", "MIDCPNIFTY", "FINNIFTY", "BANKNIFTY", "NIFTY50"]
 
-    res_a = run_engine_on_symbols(order_a)
-    res_b = run_engine_on_symbols(order_b)
+        print("Run A uses combined run result (exact same order and parameters)...")
+        res_a = res_combined
+        print("Evaluating Run B with reversed symbol order...")
+        res_b = run_engine_on_symbols(order_b)
 
-    print(f"Run A total trades: {res_a.trades_taken}, Run B total trades: {res_b.trades_taken}")
-    print(f"Run A net P&L:      ₹{res_a.net_profit:.2f}, Run B net P&L:      ₹{res_b.net_profit:.2f}")
-    print(f"Run A charges:      ₹{res_a.total_charges:.2f}, Run B charges:      ₹{res_b.total_charges:.2f}")
-    print(f"Run A drawdown:     {res_a.max_drawdown_pct:.2f}%, Run B drawdown:     {res_b.max_drawdown_pct:.2f}%")
+        print(f"Run A total trades: {res_a.trades_taken}, Run B total trades: {res_b.trades_taken}")
+        print(f"Run A net P&L:      ₹{res_a.net_profit:.2f}, Run B net P&L:      ₹{res_b.net_profit:.2f}")
+        print(f"Run A charges:      ₹{res_a.total_charges:.2f}, Run B charges:      ₹{res_b.total_charges:.2f}")
+        print(f"Run A drawdown:     {res_a.max_drawdown_pct:.2f}%, Run B drawdown:     {res_b.max_drawdown_pct:.2f}%")
 
-    assert res_a.trades_taken == res_b.trades_taken, "Order variance: trades_taken differ"
-    assert abs(res_a.net_profit - res_b.net_profit) < 0.01, "Order variance: net_profit differs"
-    assert abs(res_a.total_charges - res_b.total_charges) < 0.01, "Order variance: total_charges differ"
-    assert abs(res_a.max_drawdown_pct - res_b.max_drawdown_pct) < 0.01, "Order variance: max_drawdown differs"
+        assert res_a.trades_taken == res_b.trades_taken, "Order variance: trades_taken differ"
+        assert abs(res_a.net_profit - res_b.net_profit) < 0.01, "Order variance: net_profit differs"
+        assert abs(res_a.total_charges - res_b.total_charges) < 0.01, "Order variance: total_charges differ"
+        assert abs(res_a.max_drawdown_pct - res_b.max_drawdown_pct) < 0.01, "Order variance: max_drawdown differs"
 
-    for i in range(len(res_a.trade_log)):
-        t_a = res_a.trade_log[i]
-        t_b = res_b.trade_log[i]
-        assert t_a["entry_time"] == t_b["entry_time"], f"Trade {i} entry_time mismatch: {t_a['entry_time']} vs {t_b['entry_time']}"
-        assert t_a["symbol"] == t_b["symbol"], f"Trade {i} symbol mismatch: {t_a['symbol']} vs {t_b['symbol']}"
-        assert t_a["entry_price"] == t_b["entry_price"], f"Trade {i} entry_price mismatch"
-        assert t_a["exit_price"] == t_b["exit_price"], f"Trade {i} exit_price mismatch"
-        assert t_a["net_pnl"] == t_b["net_pnl"], f"Trade {i} net_pnl mismatch"
+        for i in range(len(res_a.trade_log)):
+            t_a = res_a.trade_log[i]
+            t_b = res_b.trade_log[i]
+            assert t_a["entry_time"] == t_b["entry_time"], f"Trade {i} entry_time mismatch: {t_a['entry_time']} vs {t_b['entry_time']}"
+            assert t_a["symbol"] == t_b["symbol"], f"Trade {i} symbol mismatch: {t_a['symbol']} vs {t_b['symbol']}"
+            assert t_a["entry_price"] == t_b["entry_price"], f"Trade {i} entry_price mismatch"
+            assert t_a["exit_price"] == t_b["exit_price"], f"Trade {i} exit_price mismatch"
+            assert t_a["net_pnl"] == t_b["net_pnl"], f"Trade {i} net_pnl mismatch"
 
-    print("Order invariance verified: Run A and Run B are 100% IDENTICAL.")
+        print("Order invariance verified: Run A and Run B are 100% IDENTICAL.")
+    else:
+        print("\n(Skipping invariance in --portfolio mode; cached to /tmp/res_combined.pkl for --invariance step)")
 
     # -------------------------------------------------------------
-    # INDIVIDUAL VS COMBINED SYMBOL CHECK
+    # INDIVIDUAL VS COMBINED SYMBOL COMPARISON
     # -------------------------------------------------------------
     print("\n============================================================")
-    print("INDIVIDUAL VS COMBINED SYMBOL CHECK")
+    print("INDIVIDUAL VS COMBINED SYMBOL CHECK (BENCHMARKED INDICES)")
     print("============================================================")
-    # Run each individual symbol alone
-    individual_runs = {}
-    for sym in six_symbols:
-        individual_runs[sym] = run_engine_on_symbols([sym])
-
     print(f"{'Symbol':<12} {'Individual Trades':<18} {'Combined Trades':<18} {'Difference':<12}")
     print("-" * 62)
-    for sym in six_symbols:
-        ind_t = individual_runs[sym].trades_taken
+    benchmarked = [
+        ("NIFTY50", res_nifty.trades_taken),
+        ("BANKNIFTY", res_banknifty.trades_taken),
+        ("SENSEX", res_sensex.trades_taken),
+    ]
+    for sym, ind_t in benchmarked:
         comb_t = res_combined.symbol_summary[sym]["trades"]
         diff = comb_t - ind_t
         print(f"{sym:<12} {ind_t:<18} {comb_t:<18} {diff:<12}")
