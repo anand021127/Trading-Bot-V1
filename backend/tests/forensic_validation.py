@@ -1,8 +1,12 @@
 import pickle
 import json
 import statistics
+import sys
+import os
 from datetime import datetime
 from collections import Counter, defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 with open('/tmp/res_combined.pkl', 'rb') as f:
     res = pickle.load(f)

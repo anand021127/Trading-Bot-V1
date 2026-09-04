@@ -126,6 +126,8 @@ class HistoricalOptionsDataLoader:
         self._timestamp_index: Dict[Tuple[str, str], HistoricalOptionRecord] = {}
         # (underlying, expiry, strike, option_type) -> contract_key
         self._lookup_index: Dict[Tuple[str, str, float, str], str] = {}
+        # contract_key -> contract metadata (lot_size, underlying, etc.)
+        self._contracts_metadata: Dict[str, Dict[str, Any]] = {}
         
         # 1. Load user specified data directory if provided
         if data_directory and os.path.exists(data_directory):
@@ -191,8 +193,22 @@ class HistoricalOptionsDataLoader:
         option_type: str,
         instrument_key: str,
         candles: List[Dict[str, Any]],
+        lot_size: Optional[int] = None,
     ) -> int:
         """Load candle list for a specific option contract."""
+        norm_und = normalize_underlying(underlying)
+        if lot_size is None or lot_size <= 1:
+            lot_size = INDEX_LOT_SIZES.get(norm_und, 25)
+
+        self._contracts_metadata[instrument_key] = {
+            "underlying": norm_und,
+            "expiry": expiry,
+            "strike": float(strike),
+            "option_type": option_type.upper(),
+            "instrument_key": instrument_key,
+            "lot_size": int(lot_size),
+        }
+
         count = 0
         for c in candles:
             ts = c.get("timestamp", "")
@@ -215,6 +231,27 @@ class HistoricalOptionsDataLoader:
             self.register_option_candle(record)
             count += 1
         return count
+
+    def get_contract_lot_size(
+        self,
+        contract_key: str,
+        underlying: str = "",
+        target_date: Optional[date] = None,
+    ) -> Optional[int]:
+        """Resolve actual exchange lot size for a contract.
+        
+        Returns None if lot size cannot be resolved or is invalid (<= 1).
+        """
+        if contract_key in self._contracts_metadata:
+            ls = self._contracts_metadata[contract_key].get("lot_size")
+            if isinstance(ls, int) and ls > 1:
+                return ls
+        norm_und = normalize_underlying(underlying) if underlying else ""
+        if norm_und in INDEX_LOT_SIZES:
+            ls = INDEX_LOT_SIZES[norm_und]
+            if ls > 1:
+                return ls
+        return None
 
     def load_from_directory(self, dir_path: str) -> int:
         """Scan directory for historical option JSON/CSV files.
@@ -259,6 +296,7 @@ class HistoricalOptionsDataLoader:
                         option_type=c_info.get("option_type", "CE"),
                         instrument_key=c_info.get("instrument_key", filename.replace(".json", "")),
                         candles=candles,
+                        lot_size=c_info.get("lot_size"),
                     )
                     loaded_count += len(candles)
                 elif isinstance(data, list) and len(data) > 0 and ("strike" in data[0] or "option_type" in data[0]):

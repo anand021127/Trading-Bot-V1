@@ -12,11 +12,12 @@ import csv
 import json
 import os
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from backend.backtest.engine import BacktestEngine, CostConfig
+from backend.backtest.options_data_layer import HistoricalOptionsDataLoader
 from backend.backtest.historical_data_io import load_dataset_safe
 from backend.backtest.task_manager import BacktestTask, STATUS_COMPLETED
 from backend.indicators.ema import calculate_ema
@@ -72,6 +73,16 @@ def load_symbol_data(symbols: List[str]) -> Tuple[Dict[str, List[Dict[str, Any]]
         option_contexts[sym] = ctx
 
     return symbol_candles, option_contexts
+
+
+_OPTIONS_LOADER: Optional[HistoricalOptionsDataLoader] = None
+
+
+def get_options_data_loader() -> HistoricalOptionsDataLoader:
+    global _OPTIONS_LOADER
+    if _OPTIONS_LOADER is None:
+        _OPTIONS_LOADER = HistoricalOptionsDataLoader(auto_load_cache=True)
+    return _OPTIONS_LOADER
 
 
 def run_engine_on_symbols(symbols: List[str]):

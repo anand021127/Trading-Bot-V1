@@ -23,7 +23,9 @@ from __future__ import annotations
 import bisect
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from enum import Enum
+import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from backend.strategy.exit_manager import TrailingStopManager
 from backend.strategy.session_manager import session_manager
@@ -35,6 +37,15 @@ from backend.backtest.historical_contract_resolver import (
     build_trading_symbol,
 )
 from backend.backtest.options_data_layer import HistoricalOptionsDataLoader, INDEX_STRIKE_INTERVALS, INDEX_LOT_SIZES
+
+logger = logging.getLogger(__name__)
+
+
+class InstrumentType(str, Enum):
+    INDEX_OPTION = "INDEX_OPTION"
+    INDEX_FUTURE = "INDEX_FUTURE"
+    EQUITY = "EQUITY"
+    SPOT_INDEX_DATA = "SPOT_INDEX_DATA"
 
 
 @dataclass
@@ -74,40 +85,83 @@ class CostConfig:
         if self.brokerage_pct is not None:
             self.equity_brokerage_pct = self.brokerage_pct
 
-    def apply(self, entry: float, exit_price: float, qty: int, is_option: bool = False) -> Dict[str, float]:
+    def apply(
+        self,
+        entry: float,
+        exit_price: float,
+        qty: int,
+        instrument_type: Union[InstrumentType, str] = InstrumentType.INDEX_OPTION,
+        is_option: Optional[bool] = None,
+    ) -> Dict[str, float]:
+        if is_option is not None:
+            instrument_type = InstrumentType.INDEX_OPTION if is_option else InstrumentType.EQUITY
+        elif isinstance(instrument_type, str):
+            try:
+                instrument_type = InstrumentType(instrument_type)
+            except ValueError:
+                instrument_type = InstrumentType.INDEX_OPTION
+
         buy_val = entry * qty
         sell_val = exit_price * qty
         turnover = buy_val + sell_val
         gross_pnl = sell_val - buy_val
 
-        # Brokerage calculation
-        if is_option:
+        # Safety assertions against category corruption
+        if instrument_type == InstrumentType.SPOT_INDEX_DATA:
+            # Spot cash indices cannot be traded; no statutory fees or brokerage can be charged
+            return {
+                "gross_pnl": round(gross_pnl, 2),
+                "brokerage": 0.0,
+                "stt": 0.0,
+                "exchange_charges": 0.0,
+                "gst": 0.0,
+                "sebi_charges": 0.0,
+                "stamp_duty": 0.0,
+                "slippage": 0.0,
+                "total_cost": 0.0,
+                "charges": 0.0,
+                "net_pnl": round(gross_pnl, 2),
+            }
+
+        if instrument_type == InstrumentType.INDEX_OPTION:
+            # Option statutory rates MUST ONLY be applied to option premium prices (< ₹5,000)
+            if entry > 5000.0 or exit_price > 5000.0:
+                raise ValueError(
+                    f"FATAL COST MISMATCH: Option fee model applied to spot-index price "
+                    f"(entry={entry}, exit={exit_price}). Real index option premiums do not exceed ₹5,000."
+                )
             buy_brokerage = min(self.flat_brokerage_per_order, buy_val * self.brokerage_pct_cap)
             sell_brokerage = min(self.flat_brokerage_per_order, sell_val * self.brokerage_pct_cap)
-        else:
+            brokerage = round(buy_brokerage + sell_brokerage, 2)
+
+            stt = round(sell_val * self.option_stt_pct, 2)
+            exchange_charges = round(turnover * self.option_exchange_turnover_pct, 2)
+            sebi_charges = round(turnover * self.sebi_turnover_pct, 4)
+            gst = round((brokerage + exchange_charges + sebi_charges) * self.gst_pct, 2)
+            stamp_duty = round(buy_val * self.stamp_duty_pct, 2)
+            slippage = round(turnover * self.slippage_pct, 2)
+        elif instrument_type == InstrumentType.INDEX_FUTURE:
+            buy_brokerage = min(self.flat_brokerage_per_order, buy_val * self.brokerage_pct_cap)
+            sell_brokerage = min(self.flat_brokerage_per_order, sell_val * self.brokerage_pct_cap)
+            brokerage = round(buy_brokerage + sell_brokerage, 2)
+
+            stt = round(sell_val * 0.000125, 2)
+            exchange_charges = round(turnover * 0.000019, 2)
+            sebi_charges = round(turnover * self.sebi_turnover_pct, 4)
+            gst = round((brokerage + exchange_charges + sebi_charges) * self.gst_pct, 2)
+            stamp_duty = round(buy_val * 0.00002, 2)
+            slippage = round(turnover * self.slippage_pct, 2)
+        else:  # EQUITY
             buy_brokerage = min(self.flat_brokerage_per_order, buy_val * self.equity_brokerage_pct)
             sell_brokerage = min(self.flat_brokerage_per_order, sell_val * self.equity_brokerage_pct)
-        brokerage = round(buy_brokerage + sell_brokerage, 2)
+            brokerage = round(buy_brokerage + sell_brokerage, 2)
 
-        # STT (sell-side only for options and intraday equity)
-        stt_rate = self.option_stt_pct if is_option else self.equity_intraday_stt_pct
-        stt = round(sell_val * stt_rate, 2)
-
-        # Exchange transaction charges
-        ex_rate = self.option_exchange_turnover_pct if is_option else self.equity_exchange_turnover_pct
-        exchange_charges = round(turnover * ex_rate, 2)
-
-        # SEBI turnover charges
-        sebi_charges = round(turnover * self.sebi_turnover_pct, 4)
-
-        # GST on Brokerage + Exchange + SEBI
-        gst = round((brokerage + exchange_charges + sebi_charges) * self.gst_pct, 2)
-
-        # Stamp duty on BUY side turnover
-        stamp_duty = round(buy_val * self.stamp_duty_pct, 2)
-
-        # Slippage on total turnover
-        slippage = round(turnover * self.slippage_pct, 2)
+            stt = round(sell_val * self.equity_intraday_stt_pct, 2)
+            exchange_charges = round(turnover * self.equity_exchange_turnover_pct, 2)
+            sebi_charges = round(turnover * self.sebi_turnover_pct, 4)
+            gst = round((brokerage + exchange_charges + sebi_charges) * self.gst_pct, 2)
+            stamp_duty = round(buy_val * self.stamp_duty_pct, 2)
+            slippage = round(turnover * self.slippage_pct, 2)
 
         total_cost = round(brokerage + stt + exchange_charges + gst + sebi_charges + stamp_duty + slippage, 2)
         net_pnl = round(gross_pnl - total_cost, 2)
@@ -164,6 +218,8 @@ class BacktestTrade:
     option_type: str = ""
     expiry: str = ""
     lot_size: int = 25
+    number_of_lots: int = 1
+    instrument_type: str = "INDEX_OPTION"
     stop_loss: float = 0.0
     target: float = 0.0
     trailing_stop: float = 0.0
@@ -192,6 +248,8 @@ class BacktestTrade:
             "exit_price": self.exit_price,
             "quantity": self.quantity,
             "lot_size": self.lot_size,
+            "number_of_lots": self.number_of_lots,
+            "instrument_type": self.instrument_type,
             "stop_loss": self.stop_loss,
             "target": self.target,
             "trailing_stop": self.trailing_stop,
@@ -235,6 +293,11 @@ class BacktestResult:
     skipped_symbols: List[Dict[str, str]] = field(default_factory=list)
     data_source: str = "real_upstox_v3"
     execution_resolution_mode: str = "CONSERVATIVE_STOP_FIRST"
+    data_mode: str = "REAL_HISTORICAL_OPTIONS"
+    instrument_type: str = "INDEX_OPTION"
+    real_options_required: bool = True
+    real_options_used: bool = True
+    data_unavailable_count: int = 0
     # V21-FINAL: data quality report for backtest transparency
     data_quality: Optional[DataQualityReport] = None
     # Detailed diagnostic counters for auditability
@@ -288,6 +351,12 @@ class BacktestResult:
             "skipped_symbols": self.skipped_symbols,
             "data_source": self.data_source,
             "execution_resolution_mode": self.execution_resolution_mode,
+            "data_mode": self.data_mode,
+            "instrument_type": self.instrument_type,
+            "real_options_required": self.real_options_required,
+            "real_options_used": self.real_options_used,
+            "contract_resolution_failures": self.contract_resolution_failures,
+            "data_unavailable_count": self.data_unavailable_count,
             "data_quality": self.data_quality.to_dict() if self.data_quality else None,
             "setups_breakdown": self.setups_breakdown,
             "symbol_summary": self.symbol_summary,
@@ -365,6 +434,17 @@ class BacktestEngine:
         result.total_candles_scanned = result.candles_loaded
         strategy_names = strategy_names or ["OPTION_PREMIUM"]
         option_contexts = option_contexts or {}
+
+        # 1. OPTION_PREMIUM with real options requires historical options loader
+        is_option_premium = any(s == "OPTION_PREMIUM" for s in strategy_names)
+
+        result.real_options_required = require_real_options
+        result.real_options_used = require_real_options
+        result.data_mode = "REAL_HISTORICAL_OPTIONS" if require_real_options else "SPOT_ONLY"
+        result.instrument_type = InstrumentType.INDEX_OPTION.value if (is_option_premium and require_real_options) else InstrumentType.EQUITY.value
+
+        if require_real_options and options_data_loader is None:
+            options_data_loader = HistoricalOptionsDataLoader(auto_load_cache=True)
 
         # ── 1. Validate & Filter Symbols ──
         valid_symbols: List[str] = []
@@ -520,30 +600,69 @@ class BacktestEngine:
                 }
 
                 # In real options mode, check exit on verified historical option contract candle
-                opt_bar = bar
-                if position.get("is_real_option") and options_data_loader:
+                if position.get("is_real_option"):
+                    if not options_data_loader:
+                        continue
                     c_key = position.get("contract_key", "")
                     candle_rec = options_data_loader.get_candle_at(c_key, ts)
-                    if candle_rec:
-                        opt_bar = {
-                            "timestamp": candle_rec.timestamp,
-                            "open": candle_rec.open,
-                            "high": candle_rec.high,
-                            "low": candle_rec.low,
-                            "close": candle_rec.close,
-                            "volume": candle_rec.volume,
-                        }
+                    if candle_rec is None:
+                        # Cannot evaluate option exit on spot candle. Wait for real option candle or expiration.
+                        continue
+                    opt_bar = {
+                        "timestamp": candle_rec.timestamp,
+                        "open": candle_rec.open,
+                        "high": candle_rec.high,
+                        "low": candle_rec.low,
+                        "close": candle_rec.close,
+                        "volume": candle_rec.volume,
+                    }
+                else:
+                    opt_bar = bar
 
                 exit_reason = self._check_exit(position, opt_bar, window, context=bar_context)
                 if exit_reason:
                     exit_price = self._exit_price_for(position, opt_bar, exit_reason)
                     qty = position["quantity"]
+                    is_opt = bool(position.get("is_real_option", False)) or (position["strategy"] == "OPTION_PREMIUM" and require_real_options)
+                    inst_type = InstrumentType.INDEX_OPTION if is_opt else InstrumentType.EQUITY
+
+                    # HARD VALIDATION GATE: Assert all mandatory option fields before creating trade
+                    if require_real_options and position["strategy"] == "OPTION_PREMIUM":
+                        opt_t = position.get("option_type")
+                        stk = position.get("strike")
+                        exp = position.get("expiry")
+                        o_sym = position.get("option_symbol")
+                        i_key = position.get("contract_key") or position.get("instrument_key")
+                        ls = position.get("lot_size", 0)
+                        num_l = position.get("number_of_lots", 0)
+                        ent = position.get("entry_price", 0.0)
+
+                        if (
+                            opt_t not in ("CE", "PE")
+                            or stk is None or stk <= 0
+                            or not exp or not str(exp).strip()
+                            or not o_sym or not str(o_sym).strip()
+                            or not i_key or not str(i_key).strip()
+                            or ls <= 1
+                            or ent <= 0.0
+                            or exit_price <= 0.0
+                            or position.get("is_real_option") is not True
+                        ):
+                            result.contract_resolution_failures += 1
+                            result.data_unavailable_count += 1
+                            logger.error(
+                                "HARD GATE REJECTION: Dropped invalid OPTION_PREMIUM exit trade: symbol=%s, type=%s, strike=%s, expiry=%s, lot_size=%s, entry=%s, exit=%s",
+                                sym, opt_t, stk, exp, ls, ent, exit_price,
+                            )
+                            symbol_positions[sym] = None
+                            continue
+
                     costs = self.costs.apply(
                         position["entry_price"], exit_price, qty,
-                        is_option=position["strategy"] == "OPTION_PREMIUM" or position.get("is_real_option", False),
+                        instrument_type=inst_type,
                     )
                     trade = BacktestTrade(
-                        symbol=position.get("contract_symbol", sym),
+                        symbol=(position.get("contract_key") or position.get("contract_symbol") or position.get("option_symbol", sym)) if position.get("is_real_option") else sym,
                         strategy=position["strategy"],
                         entry_time=position["entry_time"],
                         exit_time=ts,
@@ -570,6 +689,8 @@ class BacktestEngine:
                         option_type=position.get("option_type", ""),
                         expiry=position.get("expiry", ""),
                         lot_size=position.get("lot_size", INDEX_LOT_SIZES.get(sym.upper(), 25)),
+                        number_of_lots=position.get("number_of_lots", max(1, qty // max(1, position.get("lot_size", 25)))),
+                        instrument_type=inst_type.value,
                         stop_loss=position.get("stop_loss", 0.0),
                         target=position.get("target", 0.0),
                         trailing_stop=position.get("trailing_stop", 0.0),
@@ -783,10 +904,31 @@ class BacktestEngine:
                             symbol_stats[sym]["data_unavailable"] += 1
                             continue
 
+                        lot_size = None
+                        if options_data_loader and hasattr(options_data_loader, "get_contract_lot_size"):
+                            try:
+                                res_ls = options_data_loader.get_contract_lot_size(c_key, sym, bar_dt)
+                                if isinstance(res_ls, int) and res_ls > 1:
+                                    lot_size = res_ls
+                            except Exception:
+                                lot_size = None
+
+                        if lot_size is None or not isinstance(lot_size, int) or lot_size <= 1:
+                            from backend.backtest.options_data_layer import normalize_underlying
+                            lot_size = INDEX_LOT_SIZES.get(normalize_underlying(sym), 25)
+
+                        if lot_size is None or not isinstance(lot_size, int) or lot_size <= 1:
+                            result.contract_resolution_failures += 1
+                            result.data_unavailable_count += 1
+                            unavail_reason = f"DATA_UNAVAILABLE — Unresolved lot size for {sym} contract {c_key}"
+                            rejected_total += 1
+                            reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
+                            symbol_stats[sym]["data_unavailable"] += 1
+                            continue
+
                         opt_stop_loss = round(max(0.5, opt_entry_price * 0.82), 2)
                         opt_target = round(opt_entry_price + 2.0 * (opt_entry_price - opt_stop_loss), 2)
 
-                        lot_size = INDEX_LOT_SIZES.get(sym.upper(), 25)
                         risk_per_unit = opt_entry_price - opt_stop_loss
                         risk_amount = equity * self.risk_pct_per_trade
                         num_lots = max(1, int(risk_amount / (risk_per_unit * lot_size))) if risk_per_unit > 0 else 1
@@ -803,8 +945,10 @@ class BacktestEngine:
                             reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
                             symbol_stats[sym]["risk_rejections"] += 1
                             continue
-                        opt_qty = min(opt_qty, (max_affordable_qty // lot_size) * lot_size)
-                        if opt_qty <= 0:
+
+                        num_lots = min(num_lots, max_affordable_qty // lot_size)
+                        opt_qty = num_lots * lot_size
+                        if num_lots <= 0 or opt_qty <= 0 or opt_qty != num_lots * lot_size:
                             result.risk_rejections += 1
                             result.risk_rejections_breakdown["zero_quantity_sized"] = (
                                 result.risk_rejections_breakdown.get("zero_quantity_sized", 0) + 1
@@ -844,6 +988,26 @@ class BacktestEngine:
                         except Exception:
                             opt_trading_sym = c_key
 
+                        # HARD VALIDATION GATE: Assert all mandatory option fields before opening position
+                        if (
+                            opt_type not in ("CE", "PE")
+                            or strike_val is None or strike_val <= 0
+                            or not exp_str or not str(exp_str).strip()
+                            or not opt_trading_sym or not str(opt_trading_sym).strip()
+                            or not c_key or not str(c_key).strip()
+                            or opt_candle is None
+                            or opt_entry_price <= 0.0
+                            or lot_size <= 1
+                            or opt_qty != num_lots * lot_size
+                        ):
+                            result.contract_resolution_failures += 1
+                            result.data_unavailable_count += 1
+                            unavail_reason = f"CONTRACT_RESOLUTION_FAILED — Real option validation gate failed for {sym}"
+                            rejected_total += 1
+                            reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
+                            symbol_stats[sym]["data_unavailable"] += 1
+                            continue
+
                         symbol_positions[sym] = {
                             "strategy": best.strategy_name,
                             "symbol": sym,
@@ -862,6 +1026,7 @@ class BacktestEngine:
                             "target": opt_target,
                             "quantity": opt_qty,
                             "lot_size": lot_size,
+                            "number_of_lots": num_lots,
                             "confidence": best.confidence,
                             "setup_name": setup_name_tag,
                         }
@@ -869,7 +1034,15 @@ class BacktestEngine:
                         max_simultaneous_seen = max(max_simultaneous_seen, current_open_count + 1)
                         continue
 
-                    # Spot / Equity default execution (when require_real_options=False)
+                    # Spot / Equity default execution (for non-option strategies or mock tests only)
+                    if require_real_options:
+                        result.contract_resolution_failures += 1
+                        result.data_unavailable_count += 1
+                        unavail_reason = f"DATA_UNAVAILABLE — Real options required; cannot execute on spot index data for {sym}"
+                        rejected_total += 1
+                        reason_counts[unavail_reason] = reason_counts.get(unavail_reason, 0) + 1
+                        symbol_stats[sym]["data_unavailable"] += 1
+                        continue
                     risk_per_share = best.entry_price - best.stop_loss
                     if risk_per_share > 0:
                         risk_amount = equity * self.risk_pct_per_trade
@@ -930,12 +1103,46 @@ class BacktestEngine:
                         exit_price = pos["entry_price"]
 
                 qty = pos["quantity"]
+                is_opt = bool(pos.get("is_real_option", False)) or (pos["strategy"] == "OPTION_PREMIUM" and require_real_options)
+                inst_type = InstrumentType.INDEX_OPTION if is_opt else InstrumentType.EQUITY
+
+                # HARD VALIDATION GATE: Assert all mandatory option fields before creating trade
+                if require_real_options and pos["strategy"] == "OPTION_PREMIUM":
+                    opt_t = pos.get("option_type")
+                    stk = pos.get("strike")
+                    exp = pos.get("expiry")
+                    o_sym = pos.get("option_symbol")
+                    i_key = pos.get("contract_key") or pos.get("instrument_key")
+                    ls = pos.get("lot_size", 0)
+                    num_l = pos.get("number_of_lots", 0)
+                    ent = pos.get("entry_price", 0.0)
+
+                    if (
+                        opt_t not in ("CE", "PE")
+                        or stk is None or stk <= 0
+                        or not exp or not str(exp).strip()
+                        or not o_sym or not str(o_sym).strip()
+                        or not i_key or not str(i_key).strip()
+                        or ls <= 1
+                        or ent <= 0.0
+                        or exit_price <= 0.0
+                        or pos.get("is_real_option") is not True
+                    ):
+                        result.contract_resolution_failures += 1
+                        result.data_unavailable_count += 1
+                        logger.error(
+                            "HARD GATE REJECTION: Dropped invalid OPTION_PREMIUM closeout trade: symbol=%s, type=%s, strike=%s, expiry=%s, lot_size=%s, entry=%s, exit=%s",
+                            sym, opt_t, stk, exp, ls, ent, exit_price,
+                        )
+                        symbol_positions[sym] = None
+                        continue
+
                 costs = self.costs.apply(
                     pos["entry_price"], exit_price, qty,
-                    is_option=pos["strategy"] == "OPTION_PREMIUM" or pos.get("is_real_option", False),
+                    instrument_type=inst_type,
                 )
                 trade = BacktestTrade(
-                    symbol=pos.get("contract_symbol", sym),
+                    symbol=(pos.get("contract_key") or pos.get("contract_symbol") or pos.get("option_symbol", sym)) if pos.get("is_real_option") else sym,
                     strategy=pos["strategy"],
                     entry_time=pos["entry_time"],
                     exit_time=last_ts,
@@ -962,6 +1169,8 @@ class BacktestEngine:
                     option_type=pos.get("option_type", ""),
                     expiry=pos.get("expiry", ""),
                     lot_size=pos.get("lot_size", INDEX_LOT_SIZES.get(sym.upper(), 25)),
+                    number_of_lots=pos.get("number_of_lots", max(1, qty // max(1, pos.get("lot_size", 25)))),
+                    instrument_type=inst_type.value,
                     stop_loss=pos.get("stop_loss", 0.0),
                     target=pos.get("target", 0.0),
                     trailing_stop=pos.get("trailing_stop", 0.0),
