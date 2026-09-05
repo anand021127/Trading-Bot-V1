@@ -263,6 +263,105 @@ class TestTokenLifecycleRegression(unittest.TestCase):
             self.assertEqual(resolved, "")
             self.assertEqual(src, "none")
 
+    def test_check_token_freshness_lifecycle(self):
+        """Proves check_token_freshness accurately parses exp and classifies fresh vs expired."""
+        import time
+        from backend.broker.token_resolver import check_token_freshness
+
+        # 1. Fresh token (future exp)
+        fresh_jwt = _make_dummy_jwt({"user_id": "U_FRESH", "exp": time.time() + 86400})
+        freshness = check_token_freshness(fresh_jwt)
+        self.assertTrue(freshness["is_fresh"])
+        self.assertFalse(freshness["is_expired"])
+        self.assertEqual(freshness["status"], "FRESH")
+
+        # 2. Expired token (past exp)
+        expired_jwt = _make_dummy_jwt({"user_id": "U_EXPIRED", "exp": time.time() - 3600})
+        freshness_exp = check_token_freshness(expired_jwt)
+        self.assertFalse(freshness_exp["is_fresh"])
+        self.assertTrue(freshness_exp["is_expired"])
+        self.assertEqual(freshness_exp["status"], "EXPIRED")
+
+        # 3. Expiring soon (< 300s)
+        soon_jwt = _make_dummy_jwt({"user_id": "U_SOON", "exp": time.time() + 120})
+        freshness_soon = check_token_freshness(soon_jwt)
+        self.assertTrue(freshness_soon["is_fresh"])
+        self.assertFalse(freshness_soon["is_expired"])
+        self.assertEqual(freshness_soon["status"], "EXPIRING_SOON")
+
+    def test_validate_token_live_error_classification(self):
+        """Proves validate_token_live distinguishes 401 AUTHENTICATION_FAILURE from EXPIRED_OPTIONS_ENTITLEMENT_FAILURE."""
+        import urllib.error
+        valid_jwt = _make_dummy_jwt({"user_id": "U_TEST", "exp": 9999999999})
+
+        # Scenario A: 401 Unauthorized from /v2/user/profile -> AUTHENTICATION_FAILURE
+        def mock_401_urlopen(req, timeout=None, context=None):
+            raise urllib.error.HTTPError(
+                url="https://api.upstox.com/v2/user/profile",
+                code=401,
+                msg="Unauthorized",
+                hdrs={},
+                fp=None,
+            )
+
+        with patch("urllib.request.urlopen", side_effect=mock_401_urlopen):
+            res = validate_token_live(valid_jwt)
+            self.assertFalse(res["valid"])
+            self.assertFalse(res["profile_verified"])
+            self.assertEqual(res["failure_classification"], "AUTHENTICATION_FAILURE")
+            self.assertEqual(res["error_code"], "AUTHENTICATION_FAILURE")
+            self.assertEqual(res["profile_status"], 401)
+
+        # Scenario B: 200 Profile + 403 Expired Options -> EXPIRED_OPTIONS_ENTITLEMENT_FAILURE
+        def mock_entitlement_fail_urlopen(req, timeout=None, context=None):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "user/profile" in url:
+                mock_resp = MagicMock()
+                mock_resp.__enter__.return_value = mock_resp
+                mock_resp.status = 200
+                mock_resp.read.return_value = json.dumps({
+                    "status": "success",
+                    "data": {"user_id": "U_TRADER", "user_name": "Pro Trader"}
+                }).encode("utf-8")
+                return mock_resp
+            else:
+                raise urllib.error.HTTPError(
+                    url="https://api.upstox.com/v2/expired-instruments/expiries",
+                    code=403,
+                    msg="Forbidden",
+                    hdrs={},
+                    fp=None,
+                )
+
+        with patch("urllib.request.urlopen", side_effect=mock_entitlement_fail_urlopen):
+            res_b = validate_token_live(valid_jwt)
+            self.assertTrue(res_b["valid"])
+            self.assertTrue(res_b["profile_verified"])
+            self.assertFalse(res_b["expired_instruments_entitled"])
+            self.assertEqual(res_b["failure_classification"], "EXPIRED_OPTIONS_ENTITLEMENT_FAILURE")
+
+    def test_dynamic_token_resolution_across_clients(self):
+        """Proves UpstoxClient and UpstoxExpiredOptionsClient dynamically reflect refreshed canonical tokens."""
+        from backend.broker.upstox_client import UpstoxClient
+        from backend.broker.token_resolver import invalidate_old_token_references
+
+        tok1 = _make_dummy_jwt({"user_id": "U1", "exp": 9999999999})
+        tok2 = _make_dummy_jwt({"user_id": "U2", "exp": 9999999999})
+
+        os.environ["UPSTOX_ACCESS_TOKEN"] = tok1
+        client = UpstoxClient()
+        expired_client = UpstoxExpiredOptionsClient(cache_dir=self.cache_dir)
+
+        self.assertEqual(client.access_token, tok1)
+        self.assertEqual(expired_client.access_token, tok1)
+
+        # Invalidate old token and propagate new token
+        invalidate_old_token_references(tok2)
+
+        self.assertEqual(client.access_token, tok2)
+        self.assertEqual(expired_client.access_token, tok2)
+        self.assertEqual(os.environ.get("UPSTOX_ACCESS_TOKEN"), tok2)
+
 
 if __name__ == "__main__":
     unittest.main()

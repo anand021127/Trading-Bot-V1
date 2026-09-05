@@ -108,6 +108,60 @@ def test_on_error_401_sets_auth_failed() -> None:
     client._on_error(None, "401 Unauthorized")
     assert client.connection_status == "auth_failed"
     assert client.is_connected is False
+    assert client._auth_failed is True
+    assert client._should_run is False
+
+    # Ensure subsequent close does not revert to reconnecting
+    client._on_close(None, 1006, "abnormal closure")
+    assert client.connection_status == "auth_failed"
+    assert client.is_connected is False
+
+
+def test_reconnect_with_token_resets_auth_failed() -> None:
+    client = UpstoxWebSocketClient(access_token="fake-token-for-unit-test-only")
+    client._on_open()
+    client._on_error(None, "401 Unauthorized")
+    assert client._auth_failed is True
+
+    # Reconnect with a valid new mock token
+    new_token = "valid-new-active-token-mock-999"
+    # Mock _build_and_connect to avoid actual network call
+    called = []
+    client._build_and_connect = lambda: called.append(True)
+
+    client.reconnect_with_token(new_token)
+    assert client._auth_failed is False
+    assert client.connection_status == "connecting"
+    assert client.access_token == new_token
+    assert len(called) == 1
+
+
+def test_reconnect_with_expired_token_rejected() -> None:
+    import base64
+    import json
+    import time
+
+    h = base64.urlsafe_b64encode(json.dumps({"alg": "HS256"}).encode()).decode().rstrip("=")
+    p = base64.urlsafe_b64encode(json.dumps({"user_id": "U1", "exp": time.time() - 3600}).encode()).decode().rstrip("=")
+    expired_jwt = f"{h}.{p}.sig"
+
+    client = UpstoxWebSocketClient(access_token="fake-token-for-unit-test-only")
+    client._build_and_connect = lambda: (_ for _ in ()).throw(AssertionError("Should not connect"))
+    client.reconnect_with_token(expired_jwt)
+    assert client._auth_failed is True
+    assert client.connection_status == "auth_failed"
+
+
+def test_bounded_exponential_backoff() -> None:
+    client = UpstoxWebSocketClient(access_token="fake-token-for-unit-test-only")
+    client._should_run = True
+    assert client._backoff_delay == client._base_backoff
+
+    for attempt in range(1, 10):
+        client._on_reconnecting("reconnecting")
+        client._on_close(None, 1006, "test")
+        assert client._backoff_delay <= client._max_backoff
+        assert client._backoff_delay >= client._base_backoff
 
 
 def test_on_close_sets_reconnecting_when_should_run() -> None:

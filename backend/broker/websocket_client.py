@@ -134,8 +134,9 @@ class UpstoxWebSocketClient:
         on_price_update: Optional[Callable[[Dict[str, Any]], None]] = None,
         mode: str = "full",
     ) -> None:
-        if access_token is not None:
-            self.access_token = access_token
+        self._explicit_token: Optional[str] = access_token.strip().strip('"\'').strip() if (access_token and access_token.strip()) else None
+        if self._explicit_token is not None:
+            self.access_token = self._explicit_token
         else:
             from backend.broker.token_resolver import resolve_upstox_token
             self.access_token = resolve_upstox_token()
@@ -148,6 +149,7 @@ class UpstoxWebSocketClient:
 
         self.connection_status = "disconnected"
         self.is_connected = False
+        self._auth_failed: bool = False
         self._last_message_time: float = 0.0
         self._last_tick_time: float = 0.0
         self._last_error: Optional[str] = None
@@ -157,6 +159,10 @@ class UpstoxWebSocketClient:
         self._ignored_messages: int = 0
         self._parse_errors: int = 0
         self._last_reconnect_time: float = 0.0
+        self._max_reconnect_attempts: int = 15
+        self._base_backoff: float = 2.0
+        self._max_backoff: float = 60.0
+        self._backoff_delay: float = 2.0
 
         self._streamer: Any = None
         self._should_run = False
@@ -243,9 +249,23 @@ class UpstoxWebSocketClient:
             round(now - self._last_message_time, 1)
             if self._last_message_time else None
         )
+        from backend.broker.token_resolver import token_fingerprint
+        fp = token_fingerprint(self.access_token) if self.access_token else None
+
+        auth_status = "NO_TOKEN"
+        if self._auth_failed:
+            auth_status = "AUTH_FAILED_401"
+        elif self.is_connected:
+            auth_status = "AUTHENTICATED"
+        elif self.access_token:
+            auth_status = "CONNECTING" if self.connection_status == "connecting" else "TOKEN_PRESENT"
+
         return {
             "connection_status": self.connection_status,
             "is_connected": self.is_connected,
+            "auth_failed": self._auth_failed,
+            "auth_status": auth_status,
+            "token_fingerprint": fp,
             "market_open": market_open,
             "market_data_status": self.market_data_status,
             "subscribed_instruments": len(self._instrument_keys),
@@ -267,16 +287,33 @@ class UpstoxWebSocketClient:
         }
 
     def start(self) -> None:
-        if self.access_token is None:
+        if self._explicit_token:
+            self.access_token = self._explicit_token
+        else:
             from backend.broker.token_resolver import resolve_upstox_token
             self.access_token = resolve_upstox_token()
 
         if not self.access_token:
             self.connection_status = "auth_failed"
+            self._auth_failed = True
             self.is_connected = False
             self._last_error = "No Upstox access token configured"
             logger.warning("WebSocket not started — no access token")
             return
+
+        from backend.broker.token_resolver import check_token_freshness, token_fingerprint
+        freshness = check_token_freshness(self.access_token)
+        if freshness.get("is_expired") is True:
+            self.connection_status = "auth_failed"
+            self._auth_failed = True
+            self.is_connected = False
+            self._last_error = f"Cannot start WebSocket: access token is expired ({freshness.get('message')})"
+            logger.error(
+                "WebSocket start aborted — access token is expired (fingerprint=%s). Refresh via OAuth.",
+                freshness.get("token_fingerprint"),
+            )
+            return
+
         if self._should_run:
             logger.debug("WebSocket already running")
             return
@@ -293,12 +330,14 @@ class UpstoxWebSocketClient:
             )
             return
 
+        self._auth_failed = False
         self._should_run = True
         self.connection_status = "connecting"
         self.is_connected = False
+        fp = token_fingerprint(self.access_token)
         logger.info(
-            "Starting Upstox v3 WebSocket client — %d instruments, mode=%s",
-            len(self._instrument_keys), self.mode,
+            "Starting Upstox v3 WebSocket client — %d instruments, mode=%s, token_fingerprint=%s",
+            len(self._instrument_keys), self.mode, fp,
         )
         self._build_and_connect()
 
@@ -314,6 +353,63 @@ class UpstoxWebSocketClient:
         self.is_connected = False
         self.connection_status = "disconnected"
 
+    def reconnect_with_token(self, new_token: Optional[str] = None) -> None:
+        """Reconnect WebSocket with canonical access token without server restart.
+        
+        Resets auth failure state, cancels existing streamer, updates the token,
+        and reconnects cleanly.
+        """
+        if new_token and new_token.strip():
+            clean = new_token.strip().strip('"\'').strip()
+            self._explicit_token = clean
+            self.access_token = clean
+        else:
+            self._explicit_token = None
+            from backend.broker.token_resolver import resolve_upstox_token
+            self.access_token = resolve_upstox_token()
+
+        if not self.access_token:
+            self.connection_status = "auth_failed"
+            self._auth_failed = True
+            self.is_connected = False
+            self._last_error = "No Upstox access token available for reconnect"
+            logger.warning("WebSocket reconnect aborted — no access token")
+            return
+
+        from backend.broker.token_resolver import check_token_freshness, token_fingerprint
+        freshness = check_token_freshness(self.access_token)
+        if freshness.get("is_expired") is True:
+            self.connection_status = "auth_failed"
+            self._auth_failed = True
+            self.is_connected = False
+            self._last_error = f"Cannot reconnect WebSocket: token is expired ({freshness.get('message')})"
+            logger.error(
+                "WebSocket reconnect aborted — token is expired (fingerprint=%s)",
+                freshness.get("token_fingerprint"),
+            )
+            return
+
+        fp = token_fingerprint(self.access_token)
+        logger.info("WebSocket reconnecting with fresh token (fingerprint=%s)", fp)
+
+        self._auth_failed = False
+        self._reconnect_attempts = 0
+        self._backoff_delay = self._base_backoff
+        self._last_error = None
+
+        if self._streamer is not None:
+            try:
+                self._streamer.auto_reconnect(False)
+                self._streamer.disconnect()
+            except Exception:
+                pass
+            self._streamer = None
+
+        self._should_run = True
+        self.connection_status = "connecting"
+        self.is_connected = False
+        self._build_and_connect()
+
     # ── internals ────────────────────────────────────────────────────────
 
     def _build_and_connect(self) -> None:
@@ -326,9 +422,8 @@ class UpstoxWebSocketClient:
         streamer = upstox_client.MarketDataStreamerV3(
             api_client, self._instrument_keys, self.mode,
         )
-        # Keep retrying — the market can be closed for hours; we still want
-        # the socket to come back the instant it's reachable again.
-        streamer.auto_reconnect(True, interval=3, retry_count=100000)
+        retry_interval = int(max(1.0, self._backoff_delay))
+        streamer.auto_reconnect(True, interval=retry_interval, retry_count=self._max_reconnect_attempts)
 
         streamer.on("open", self._on_open)
         streamer.on("message", self._on_message)
@@ -479,20 +574,41 @@ class UpstoxWebSocketClient:
 
     def _on_error(self, *args: Any, **kwargs: Any) -> None:
         error = args[1] if len(args) >= 2 else (args[0] if args else kwargs.get("error", "Unknown error"))
-        self._last_error = str(error)
-        logger.warning("Upstox v3 WebSocket ERROR: %s", error)
+        err_str = str(error)
+        self._last_error = err_str
+        logger.warning("Upstox v3 WebSocket ERROR: %s", err_str)
         try:
             from backend.health.health_monitor import health_monitor
-            health_monitor.record_error("websocket", str(error))
+            health_monitor.record_error("websocket", err_str)
         except Exception:
             pass
-        if "401" in str(error) or "Unauthorized" in str(error):
+
+        # CRITICAL: Halt auto-reconnects on 401 Unauthorized / invalid token
+        if "401" in err_str or "Unauthorized" in err_str or "UDAPI100050" in err_str:
             self.connection_status = "auth_failed"
+            self._auth_failed = True
             self.is_connected = False
+            self._should_run = False
+            if self._streamer is not None:
+                try:
+                    self._streamer.auto_reconnect(False)
+                    self._streamer.disconnect()
+                except Exception:
+                    pass
             logger.error(
-                "WebSocket auth failed — access token is invalid/expired. "
-                "Generate a new token in Settings."
+                "WebSocket auth failed (HTTP 401 Unauthorized) — stopped automatic reconnects. "
+                "Fresh OAuth token required via Settings."
             )
+            try:
+                from backend.health.health_monitor import health_monitor, ComponentStatus
+                health_monitor.update_status("websocket", ComponentStatus.FAILED)
+                health_monitor.log_event(
+                    "websocket", "WS_AUTH_FAILED_401",
+                    "WebSocket auth failed (401 Unauthorized). Stopped reconnecting until token refresh.",
+                    severity="ERROR"
+                )
+            except Exception:
+                pass
 
     def _on_close(self, *args: Any, **kwargs: Any) -> None:
         code = None
@@ -507,8 +623,15 @@ class UpstoxWebSocketClient:
             msg = args[0]
 
         self.is_connected = False
+        if self._auth_failed:
+            self.connection_status = "auth_failed"
+            logger.info("Upstox v3 WebSocket closed after auth failure (will not reconnect without new token)")
+            return
+
         if self._should_run:
             self.connection_status = "reconnecting"
+            # Exponential bounded backoff calculation for next attempt
+            self._backoff_delay = min(self._max_backoff, self._base_backoff * (1.5 ** min(self._reconnect_attempts, 8)))
         else:
             self.connection_status = "disconnected"
         logger.info("Upstox v3 WebSocket closed — code=%s msg=%s", code, msg)
@@ -525,12 +648,25 @@ class UpstoxWebSocketClient:
             pass
 
     def _on_reconnecting(self, *args: Any, **kwargs: Any) -> None:
+        if self._auth_failed or not self._should_run:
+            if self._streamer is not None:
+                try:
+                    self._streamer.auto_reconnect(False)
+                    self._streamer.disconnect()
+                except Exception:
+                    pass
+            self.connection_status = "auth_failed" if self._auth_failed else "disconnected"
+            return
+
         message = args[-1] if args else kwargs.get("message", "reconnecting")
         self._reconnect_attempts += 1
         self._last_reconnect_time = time.monotonic()
         self.connection_status = "reconnecting"
         self.is_connected = False
-        logger.warning("WebSocket reconnecting: %s", message)
+        logger.warning(
+            "WebSocket reconnecting (attempt %d/%d, backoff=%.1fs): %s",
+            self._reconnect_attempts, self._max_reconnect_attempts, self._backoff_delay, message
+        )
         try:
             from backend.health.health_monitor import health_monitor, ComponentStatus
             health_monitor.update_status("websocket", ComponentStatus.RECONNECTING)

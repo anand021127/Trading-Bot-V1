@@ -70,11 +70,22 @@ class UpstoxClient:
         base_url: str = BASE_URL,
         timeout: int = 15,
     ) -> None:
-        from backend.broker.token_resolver import resolve_upstox_token
-        self.access_token = resolve_upstox_token(access_token)
+        self._explicit_token: Optional[str] = access_token.strip().strip('"\'').strip() if (access_token and access_token.strip()) else None
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._session = _build_session()
+
+    @property
+    def access_token(self) -> str:
+        if self._explicit_token:
+            return self._explicit_token
+        from backend.broker.token_resolver import resolve_upstox_token
+        return resolve_upstox_token()
+
+    @access_token.setter
+    def access_token(self, token: Optional[str]) -> None:
+        clean = token.strip().strip('"\'').strip() if (token and token.strip()) else None
+        self._explicit_token = clean
 
     def _headers(self) -> Dict[str, str]:
         h = {

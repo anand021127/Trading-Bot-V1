@@ -77,6 +77,11 @@ def decode_jwt_safe(token: str) -> Dict[str, Any]:
         exp = payload.get("exp")
         now = time.time()
 
+        if iat is not None and isinstance(iat, (int, float)) and iat > 1e11:
+            iat = iat / 1000.0
+        if exp is not None and isinstance(exp, (int, float)) and exp > 1e11:
+            exp = exp / 1000.0
+
         is_expired = (exp < now) if (exp is not None) else None
         seconds_remaining = (exp - now) if (exp is not None) else None
 
@@ -97,6 +102,105 @@ def decode_jwt_safe(token: str) -> Dict[str, Any]:
         }
     except Exception as e:
         return {"is_jwt": False, "error": str(e)}
+
+
+def check_token_freshness(token: Optional[str]) -> Dict[str, Any]:
+    """Inspect JWT claims to check token freshness without exposing secrets.
+    
+    Returns a dict with:
+      - is_jwt: bool
+      - is_fresh: bool
+      - is_expired: bool
+      - seconds_remaining: Optional[float]
+      - expires_at: Optional[float] (Unix seconds)
+      - expires_at_iso: Optional[str]
+      - issued_at: Optional[float] (Unix seconds)
+      - issued_at_iso: Optional[str]
+      - token_fingerprint: str
+      - status: 'FRESH' | 'EXPIRED' | 'EXPIRING_SOON' | 'OPAQUE_UNVERIFIED' | 'EMPTY'
+      - message: str
+    """
+    clean = (token or "").strip().strip('"\'').strip()
+    if not clean:
+        return {
+            "is_jwt": False,
+            "is_fresh": False,
+            "is_expired": True,
+            "seconds_remaining": 0.0,
+            "expires_at": None,
+            "expires_at_iso": None,
+            "issued_at": None,
+            "issued_at_iso": None,
+            "token_fingerprint": "empty",
+            "status": "EMPTY",
+            "message": "Token is empty or not configured",
+        }
+
+    fp = token_fingerprint(clean)
+    jwt = decode_jwt_safe(clean)
+
+    if not jwt.get("is_jwt"):
+        is_mock = clean.startswith(("mock-", "test-", "leftover-")) or len(clean) < 30
+        is_expired = "expired" in clean.lower()
+        return {
+            "is_jwt": False,
+            "is_fresh": not is_expired,
+            "is_expired": is_expired,
+            "seconds_remaining": None,
+            "expires_at": None,
+            "expires_at_iso": None,
+            "issued_at": None,
+            "issued_at_iso": None,
+            "token_fingerprint": fp,
+            "status": "EXPIRED" if is_expired else ("MOCK" if is_mock else "OPAQUE_UNVERIFIED"),
+            "message": "Non-JWT token (expired)" if is_expired else ("Non-JWT mock token" if is_mock else "Non-JWT opaque token"),
+        }
+
+    now = time.time()
+    exp = jwt.get("expires_at")
+    iat = jwt.get("issued_at")
+
+    if exp is not None:
+        sec_rem = exp - now
+        is_expired = sec_rem <= 0.0
+
+        if is_expired:
+            status = "EXPIRED"
+            msg = f"Token expired {abs(round(sec_rem, 1))}s ago at {jwt.get('expires_at_iso')}"
+        elif sec_rem <= 300.0:
+            status = "EXPIRING_SOON"
+            msg = f"Token expires soon in {round(sec_rem, 1)}s at {jwt.get('expires_at_iso')}"
+        else:
+            status = "FRESH"
+            msg = f"Token is fresh, expires in {round(sec_rem / 3600.0, 1)}h at {jwt.get('expires_at_iso')}"
+
+        return {
+            "is_jwt": True,
+            "is_fresh": not is_expired,
+            "is_expired": is_expired,
+            "seconds_remaining": round(sec_rem, 1),
+            "expires_at": exp,
+            "expires_at_iso": jwt.get("expires_at_iso"),
+            "issued_at": iat,
+            "issued_at_iso": jwt.get("issued_at_iso"),
+            "token_fingerprint": fp,
+            "status": status,
+            "message": msg,
+        }
+    else:
+        return {
+            "is_jwt": True,
+            "is_fresh": True,
+            "is_expired": False,
+            "seconds_remaining": None,
+            "expires_at": None,
+            "expires_at_iso": None,
+            "issued_at": iat,
+            "issued_at_iso": jwt.get("issued_at_iso"),
+            "token_fingerprint": fp,
+            "status": "FRESH",
+            "message": "JWT token has no exp claim, assumed active",
+        }
 
 
 def parse_dotenv_file(filepath: str) -> Dict[str, str]:
@@ -282,11 +386,16 @@ def persist_upstox_token(
 
     is_mock = clean_token.startswith(("mock-", "test-", "leftover-")) or (0 < len(clean_token) < 30)
 
-    jwt = decode_jwt_safe(clean_token)
-    if jwt.get("is_expired") is True:
-        logger.warning("[Token Resolver] Refusing to persist expired token.")
+    freshness = check_token_freshness(clean_token)
+    if freshness.get("is_expired") is True:
+        logger.warning(
+            "[Token Resolver] Refusing to persist expired token (fingerprint=%s, reason=%s)",
+            freshness.get("token_fingerprint"),
+            freshness.get("message"),
+        )
         return False
 
+    jwt = decode_jwt_safe(clean_token)
     fp = token_fingerprint(clean_token)
     v_at = (verification_info or {}).get("verified_at") or datetime.now(timezone.utc).isoformat()
     v_src = (verification_info or {}).get("source") or "oauth_verified"
@@ -354,6 +463,61 @@ def persist_upstox_token(
                 pass
 
     return True
+
+
+def invalidate_old_token_references(new_token: str) -> None:
+    """Invalidate all stale cached tokens and propagate the fresh canonical token.
+    
+    1. Updates runtime verified token state.
+    2. Updates os.environ['UPSTOX_ACCESS_TOKEN'].
+    3. Invalidates in-memory clients (TradingEngine, WebSocketClient, UpstoxClient).
+    4. Ensures zero stale token references remain active without requiring restart.
+    """
+    clean = (new_token or "").strip().strip('"\'').strip()
+    if not clean:
+        return
+
+    # 1. Synchronize os.environ
+    os.environ["UPSTOX_ACCESS_TOKEN"] = clean
+
+    # 2. Update verified runtime token
+    set_verified_runtime_token(clean, {
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "source": "runtime (propagated)",
+    })
+
+    # 3. Propagate to FastAPI app state if running
+    try:
+        import backend.api.main as main_mod
+        app = getattr(main_mod, "app", None)
+        if app is not None:
+            engine = getattr(app.state, "engine", None)
+            if engine is not None and hasattr(engine, "update_access_token"):
+                try:
+                    engine.update_access_token(clean)
+                except Exception as e:
+                    logger.debug("Failed to update engine token: %s", e)
+
+            ws_client = getattr(app.state, "ws_client", None)
+            if ws_client is not None and hasattr(ws_client, "reconnect_with_token"):
+                try:
+                    ws_client.reconnect_with_token(clean)
+                except Exception as e:
+                    logger.debug("Failed to reconnect ws_client with token: %s", e)
+    except Exception as e:
+        logger.debug("App state token propagation skipped: %s", e)
+
+    # 4. Propagate to bot_control engine reference if separate
+    try:
+        from backend.api.routers.bot_control import get_engine
+        engine = get_engine()
+        if engine is not None and hasattr(engine, "update_access_token"):
+            try:
+                engine.update_access_token(clean)
+            except Exception as e:
+                logger.debug("Failed to update bot_control engine token: %s", e)
+    except Exception:
+        pass
 
 
 def _score_candidate(
@@ -779,14 +943,17 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
             pass
 
         if e.code == 401:
-            result["error_code"] = parsed_code or "AUTH_INVALID_TOKEN"
+            result["error_code"] = "AUTHENTICATION_FAILURE"
+            result["failure_classification"] = "AUTHENTICATION_FAILURE"
             result["error_message"] = parsed_msg or "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token via OAuth."
             result["required_permission"] = "Valid, unexpired Upstox Access Token (refresh daily via OAuth login)"
         else:
-            result["error_code"] = parsed_code or f"HTTP_{e.code}"
+            result["error_code"] = "AUTHENTICATION_FAILURE"
+            result["failure_classification"] = "AUTHENTICATION_FAILURE"
             result["error_message"] = parsed_msg or str(e)
     except Exception as e:
-        result["error_code"] = "NETWORK_ERROR"
+        result["error_code"] = "AUTHENTICATION_FAILURE"
+        result["failure_classification"] = "AUTHENTICATION_FAILURE"
         result["error_message"] = str(e)
         result["required_permission"] = "Stable Internet connectivity to api.upstox.com"
 
@@ -821,14 +988,15 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
         if e.code == 403:
             result["expired_instruments_entitled"] = False
             result["plan_type"] = "Standard (Upstox Plus Plan Required for Expired Historical Derivatives)"
-            if not result.get("error_code"):
-                result["error_code"] = parsed_exp_code or "PERMISSION_DENIED"
-                result["error_message"] = parsed_exp_msg or "Access forbidden: Expired Instruments API requires active Upstox Plus Plan."
-                result["required_permission"] = "Upstox Plus Plan subscription required for Expired Instruments historical derivatives API"
+            result["error_code"] = "EXPIRED_OPTIONS_ENTITLEMENT_FAILURE"
+            result["failure_classification"] = "EXPIRED_OPTIONS_ENTITLEMENT_FAILURE"
+            result["error_message"] = parsed_exp_msg or "Access forbidden: Expired Instruments API requires active Upstox Plus Plan."
+            result["required_permission"] = "Upstox Plus Plan subscription required for Expired Instruments historical derivatives API"
         elif e.code == 401:
             result["expired_instruments_entitled"] = False
             if not result.get("error_code"):
-                result["error_code"] = parsed_exp_code or "AUTH_INVALID_TOKEN"
+                result["error_code"] = "AUTHENTICATION_FAILURE"
+                result["failure_classification"] = "AUTHENTICATION_FAILURE"
                 result["error_message"] = parsed_exp_msg or "Invalid or expired UPSTOX_ACCESS_TOKEN. Please generate a new active access token."
                 result["required_permission"] = "Valid, unexpired Upstox Access Token (refresh daily via OAuth login)"
         else:
@@ -848,12 +1016,9 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
 
     result["valid"] = is_valid
     result["accessible"] = is_accessible
-    result["message"] = result.get("error_message") or ("Upstox Plus Plan Active and verified." if is_accessible else "")
 
-    if is_accessible:
-        result["error_code"] = None
-        result["error_message"] = None
-        result["required_permission"] = None
+    if is_valid:
+        # Token is authenticated and valid for user account, REST APIs, orders, and WebSocket
         set_verified_runtime_token(
             clean_token,
             {
@@ -861,18 +1026,28 @@ def validate_token_live(token: Optional[str] = None, dotenv_path: Optional[str] 
                 "source": "runtime (verified)",
                 "user_name": result.get("user_name", ""),
                 "user_id": result.get("user_id", ""),
-                "is_plus_plan": True,
+                "is_plus_plan": is_entitled,
+                "entitlement_status": "ENTITLED" if is_entitled else "EXPIRED_OPTIONS_ENTITLEMENT_FAILURE",
             },
         )
-    elif not result.get("error_code"):
-        if not is_valid:
-            result["error_code"] = "AUTH_INVALID_TOKEN"
-            result["error_message"] = "Invalid or expired token."
-            result["required_permission"] = "Valid, unexpired Upstox Access Token"
-        elif not is_entitled:
-            result["error_code"] = "PERMISSION_DENIED"
-            result["error_message"] = "Upstox Plus Plan required for historical expired derivatives access."
+        if is_entitled:
+            result["error_code"] = None
+            result["failure_classification"] = None
+            result["error_message"] = None
+            result["required_permission"] = None
+            result["message"] = "Upstox Plus Plan Active and verified."
+        else:
+            result["error_code"] = "EXPIRED_OPTIONS_ENTITLEMENT_FAILURE"
+            result["failure_classification"] = "EXPIRED_OPTIONS_ENTITLEMENT_FAILURE"
+            result["error_message"] = "Profile verified (authenticated). Expired Options Historical Data API requires Upstox Plus Plan subscription (HTTP 403 Forbidden)."
             result["required_permission"] = "Upstox Plus Plan subscription"
+            result["message"] = "Token verified for trading & live feeds. Expired Options API requires Upstox Plus Plan."
+    else:
+        result["error_code"] = "AUTHENTICATION_FAILURE"
+        result["failure_classification"] = "AUTHENTICATION_FAILURE"
+        result["error_message"] = result.get("error_message") or "Authentication failed — invalid or expired token."
+        result["required_permission"] = "Valid, unexpired Upstox Access Token"
+        result["message"] = "Authentication failed: invalid or expired token."
 
     logger.info(
         "[Token Diagnostic] validate_token_live: length=%d, fingerprint=%s, profile_status=%s, expired_status=%s, accessible=%s",

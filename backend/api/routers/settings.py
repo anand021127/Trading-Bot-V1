@@ -300,50 +300,87 @@ async def token_callback(
         clean_token = (token or "").strip().strip('"\'').strip()
 
         if clean_token:
-            from backend.broker.token_resolver import validate_token_live, persist_upstox_token
-            # Dual Verification: Check /v2/user/profile AND /v2/expired-instruments/expiries
+            from backend.broker.token_resolver import (
+                validate_token_live,
+                persist_upstox_token,
+                check_token_freshness,
+                invalidate_old_token_references,
+            )
+
+            # 1. Freshness check via JWT claims
+            freshness = check_token_freshness(clean_token)
+            if freshness.get("is_expired") is True:
+                err_code = "AUTHENTICATION_FAILURE"
+                err_msg = f"OAuth access token is already expired ({freshness.get('message')})"
+                html_expired = f"""<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0b0f19;color:#ef4444;padding:40px;text-align:center;">
+                <h2>Authentication Failed: Token Expired</h2>
+                <p style="color:#94a3b8;">{err_msg} ({err_code})</p>
+                <button onclick="window.close()" style="background:#1e293b;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">Close Window</button>
+                </body></html>"""
+                return HTMLResponse(content=html_expired, status_code=401)
+
+            # 2. Dual Verification: Check /v2/user/profile AND /v2/expired-instruments/expiries
             val_result = validate_token_live(clean_token)
 
             profile_ok = bool(val_result.get("profile_verified"))
             entitled_ok = bool(val_result.get("expired_instruments_entitled"))
 
-            if profile_ok and entitled_ok:
-                # Both checks succeeded -> Mark token as ACTIVE/VERIFIED and persist atomically
+            if profile_ok:
+                # Profile verification succeeded -> Token is valid for trading, feeds, and scanner
                 user_name = val_result.get("user_name") or val_result.get("user_id") or "Upstox Trader"
                 user_id = val_result.get("user_id", "")
                 profile_dict = {"user_name": user_name, "user_id": user_id}
 
+                entitlement_status = "ENTITLED" if entitled_ok else "EXPIRED_OPTIONS_ENTITLEMENT_FAILURE"
                 persist_upstox_token(
                     clean_token,
                     profile_dict,
-                    verification_info={"verified": True, "source": "oauth_callback", "is_plus_plan": True},
+                    verification_info={
+                        "verified": True,
+                        "source": "oauth_callback",
+                        "is_plus_plan": entitled_ok,
+                        "entitlement_status": entitlement_status,
+                    },
                 )
+                invalidate_old_token_references(clean_token)
                 _propagate_token_to_engine(clean_token)
                 _restart_websocket_client(clean_token)
 
-                plan_msg = "Upstox Plus Plan Active (Profile verified & expired historical derivatives enabled)"
+                if entitled_ok:
+                    plan_msg = "Upstox Plus Plan Active (Profile verified & expired historical derivatives enabled)"
+                    entitlement_note = "All live trading, streaming market feeds, and expired historical options features are active."
+                    plus_flag = "true"
+                else:
+                    plan_msg = "Upstox Standard Plan Active (Live trading & streaming market feeds enabled)"
+                    entitlement_note = "Note: Expired Historical Options API requires Upstox Plus Plan (EXPIRED_OPTIONS_ENTITLEMENT_FAILURE). Live trading and WebSocket data are active."
+                    plus_flag = "false"
 
                 html_ok = f"""<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0b0f19;color:#10b981;padding:40px;text-align:center;">
                 <h2>Upstox Authentication Successful</h2>
                 <p style="color:#e2e8f0;">Welcome, <strong>{user_name}</strong>!</p>
                 <p style="color:#38bdf8;font-size:14px;">{plan_msg}</p>
-                <p style="color:#94a3b8;font-size:13px;">Token verified against Upstox Profile & Expired Instruments APIs (HTTP 200) and marked ACTIVE/VERIFIED.</p>
+                <p style="color:#94a3b8;font-size:13px;">{entitlement_note}</p>
                 <p style="color:#64748b;font-size:12px;">This window will close automatically.</p>
                 <script>
                   if (window.opener) {{
-                    window.opener.postMessage({{ type: 'UPSTOX_AUTH_SUCCESS', user_name: '{user_name}', plus_plan: true }}, '*');
+                    window.opener.postMessage({{
+                      type: 'UPSTOX_AUTH_SUCCESS',
+                      user_name: '{user_name}',
+                      plus_plan: {plus_flag},
+                      entitlement_status: '{entitlement_status}'
+                    }}, '*');
                   }}
                   setTimeout(() => window.close(), 2000);
                 </script>
                 </body></html>"""
                 return HTMLResponse(content=html_ok, status_code=200)
             else:
-                # Do NOT persist if either verification check fails
-                err_code = val_result.get("error_code") or "AUTH_VERIFICATION_FAILED"
-                err_msg = val_result.get("message") or "Profile or Expired Instruments entitlement verification failed"
+                # Profile verification failed -> Genuine Authentication Failure
+                err_code = "AUTHENTICATION_FAILURE"
+                err_msg = val_result.get("error_message") or "Upstox rejected access token (HTTP 401 Unauthorized from /v2/user/profile)"
                 html_invalid = f"""<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0b0f19;color:#ef4444;padding:40px;text-align:center;">
-                <h2>Authentication Verification Failed</h2>
-                <p style="color:#94a3b8;">Token exchange succeeded but verification failed ({err_code}: {err_msg}). Token was NOT persisted.</p>
+                <h2>Authentication Failed ({err_code})</h2>
+                <p style="color:#94a3b8;">Token exchange completed, but Upstox Profile API rejected the token: {err_msg}</p>
                 <button onclick="window.close()" style="background:#1e293b;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">Close Window</button>
                 </body></html>"""
                 return HTMLResponse(content=html_invalid, status_code=401)
@@ -414,6 +451,13 @@ def _restart_websocket_client(token: str) -> None:
             return
         old_client = getattr(app.state, "ws_client", None)
         if old_client is not None:
+            if hasattr(old_client, "reconnect_with_token"):
+                try:
+                    old_client.reconnect_with_token(token)
+                    return
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).debug("reconnect_with_token failed, fallback to new client: %s", e)
             try:
                 old_client.stop()
             except Exception:

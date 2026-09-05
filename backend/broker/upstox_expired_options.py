@@ -345,14 +345,16 @@ class UpstoxExpiredOptionsClient:
         self.dotenv_path = dotenv_path
         if access_token and access_token.strip():
             # Use the exact verified immutable token without re-resolving
-            self.access_token = access_token.strip().strip('"\'').strip()
+            self._explicit_token = access_token.strip().strip('"\'').strip()
+            self._fallback_token = self._explicit_token
             self.token_source = "explicit_runtime"
         else:
-            # Resolve authoritative token requiring valid active state
-            self.access_token, self.token_source = resolve_upstox_token_with_source(
+            self._explicit_token = None
+            resolved, self.token_source = resolve_upstox_token_with_source(
                 dotenv_path=dotenv_path,
-                require_valid=True,
+                require_valid=False,
             )
+            self._fallback_token = resolved
 
         self.token_fingerprint = token_fingerprint(self.access_token)
         self.base_url = base_url.rstrip("/")
@@ -368,6 +370,21 @@ class UpstoxExpiredOptionsClient:
             "[Token Diagnostic] UpstoxExpiredOptionsClient init: token_source=%s, length=%d, fingerprint=%s",
             src, len(self.access_token), fp,
         )
+
+    @property
+    def access_token(self) -> str:
+        if self._explicit_token:
+            return self._explicit_token
+        from backend.broker.token_resolver import resolve_upstox_token
+        return resolve_upstox_token(require_valid=False) or self._fallback_token
+
+    @access_token.setter
+    def access_token(self, value: Optional[str]) -> None:
+        clean = (value or "").strip().strip('"\'').strip()
+        self._explicit_token = clean if clean else None
+        self._fallback_token = clean
+        from backend.broker.token_resolver import token_fingerprint
+        self.token_fingerprint = token_fingerprint(clean)
 
     def update_access_token(self, new_token: str) -> None:
         """Update client access token dynamically."""
