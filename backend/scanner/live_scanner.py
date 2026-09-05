@@ -101,6 +101,7 @@ class LiveScanner:
         self._consecutive_scan_failures: int = 0
         self._last_scan_error: Optional[str] = None
         self._started_at_mono: float = 0.0
+        self._cached_watching_count: int = 0
 
     # ── one symbol / one pass — synchronous, directly testable ───────────
 
@@ -203,6 +204,7 @@ class LiveScanner:
                     # Use asyncio.to_thread for the potentially-blocking
                     # universe_resolver call (event-loop audit fix).
                     symbols = await asyncio.to_thread(self.universe_resolver)
+                    self._cached_watching_count = len(symbols) if symbols else 0
                     if not symbols:
                         await asyncio.sleep(self.seconds_between_symbols)
                         continue
@@ -292,11 +294,18 @@ class LiveScanner:
     def status_report(self) -> Dict[str, Any]:
         with self._results_lock:
             results_snapshot = list(self._results.values())
+        watching_count = self._cached_watching_count
+        if watching_count == 0:
+            try:
+                watching_count = len(self.universe_resolver())
+                self._cached_watching_count = watching_count
+            except Exception:
+                watching_count = len(results_snapshot)
         return {
             "is_running": self.is_running,
             "currently_scanning": self.currently_scanning,
             "last_full_pass_completed_at": self.last_full_pass_completed_at,
-            "watching_count": len(self.universe_resolver()),
+            "watching_count": watching_count,
             "results": [e.to_dict() for e in results_snapshot],
         }
 

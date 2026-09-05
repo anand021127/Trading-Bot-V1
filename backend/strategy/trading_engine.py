@@ -885,7 +885,7 @@ class TradingEngine:
                         contract_key, tick_age,
                     )
                     try:
-                        fresh_quote = self.client.get_quote_by_instrument_key(contract_key)
+                        fresh_quote = await asyncio.to_thread(self.client.get_quote_by_instrument_key, contract_key)
                         if fresh_quote.get("has_data") and fresh_quote.get("ltp", 0) > 0:
                             current_price = fresh_quote["ltp"]
                         else:
@@ -906,7 +906,7 @@ class TradingEngine:
                 elif current_price is None and tick is None:
                     # No tick at all — try broker quote
                     try:
-                        fresh_quote = self.client.get_quote_by_instrument_key(contract_key)
+                        fresh_quote = await asyncio.to_thread(self.client.get_quote_by_instrument_key, contract_key)
                         if fresh_quote.get("has_data") and fresh_quote.get("ltp", 0) > 0:
                             current_price = fresh_quote["ltp"]
                     except Exception:
@@ -917,7 +917,7 @@ class TradingEngine:
                 # a fresh quote so a dead WebSocket feed doesn't leave
                 # positions unmonitored.
                 try:
-                    quotes = self.client.get_multiple_quotes([symbol])
+                    quotes = await asyncio.to_thread(self.client.get_multiple_quotes, [symbol])
                     current_price = quotes.get(symbol, {}).get("ltp")
                 except Exception:
                     current_price = None
@@ -941,9 +941,10 @@ class TradingEngine:
                 exit_reason = "TARGET_HIT"
             else:
                 try:
-                    candles = self.client.get_historical_candles(price_lookup_key, "5minute", limit=100)
+                    candles = await asyncio.to_thread(self.client.get_historical_candles, price_lookup_key, "5minute", limit=100)
                     exit_context = {"expiry_date": pos.get("expiry_date")} if pos.get("expiry_date") else None
-                    strat_exit = self.strategy_engine.check_exits(
+                    strat_exit = await asyncio.to_thread(
+                        self.strategy_engine.check_exits,
                         pos.get("strategy_name", self.strategy_name), pos, candles, exit_context,
                     )
                     if strat_exit:
@@ -1025,7 +1026,7 @@ class TradingEngine:
         while BotState.is_running():
             try:
                 now = datetime.now(IST)
-                watchlist, universe_mode = self._resolve_universe()
+                watchlist, universe_mode = await asyncio.to_thread(self._resolve_universe)
 
                 # Monitor every open position EVERY cycle — the critical fix.
                 if self._open_positions:
@@ -1054,10 +1055,10 @@ class TradingEngine:
                             if sym in self._open_positions:
                                 continue
 
-                            best = self.evaluate_option_premium(sym)
+                            best = await asyncio.to_thread(self.evaluate_option_premium, sym)
 
                             if best is not None and best.signal == "BUY":
-                                trade_id = self.execute_multi_signal(best)
+                                trade_id = await asyncio.to_thread(self.execute_multi_signal, best)
                                 if trade_id:
                                     self._trades_taken_today += 1
 
@@ -1118,7 +1119,7 @@ class TradingEngine:
                 contract_metadata=contract_metadata,
                 underlying_symbol=symbol,
             )
-            order = self.order_manager.place_order(req)
+            order = await asyncio.to_thread(self.order_manager.place_order, req)
 
             # V21-FINAL Item 18: Use actual fill price for P&L
             actual_exit_qty = order.filled_quantity or order.quantity or pos["quantity"]
@@ -1158,16 +1159,18 @@ class TradingEngine:
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
     def notify(self, message: str) -> None:
-        for notifier in [self.telegram_alerts, self.email_alerts]:
-            if notifier is None:
-                continue
-            try:
-                if isinstance(notifier, TelegramAlerts):
-                    notifier.send_message(message)
-                elif isinstance(notifier, EmailAlerts):
-                    notifier.send_email("Upstox Bot Alert", message)
-            except Exception:
-                pass
+        def _dispatch():
+            for notifier in [self.telegram_alerts, self.email_alerts]:
+                if notifier is None:
+                    continue
+                try:
+                    if isinstance(notifier, TelegramAlerts):
+                        notifier.send_message(message)
+                    elif isinstance(notifier, EmailAlerts):
+                        notifier.send_email("Upstox Bot Alert", message)
+                except Exception:
+                    pass
+        threading.Thread(target=_dispatch, daemon=True).start()
 
     # ─── Legacy compat ────────────────────────────────────────────────────────
 

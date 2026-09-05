@@ -1,6 +1,7 @@
 """Trades, positions, and prices API router."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -212,7 +213,8 @@ async def get_live_positions_detail() -> Dict[str, Any]:
         return {"positions": [], "mode": settings.mode,
                 "note": "Trading engine not initialized (no Upstox token configured?)"}
     try:
-        return {"positions": engine.get_open_positions_detail(), "mode": settings.mode}
+        positions = await asyncio.to_thread(engine.get_open_positions_detail)
+        return {"positions": positions, "mode": settings.mode}
     except Exception as e:
         logger.exception("Failed to build live positions detail")
         return {"positions": [], "mode": settings.mode, "error": str(e)}
@@ -223,7 +225,7 @@ async def get_live_positions_detail() -> Dict[str, Any]:
 @router.get("/prices/live")
 async def get_live_prices() -> Dict[str, Any]:
     watchlist = list(VALID_OPTION_INDICES)
-    prices = _fetch_prices(watchlist)
+    prices = await asyncio.to_thread(_fetch_prices, watchlist)
     return {
         "prices": prices,
         "market_open": _is_market_open(),
@@ -234,7 +236,7 @@ async def get_live_prices() -> Dict[str, Any]:
 
 @router.get("/prices/underlyings")
 async def get_underlying_prices() -> Dict[str, Any]:
-    prices = _fetch_prices(list(VALID_OPTION_INDICES))
+    prices = await asyncio.to_thread(_fetch_prices, list(VALID_OPTION_INDICES))
     return {
         "prices": prices,
         "market_open": _is_market_open(),

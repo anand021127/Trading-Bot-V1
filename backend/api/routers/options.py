@@ -1,6 +1,7 @@
 """REST endpoints for live index option-chain analysis."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -32,7 +33,7 @@ async def get_option_chain(
             "status": "AUTH_REQUIRED",
             "message": "Upstox access token is not configured. Please add access token in Settings.",
         }
-    selected_expiry = expiry or client.get_nearest_expiry(name)
+    selected_expiry = expiry or await asyncio.to_thread(client.get_nearest_expiry, name)
     if not selected_expiry:
         return {
             "underlying": name,
@@ -44,8 +45,8 @@ async def get_option_chain(
             "message": "No upcoming expiry available. NSE market may be closed or token expired.",
         }
     try:
-        contracts = client.get_option_chain(name, selected_expiry)
-        quote = client.get_live_quote(name)
+        contracts = await asyncio.to_thread(client.get_option_chain, name, selected_expiry)
+        quote = await asyncio.to_thread(client.get_live_quote, name)
     except UpstoxAPIError as exc:
         if exc.status_code == 401:
             return {

@@ -6,6 +6,7 @@ the configured universe.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
@@ -44,5 +45,5 @@ async def trigger_scan_now() -> Dict[str, Any]:
     changing the universe, instead of waiting for the background loop)."""
     if _scanner_ref is None:
         raise HTTPException(status_code=503, detail="Scanner not initialized")
-    results = _scanner_ref.scan_once()
+    results = await asyncio.to_thread(_scanner_ref.scan_once)
     return {"scanned": len(results), "results": [r.to_dict() for r in results]}

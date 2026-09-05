@@ -1,6 +1,7 @@
 """Diagnostics router — 11 tests to verify every system component."""
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from datetime import datetime
@@ -35,7 +36,7 @@ async def _test_authentication() -> Dict[str, Any]:
     try:
         from backend.broker.upstox_client import UpstoxClient
         client = UpstoxClient(access_token=token)
-        valid = client.is_token_valid()
+        valid = await asyncio.to_thread(client.is_token_valid)
         ms = (time.monotonic() - t0) * 1000
         if valid:
             return _result("authentication", "PASS", ms, f"Token valid ({len(token)} chars)")
@@ -52,7 +53,7 @@ async def _test_historical_data() -> Dict[str, Any]:
         from backend.broker.upstox_client import UpstoxClient
         client = UpstoxClient()
         underlying = "NIFTY50"
-        candles = client.get_historical_candles(underlying, "day", limit=5)
+        candles = await asyncio.to_thread(client.get_historical_candles, underlying, "day", limit=5)
         ms = (time.monotonic() - t0) * 1000
         if candles and len(candles) > 0:
             latest = candles[-1]
@@ -78,7 +79,7 @@ async def _test_live_quote() -> Dict[str, Any]:
         from zoneinfo import ZoneInfo
         client = UpstoxClient()
         underlying = "NIFTY50"
-        q = client.get_live_quote(underlying)
+        q = await asyncio.to_thread(client.get_live_quote, underlying)
         ms = (time.monotonic() - t0) * 1000
         ltp = q.get("ltp", 0)
 
@@ -363,7 +364,7 @@ async def upstox_auth_diagnostic() -> Dict[str, Any]:
     try:
         url = "https://api.upstox.com/v2/user/profile"
         headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = await asyncio.to_thread(requests.get, url, headers=headers, timeout=10)
 
         http_status = resp.status_code
         err_code = None
@@ -467,7 +468,7 @@ async def instrument_master_refresh() -> Dict[str, Any]:
     after seeing an 'Invalid Instrument key' error instead of waiting for
     the next scheduled refresh or a redeploy."""
     from backend.broker.instrument_master import force_refresh
-    return force_refresh()
+    return await asyncio.to_thread(force_refresh)
 
 
 @router.get("/token-status")
@@ -489,7 +490,7 @@ async def get_token_diagnostics() -> Dict[str, Any]:
                 from backend.broker.upstox_client import UpstoxClient, UpstoxAPIError
                 client = UpstoxClient(access_token=token)
                 try:
-                    profile_data = client.get_profile()
+                    profile_data = await asyncio.to_thread(client.get_profile)
                     if profile_data and (profile_data.get("status") == "success" or "data" in profile_data):
                         broker_verified = True
                         profile_status = 200

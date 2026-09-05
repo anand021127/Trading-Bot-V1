@@ -69,7 +69,8 @@ async def lifespan(app: FastAPI):
         from backend.strategy.trading_engine import TradingEngine
         from backend.notifications.telegram_alerts import TelegramAlerts
         from backend.notifications.email_alerts import EmailAlerts
-        engine = TradingEngine(
+        engine = await asyncio.to_thread(
+            TradingEngine,
             telegram_alerts=TelegramAlerts() if s.notifications.telegram_enabled else None,
             email_alerts=EmailAlerts() if s.notifications.email_enabled else None,
         )
@@ -183,12 +184,19 @@ async def lifespan(app: FastAPI):
     app.state.trading_task = None
     try:
         if app.state.engine is not None and s.mode in ("paper", "live"):
-            app.state.trading_task = asyncio.create_task(app.state.engine.run_forever())
+            supervisor.register(
+                "trading_engine",
+                factory=app.state.engine.run_forever,
+                max_restarts=100,
+            )
     except Exception as e:
         print(f"[WARN] Could not start in-process trading loop: {e}")
 
     # Start the supervisor (which starts all registered tasks)
     supervisor.start()
+    trading_mt = supervisor._tasks.get("trading_engine")
+    if trading_mt is not None:
+        app.state.trading_task = trading_mt.task
     health_monitor.log_event("bot", "BOT_STARTED", "All components initialized, supervisor started")
 
     yield
