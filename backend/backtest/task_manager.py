@@ -37,11 +37,12 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-STATUS_QUEUED = "queued"
-STATUS_FETCHING_DATA = "fetching_data"
-STATUS_RUNNING = "running"
-STATUS_COMPLETED = "completed"
-STATUS_FAILED = "failed"
+STATUS_QUEUED = "QUEUED"
+STATUS_FETCHING_DATA = "FETCHING_DATA"
+STATUS_RUNNING = "RUNNING"
+STATUS_COMPLETED = "COMPLETED"
+STATUS_FAILED = "FAILED"
+STATUS_CANCELLED = "CANCELLED"
 
 # Tasks older than this are evicted on the next cleanup pass so the
 # in-memory store doesn't grow unbounded across a long-lived process.
@@ -57,6 +58,13 @@ TRADE_CSV_COLUMNS = [
 ]
 
 
+class DuplicateJobError(Exception):
+    """Raised when attempting to create a backtest job while one is already running."""
+    def __init__(self, active_job_id: str, message: str = "A backtest job is already running"):
+        super().__init__(message)
+        self.active_job_id = active_job_id
+
+
 @dataclass
 class BacktestTask:
     task_id: str
@@ -67,13 +75,44 @@ class BacktestTask:
     error_details: Optional[Dict[str, Any]] = None
     created_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.monotonic)
+    symbols: List[str] = field(default_factory=list)
+    start_date: str = ""
+    end_date: str = ""
+    interval: str = ""
+    current_symbol: str = ""
+    completed_symbols: int = 0
+    current_phase: str = "QUEUED"
+    progress_percent: float = 0.0
     _download_files: Dict[str, str] = field(default_factory=dict)
+    _cancelled: bool = False
+    _asyncio_task: Optional[asyncio.Task] = None
+
+    @property
+    def job_id(self) -> str:
+        return self.task_id
+
+    def cancel(self, reason: str = "User cancelled backtest") -> bool:
+        """Safely stop a running job where possible."""
+        if self.status in (STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED):
+            return False
+        self._cancelled = True
+        self.status = STATUS_CANCELLED
+        self.current_phase = "CANCELLED"
+        self.error = reason
+        if isinstance(self.progress, dict):
+            self.progress["phase"] = "cancelled"
+        self.updated_at = time.monotonic()
+        if self._asyncio_task and not self._asyncio_task.done():
+            self._asyncio_task.cancel()
+        logger.info("BACKTEST_JOB_CANCELLED job_id=%s reason='%s'", self.task_id, reason)
+        return True
 
     def to_status_dict(self) -> Dict[str, Any]:
         prog = dict(self.progress) if isinstance(self.progress, dict) else {}
         
         # Enforce strict terminal state invariants on status representation
-        if self.status == STATUS_COMPLETED:
+        if self.status in (STATUS_COMPLETED, "completed"):
+            self.status = STATUS_COMPLETED
             if prog.get("phase") != "completed":
                 prog["phase"] = "completed"
             total_bars = (
@@ -86,15 +125,45 @@ class BacktestTask:
                 prog["expected_bars"] = total_bars
                 prog["bar_index"] = total_bars
                 prog["processed_bars"] = total_bars
-        elif self.status == STATUS_FAILED:
+            self.progress_percent = 100.0
+            self.current_phase = "COMPLETED"
+        elif self.status in (STATUS_FAILED, "failed"):
+            self.status = STATUS_FAILED
             prog["phase"] = "failed"
+            self.current_phase = "FAILED"
+        elif self.status in (STATUS_CANCELLED, "cancelled"):
+            self.status = STATUS_CANCELLED
+            prog["phase"] = "cancelled"
+            self.current_phase = "CANCELLED"
+
+        elapsed = round(time.monotonic() - self.created_at, 1)
+
+        # Calculate estimated remaining seconds if reliably calculable
+        est_remaining: Optional[float] = None
+        active_statuses = (STATUS_RUNNING, STATUS_FETCHING_DATA, "running", "fetching_data")
+        if self.status in active_statuses and self.progress_percent > 5.0 and elapsed > 2.0:
+            est_total = (elapsed / (self.progress_percent / 100.0))
+            est_remaining = max(0.0, round(est_total - elapsed, 1))
+
+        tot_symbols = len(self.symbols) if self.symbols else (prog.get("total_symbols") or 0)
+        curr_sym = self.current_symbol or prog.get("symbol") or (self.symbols[0] if self.symbols else "")
+        comp_symbols = self.completed_symbols
+        if self.status == STATUS_COMPLETED:
+            comp_symbols = tot_symbols
 
         out = {
+            "job_id": self.task_id,
             "task_id": self.task_id,
             "status": self.status,
-            "progress": prog,
+            "progress_percent": round(self.progress_percent, 1),
+            "current_symbol": curr_sym,
+            "completed_symbols": comp_symbols,
+            "total_symbols": tot_symbols,
+            "elapsed_seconds": elapsed,
+            "estimated_remaining_seconds": est_remaining,
+            "current_phase": self.current_phase or prog.get("phase") or self.status,
             "error": self.error,
-            "elapsed_seconds": round(time.monotonic() - self.created_at, 1),
+            "progress": prog,
         }
         if self.error_details:
             out["error_details"] = self.error_details
@@ -285,6 +354,7 @@ class BacktestTask:
 class BacktestTaskManager:
     def __init__(self) -> None:
         self._tasks: Dict[str, BacktestTask] = {}
+        self._running_asyncio_tasks: set = set()
 
     def _evict_old_tasks(self) -> None:
         cutoff = time.monotonic() - TASK_RETENTION_SECONDS
@@ -300,14 +370,56 @@ class BacktestTaskManager:
                     pass
             del self._tasks[tid]
 
-    def create_task(self) -> BacktestTask:
+    def get_active_task(self) -> Optional[BacktestTask]:
+        """Returns the currently active task if any is queued or running."""
         self._evict_old_tasks()
-        task = BacktestTask(task_id=str(uuid.uuid4()))
+        active_statuses = {
+            STATUS_QUEUED, STATUS_FETCHING_DATA, STATUS_RUNNING,
+            "queued", "fetching_data", "running",
+        }
+        for task in self._tasks.values():
+            if task.status in active_statuses and not task._cancelled:
+                return task
+        return None
+
+    def create_task(
+        self,
+        symbols: Optional[List[str]] = None,
+        start_date: str = "",
+        end_date: str = "",
+        interval: str = "",
+        prevent_duplicates: bool = False,
+    ) -> BacktestTask:
+        self._evict_old_tasks()
+        if prevent_duplicates:
+            active = self.get_active_task()
+            if active is not None:
+                raise DuplicateJobError(active_job_id=active.task_id)
+
+        task = BacktestTask(
+            task_id=str(uuid.uuid4()),
+            symbols=list(symbols) if symbols else [],
+            start_date=start_date,
+            end_date=end_date,
+            interval=interval,
+            current_symbol=symbols[0] if symbols else "",
+        )
         self._tasks[task.task_id] = task
+        logger.info(
+            "BACKTEST_JOB_CREATED job_id=%s symbols=%s start_date=%s end_date=%s interval=%s",
+            task.task_id, task.symbols, start_date, end_date, interval,
+        )
         return task
 
     def get(self, task_id: str) -> Optional[BacktestTask]:
         return self._tasks.get(task_id)
+
+    def cancel(self, task_id: str, reason: str = "User cancelled backtest") -> Optional[BacktestTask]:
+        task = self._tasks.get(task_id)
+        if task is None:
+            return None
+        task.cancel(reason=reason)
+        return task
 
     def update_progress(self, task_id: str, progress: Dict[str, Any], status: Optional[str] = None) -> None:
         task = self._tasks.get(task_id)
@@ -316,6 +428,27 @@ class BacktestTaskManager:
         task.progress = progress
         if status:
             task.status = status
+            task.current_phase = status
+        if "phase" in progress:
+            task.current_phase = progress["phase"]
+        if "symbol" in progress:
+            task.current_symbol = progress["symbol"]
+        if "symbols_fetched" in progress:
+            task.completed_symbols = progress["symbols_fetched"]
+        if "progress_percent" in progress:
+            try:
+                task.progress_percent = float(progress["progress_percent"])
+            except (ValueError, TypeError):
+                pass
+        elif progress.get("phase") == "fetching_data":
+            tot = progress.get("total_symbols") or len(task.symbols) or 1
+            fetched = progress.get("symbols_fetched", 0)
+            task.progress_percent = min(30.0, round((fetched / max(1, tot)) * 30.0, 1))
+        elif progress.get("phase") == "processing":
+            bar_idx = progress.get("bar_index", 0)
+            tot_bars = progress.get("total_bars") or progress.get("expected_bars") or 1
+            pct = 30.0 + (float(bar_idx) / max(1.0, float(tot_bars))) * 70.0
+            task.progress_percent = min(99.0, max(task.progress_percent, round(pct, 1)))
         task.updated_at = time.monotonic()
 
     def complete(
@@ -426,6 +559,13 @@ async def run_backtest_in_background(
     last_progress_bar = [0]
     last_progress_symbol = [symbols[0] if symbols else ""]
     total_expected_bars = 0
+    task = task_manager.get(task_id)
+
+    if task is not None and task._cancelled:
+        logger.info("BACKTEST_JOB_CANCELLED job_id=%s reason='Cancelled before start'", task_id)
+        return
+
+    logger.info("BACKTEST_JOB_STARTED job_id=%s symbols=%s", task_id, symbols)
 
     try:
         task_manager.update_progress(
@@ -474,6 +614,11 @@ async def run_backtest_in_background(
         fetch_errors: List[Dict[str, str]] = []
 
         for i, sym in enumerate(symbols):
+            if task and task._cancelled:
+                logger.info("BACKTEST_JOB_CANCELLED job_id=%s reason='Cancelled during symbol fetch'", task_id)
+                return
+
+            logger.info("BACKTEST_SYMBOL_STARTED job_id=%s symbol=%s", task_id, sym)
             try:
                 # 1. Check local preloaded real_data first with safe loader
                 local_file = os.path.join(
@@ -519,17 +664,19 @@ async def run_backtest_in_background(
                     "underlying_trend_series": trend_series,
                     "symbol": sym,
                 }
+                logger.info("BACKTEST_SYMBOL_COMPLETED job_id=%s symbol=%s candle_count=%d", task_id, sym, len(underlying_candles))
             except Exception as e:
                 fetch_errors.append({"symbol": sym, "error": str(e)})
                 logger.warning("Backtest underlying candle load failed for %s: %s", sym, e)
 
             task_manager.update_progress(task_id, {
-                "phase": "fetching_data", "symbols_fetched": i + 1, "total_symbols": len(symbols),
+                "phase": "fetching_data", "symbols_fetched": i + 1, "total_symbols": len(symbols), "symbol": sym,
             })
 
         # Strict validation: All requested symbols must be loaded, and candle data must not be empty
         missing_symbols = [s for s in symbols if s not in symbol_candles or len(symbol_candles[s]) == 0]
         if missing_symbols or not symbol_candles:
+            logger.error("BACKTEST_JOB_FAILED job_id=%s error='DATA_UNAVAILABLE for %s'", task_id, missing_symbols)
             task_manager.fail(
                 task_id,
                 error={
@@ -554,14 +701,21 @@ async def run_backtest_in_background(
             )
             return
 
+        if task and task._cancelled:
+            logger.info("BACKTEST_JOB_CANCELLED job_id=%s reason='Cancelled before simulation'", task_id)
+            return
+
         task_manager.update_progress(
             task_id, {"phase": "processing", "total_symbols": len(symbol_candles)},
             status=STATUS_RUNNING,
         )
 
         total_expected_bars = sum(len(c) for c in symbol_candles.values())
+        logger.info("BACKTEST_SIMULATION_STARTED job_id=%s total_expected_bars=%d", task_id, total_expected_bars)
 
         def progress_callback(p: Dict[str, Any]) -> None:
+            if task and task._cancelled:
+                return
             if "bar_index" in p:
                 last_progress_bar[0] = p["bar_index"]
             if "symbol" in p:
@@ -593,6 +747,7 @@ async def run_backtest_in_background(
             skipped_symbols = []
 
         if backtest_result is None or (total_expected_bars > 0 and candles_scanned == 0):
+            logger.error("BACKTEST_JOB_FAILED job_id=%s error='BACKTEST_INCOMPLETE zero candles scanned'", task_id)
             task_manager.fail(
                 task_id,
                 error={
@@ -619,6 +774,7 @@ async def run_backtest_in_background(
             return
 
         if candles_scanned < total_expected_bars or len(skipped_symbols) > 0:
+            logger.error("BACKTEST_JOB_FAILED job_id=%s error='BACKTEST_INCOMPLETE bars scanned %d < %d'", task_id, candles_scanned, total_expected_bars)
             task_manager.fail(
                 task_id,
                 error={
@@ -682,6 +838,9 @@ async def run_backtest_in_background(
             "trades_so_far": trades_count,
         }
 
+        elapsed = round(time.monotonic() - (task.created_at if task else time.monotonic()), 1)
+        logger.info("BACKTEST_JOB_COMPLETED job_id=%s trades_taken=%d elapsed_seconds=%.1f", task_id, trades_count, elapsed)
+
         task_manager.complete(
             task_id,
             payload,
@@ -690,8 +849,14 @@ async def run_backtest_in_background(
             processed_bars=total_expected_bars,
         )
 
+    except asyncio.CancelledError:
+        logger.info("BACKTEST_JOB_CANCELLED job_id=%s reason='asyncio.CancelledError'", task_id)
+        if task:
+            task.status = STATUS_CANCELLED
+            task.current_phase = "CANCELLED"
+            task.updated_at = time.monotonic()
     except Exception as e:
-        logger.exception("Background backtest task %s failed", task_id)
+        logger.error("BACKTEST_JOB_FAILED job_id=%s error=%s", task_id, str(e))
         task_manager.fail(
             task_id,
             error={

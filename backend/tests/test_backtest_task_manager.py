@@ -96,6 +96,61 @@ class TestBacktestTaskManager:
                 if os.path.exists(path):
                     os.unlink(path)
 
+    def test_prevent_duplicates_raises_duplicate_job_error(self) -> None:
+        from backend.backtest.task_manager import DuplicateJobError
+        mgr = BacktestTaskManager()
+        task1 = mgr.create_task(symbols=["NIFTY50"], prevent_duplicates=True)
+        assert task1.status in ("QUEUED", "queued")
+
+        # Second creation should raise DuplicateJobError
+        try:
+            mgr.create_task(symbols=["BANKNIFTY"], prevent_duplicates=True)
+            assert False, "Expected DuplicateJobError"
+        except DuplicateJobError as dje:
+            assert dje.active_job_id == task1.task_id
+
+        # Completing the first task should allow new creation
+        mgr.complete(task1.task_id, {"trades_taken": 0})
+        task2 = mgr.create_task(symbols=["BANKNIFTY"], prevent_duplicates=True)
+        assert task2.task_id != task1.task_id
+
+    def test_cancel_task_sets_status_cancelled(self) -> None:
+        from backend.backtest.task_manager import STATUS_CANCELLED
+        mgr = BacktestTaskManager()
+        task = mgr.create_task(symbols=["NIFTY50", "BANKNIFTY"])
+        assert task.status in ("QUEUED", "queued")
+
+        cancelled_task = mgr.cancel(task.task_id, reason="Testing cancellation")
+        assert cancelled_task is not None
+        assert cancelled_task.status == STATUS_CANCELLED
+        assert cancelled_task.current_phase == "CANCELLED"
+        assert cancelled_task.error == "Testing cancellation"
+        assert cancelled_task._cancelled is True
+
+        status_dict = cancelled_task.to_status_dict()
+        assert status_dict["status"] == STATUS_CANCELLED
+        assert status_dict["current_phase"] == "CANCELLED"
+        assert status_dict["error"] == "Testing cancellation"
+
+    def test_status_dict_includes_progress_metrics(self) -> None:
+        mgr = BacktestTaskManager()
+        task = mgr.create_task(symbols=["NIFTY50", "BANKNIFTY"], start_date="2024-01-01", end_date="2024-06-30")
+        mgr.update_progress(task.task_id, {
+            "phase": "fetching_data",
+            "symbols_fetched": 1,
+            "total_symbols": 2,
+            "symbol": "NIFTY50",
+            "progress_percent": 15.0,
+        })
+        status_dict = task.to_status_dict()
+        assert status_dict["job_id"] == task.task_id
+        assert status_dict["progress_percent"] == 15.0
+        assert status_dict["completed_symbols"] == 1
+        assert status_dict["total_symbols"] == 2
+        assert status_dict["current_symbol"] == "NIFTY50"
+        assert "elapsed_seconds" in status_dict
+        assert status_dict["current_phase"] == "fetching_data"
+
 
 class TestRunBacktestInBackground:
     def _fake_client(self, candles_by_symbol):

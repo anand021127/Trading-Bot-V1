@@ -1,7 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
-import { Play, BarChart2, RefreshCw, AlertTriangle, Info, Download } from 'lucide-react'
-import { runBacktest, getBacktestStatus, getBacktestResult, downloadBacktestResult } from '../api/endpoints'
+import { Play, BarChart2, RefreshCw, AlertTriangle, Info, Download, Square, Clock } from 'lucide-react'
+import {
+  runBacktest,
+  getBacktestStatus,
+  getBacktestResult,
+  downloadBacktestResult,
+  fetchActiveBacktestJob,
+  cancelBacktestJob,
+  type BacktestJobStatus,
+} from '../api/endpoints'
 import { formatCurrency, pnlColor } from '../utils/formatters'
 import type { BacktestResponse } from '../types'
 
@@ -33,34 +41,78 @@ export default function Backtest() {
   const [interval, setInterval]               = useState('5minute')
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>(['NIFTY50'])
   const [running, setRunning]                 = useState(false)
+  const [cancelling, setCancelling]           = useState(false)
   const [result, setResult]                   = useState<BacktestResponse | null>(null)
   const [error, setError]                     = useState<string | null>(null)
   const [taskId, setTaskId]                   = useState<string | null>(null)
+  const [jobStatus, setJobStatus]             = useState<BacktestJobStatus | null>(null)
   const [downloading, setDownloading]         = useState<'csv' | 'json' | null>(null)
   const [progress, setProgress]               = useState<{ phase?: string; symbol?: string; symbol_index?: number; total_symbols?: number; bar_index?: number; total_bars?: number; symbols_fetched?: number } | null>(null)
   const [tradeFilter, setTradeFilter]         = useState<'ALL' | 'WINS' | 'LOSSES'>('ALL')
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useEffect(() => () => { if (pollRef.current) clearTimeout(pollRef.current) }, [])
+  useEffect(() => {
+    // Check if there is already an active running backtest job on mount
+    fetchActiveBacktestJob().then(res => {
+      if (res.active && res.job) {
+        const activeId = res.job.job_id || res.job.task_id
+        setTaskId(activeId)
+        setRunning(true)
+        setJobStatus(res.job)
+        pollTask(activeId)
+      }
+    }).catch(() => {})
+
+    return () => {
+      if (pollRef.current) clearTimeout(pollRef.current)
+    }
+  }, [])
 
   const toggleSymbol = (sym: string) =>
     setSelectedSymbols(prev => prev.includes(sym) ? prev.filter(s => s !== sym) : [...prev, sym])
 
   const handleRun = async () => {
     if (selectedSymbols.length === 0) { setError('Select at least one index underlying.'); return }
-    setRunning(true); setError(null); setResult(null); setProgress(null); setTaskId(null)
+    setRunning(true); setError(null); setResult(null); setProgress(null); setTaskId(null); setJobStatus(null)
     try {
       const start = await runBacktest({
         start_date: startDate, end_date: endDate,
         capital: Number(capital), symbols: selectedSymbols,
         interval, strategies: strategyParam(strategy),
       })
-      setTaskId(start.task_id)
-      pollTask(start.task_id)
+      const jobId = start.job_id || start.task_id
+      setTaskId(jobId)
+      pollTask(jobId)
     } catch (e: unknown) {
-      const detail = axios.isAxiosError(e) ? e.response?.data?.detail : undefined
+      if (axios.isAxiosError(e) && e.response?.status === 409) {
+        const activeId = e.response.data?.detail?.active_job_id || e.response.data?.active_job_id
+        if (activeId) {
+          setError('A backtest job is already running. Resuming live progress tracking.')
+          setTaskId(activeId)
+          pollTask(activeId)
+          return
+        }
+      }
+      const detail = axios.isAxiosError(e) ? (e.response?.data?.detail?.message || e.response?.data?.detail || e.response?.data?.message) : undefined
       setError(typeof detail === 'string' ? detail : (e instanceof Error ? e.message : 'Backtest failed.'))
       setRunning(false)
+    }
+  }
+
+  const handleCancel = async () => {
+    if (!taskId) return
+    setCancelling(true)
+    try {
+      await cancelBacktestJob(taskId)
+      setError('Backtest job was cancelled.')
+    } catch (e: unknown) {
+      const detail = axios.isAxiosError(e) ? e.response?.data?.detail : undefined
+      setError(typeof detail === 'string' ? detail : 'Could not cancel backtest job.')
+    } finally {
+      setCancelling(false)
+      setRunning(false)
+      setProgress(null)
+      if (pollRef.current) clearTimeout(pollRef.current)
     }
   }
 
@@ -78,24 +130,34 @@ export default function Backtest() {
     }
   }
 
-  const pollTask = (taskId: string) => {
+  const pollTask = (id: string) => {
     const tick = async () => {
       try {
-        const status = await getBacktestStatus(taskId)
-        if (status.status === 'completed') {
-          const finalResult = await getBacktestResult(taskId)
+        const status = await getBacktestStatus(id)
+        setJobStatus(status)
+        const upperStatus = (status.status || '').toUpperCase()
+
+        if (upperStatus === 'COMPLETED') {
+          const finalResult = await getBacktestResult(id)
           setResult(finalResult)
           setRunning(false)
           setProgress(null)
           return
         }
-        if (status.status === 'failed') {
+        if (upperStatus === 'FAILED') {
           setError(status.error || 'Backtest failed.')
           setRunning(false)
           setProgress(null)
           return
         }
-        setProgress(status.progress ?? null)
+        if (upperStatus === 'CANCELLED') {
+          setError(status.error ? `Backtest cancelled: ${status.error}` : 'Backtest job was cancelled.')
+          setRunning(false)
+          setProgress(null)
+          return
+        }
+
+        setProgress((status.progress as any) ?? null)
         pollRef.current = setTimeout(tick, 1000)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Lost connection while polling backtest progress.')
@@ -245,23 +307,85 @@ export default function Backtest() {
           </div>
         )}
 
-        <button onClick={handleRun} disabled={running || selectedSymbols.length === 0}
-          className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors">
-          {running ? <><RefreshCw size={14} className="animate-spin" /> Running backtest...</>
-                   : <><Play size={14} /> Run Backtest</>}
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button onClick={handleRun} disabled={running || selectedSymbols.length === 0}
+            className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors">
+            {running ? <><RefreshCw size={14} className="animate-spin" /> Running backtest...</>
+                     : <><Play size={14} /> Run Backtest</>}
+          </button>
 
-        {running && progress && (
-          <div className="text-xs text-slate-400 bg-[#0f1628] border border-[#1e2d45] rounded-lg p-3">
-            {progress.phase === 'fetching_data' && (
-              <span>Fetching real historical data — {progress.symbols_fetched ?? 0}/{progress.total_symbols ?? '?'} symbols done...</span>
-            )}
-            {progress.phase === 'processing' && (
-              <span>
-                Processing {progress.symbol} ({progress.symbol_index}/{progress.total_symbols}) —
-                bar {progress.bar_index}/{progress.total_bars}
-              </span>
-            )}
+          {running && taskId && (
+            <button onClick={handleCancel} disabled={cancelling}
+              className="flex items-center gap-2 px-4 py-2.5 bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-500/40 text-sm font-medium rounded-lg transition-colors disabled:opacity-50">
+              {cancelling ? <RefreshCw size={14} className="animate-spin" /> : <Square size={14} />}
+              Cancel Backtest
+            </button>
+          )}
+        </div>
+
+        {running && (
+          <div className="bg-[#0f1628] border border-[#1e2d45] rounded-xl p-4 space-y-3">
+            {/* Progress Header */}
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-900/40 border border-blue-500/40 text-blue-300 uppercase tracking-wider">
+                  {jobStatus?.current_phase || jobStatus?.status || 'RUNNING'}
+                </span>
+                <span className="text-slate-300 font-medium">
+                  {jobStatus?.current_symbol ? `Processing ${jobStatus.current_symbol}` : 'Running backtest simulation...'}
+                </span>
+              </div>
+              <div className="text-slate-400 font-mono text-[11px]">
+                {Math.round(
+                  jobStatus?.progress_percent ??
+                  (progress?.bar_index && progress?.total_bars ? (progress.bar_index / progress.total_bars) * 100 : 0)
+                )}%
+              </div>
+            </div>
+
+            {/* Animated Progress Bar */}
+            <div className="h-2 w-full bg-[#141b2d] rounded-full overflow-hidden border border-[#1e2d45]">
+              <div
+                className="h-full bg-blue-500 transition-all duration-300 ease-out rounded-full"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.max(
+                      5,
+                      Math.round(
+                        jobStatus?.progress_percent ??
+                        (progress?.bar_index && progress?.total_bars ? (progress.bar_index / progress.total_bars) * 100 : 10)
+                      )
+                    )
+                  )}%`
+                }}
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between text-[11px] text-slate-400 pt-1">
+              <div className="flex items-center gap-4">
+                <span>
+                  Symbols: <strong className="text-slate-200">{jobStatus?.completed_symbols ?? progress?.symbols_fetched ?? 0} / {jobStatus?.total_symbols ?? progress?.total_symbols ?? selectedSymbols.length}</strong>
+                </span>
+                {progress?.bar_index !== undefined && progress?.total_bars !== undefined && (
+                  <span>
+                    Bars: <strong className="text-slate-200">{progress.bar_index.toLocaleString()} / {progress.total_bars.toLocaleString()}</strong>
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 font-mono text-[10px]">
+                {jobStatus?.elapsed_seconds !== undefined && (
+                  <span className="flex items-center gap-1">
+                    <Clock size={11} className="text-slate-500" /> {jobStatus.elapsed_seconds}s elapsed
+                  </span>
+                )}
+                {jobStatus?.estimated_remaining_seconds && (
+                  <span className="text-blue-400">
+                    ~{jobStatus.estimated_remaining_seconds}s remaining
+                  </span>
+                )}
+              </div>
+            </div>
           </div>
         )}
       </div>

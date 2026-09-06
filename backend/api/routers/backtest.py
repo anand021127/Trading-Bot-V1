@@ -19,15 +19,18 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 
 from backend.backtest.engine import BacktestEngine, CostConfig
 from backend.backtest.task_manager import (
     task_manager,
     run_backtest_in_background,
+    DuplicateJobError,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_CANCELLED,
 )
 from backend.config.settings import load_settings
 from backend.config.universe_config import VALID_OPTION_INDICES
@@ -66,10 +69,19 @@ def _get_token() -> str:
     return resolve_upstox_token()
 
 
-@router.post("/run")
-async def start_backtest(request: BacktestRequest) -> Dict[str, Any]:
-    """Starts the backtest in the background and returns immediately with
-    a task_id — poll GET /status/{task_id} then GET /result/{task_id}."""
+async def _create_and_start_backtest(request: BacktestRequest) -> JSONResponse:
+    """Helper that validates, creates a background backtest task, and returns HTTP 202."""
+    active = task_manager.get_active_task()
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "A backtest job is already running. Please cancel or wait for it to complete.",
+                "active_job_id": active.task_id,
+                "status": active.status,
+            },
+        )
+
     token = _get_token()
     if not token:
         raise HTTPException(
@@ -86,7 +98,10 @@ async def start_backtest(request: BacktestRequest) -> Dict[str, Any]:
     symbols = request.symbols or DEFAULT_SYMBOLS
     invalid_symbols = [symbol.upper() for symbol in symbols if symbol.upper() not in VALID_OPTION_INDICES]
     if invalid_symbols:
-        raise HTTPException(status_code=400, detail={"message": "Backtests support index options only", "invalid_symbols": invalid_symbols})
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Backtests support index options only", "invalid_symbols": invalid_symbols},
+        )
     if request.strategies and any(name != "OPTION_PREMIUM" for name in request.strategies):
         raise HTTPException(status_code=400, detail="Only OPTION_PREMIUM is supported for options backtests")
     start_date = request.start_date or settings.backtest.start_date
@@ -102,59 +117,124 @@ async def start_backtest(request: BacktestRequest) -> Dict[str, Any]:
         costs=costs, capital=capital, risk_pct_per_trade=request.risk_pct_per_trade,
     )
 
-    task = task_manager.create_task()
+    task = task_manager.create_task(
+        symbols=symbols,
+        start_date=start_date,
+        end_date=end_date,
+        interval=request.interval,
+        prevent_duplicates=True,
+    )
+
     bg_task = asyncio.create_task(run_backtest_in_background(
         task.task_id, client, engine, symbols, request.interval,
         start_date, end_date, request.strategies,
     ))
+    task._asyncio_task = bg_task
     _background_tasks.add(bg_task)
     bg_task.add_done_callback(_background_tasks.discard)
 
-    return {
-        "task_id": task.task_id,
-        "status": task.status,
-        "message": "Backtest started in the background. Poll /status/{task_id} for progress.",
-    }
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={
+            "job_id": task.task_id,
+            "task_id": task.task_id,
+            "status": task.status,
+            "message": "Backtest job created and queued. Poll /api/backtest/jobs/{job_id} for progress.",
+        },
+    )
+
+
+@router.post("/jobs")
+async def create_backtest_job(request: BacktestRequest) -> JSONResponse:
+    """Creates a backtest job and returns HTTP 202 with job_id immediately."""
+    return await _create_and_start_backtest(request)
+
+
+@router.post("/run")
+async def start_backtest(request: BacktestRequest) -> JSONResponse:
+    """Starts the backtest in the background and returns HTTP 202 with job_id."""
+    return await _create_and_start_backtest(request)
+
+
+@router.get("/jobs/active")
+async def get_active_backtest_job() -> Dict[str, Any]:
+    """Returns information about any currently active backtest job."""
+    active = task_manager.get_active_task()
+    if active is None:
+        return {"active": False, "job": None}
+    return {"active": True, "job": active.to_status_dict()}
+
+
+@router.get("/jobs/{job_id}")
+async def get_backtest_job_status(job_id: str) -> Dict[str, Any]:
+    """Poll backtest job status and execution progress."""
+    task = task_manager.get(job_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"No backtest job found with id {job_id}")
+    return task.to_status_dict()
 
 
 @router.get("/status/{task_id}")
 async def get_backtest_status(task_id: str) -> Dict[str, Any]:
+    """Backward-compatible endpoint for polling status."""
     task = task_manager.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"No backtest task found with id {task_id}")
     return task.to_status_dict()
 
 
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
+    """Safely cancel a queued or running backtest job."""
+    task = task_manager.get(job_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"No backtest job found with id {job_id}")
+    cancelled = task.cancel(reason="Cancelled by user")
+    return {
+        "job_id": job_id,
+        "task_id": job_id,
+        "status": task.status,
+        "cancelled": cancelled,
+        "message": "Backtest job was cancelled" if cancelled else "Job is already completed or stopped",
+    }
+
+
+@router.get("/jobs/{job_id}/result")
+async def get_backtest_job_result(job_id: str) -> Dict[str, Any]:
+    """Fetch completed results for a backtest job."""
+    task = task_manager.get(job_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"No backtest job found with id {job_id}")
+    if task.status in (STATUS_FAILED, "failed"):
+        raise HTTPException(status_code=502, detail=task.error or "Backtest failed")
+    if task.status in (STATUS_CANCELLED, "cancelled"):
+        raise HTTPException(status_code=400, detail="Backtest was cancelled")
+    if task.status not in (STATUS_COMPLETED, "completed"):
+        return {
+            "job_id": job_id,
+            "task_id": job_id,
+            "status": task.status,
+            "progress": task.progress,
+            "message": "Backtest still running — poll /api/backtest/jobs/{job_id} until status is 'COMPLETED'.",
+        }
+    return task.result or {}
+
+
 @router.get("/result/{task_id}")
 async def get_backtest_result(task_id: str) -> Dict[str, Any]:
+    """Backward-compatible endpoint for fetching backtest result."""
+    return await get_backtest_job_result(task_id)
+
+
+def _handle_download(task_id: str, format: str = "csv"):
     task = task_manager.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"No backtest task found with id {task_id}")
-    if task.status == STATUS_FAILED:
-        raise HTTPException(status_code=502, detail=task.error or "Backtest failed")
-    if task.status != STATUS_COMPLETED:
-        return {"task_id": task_id, "status": task.status, "progress": task.progress,
-                "message": "Backtest still running — poll /status/{task_id} until status is 'completed'."}
-    return task.result
-
-
-@router.get("/download/{task_id}")
-async def download_backtest_result(task_id: str, format: str = "csv"):
-    """Download backtest result as a file.
-
-    Query params:
-        format: 'csv' or 'json' (default: 'csv')
-
-    Returns a file download with proper Content-Disposition header.
-    """
-    from fastapi.responses import FileResponse
-
-    task = task_manager.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"No backtest task found with id {task_id}")
-    if task.status == STATUS_FAILED:
+    if task.status in (STATUS_FAILED, "failed"):
         raise HTTPException(status_code=400, detail="Cannot download results of a failed backtest")
-    if task.status != STATUS_COMPLETED:
+    if task.status in (STATUS_CANCELLED, "cancelled"):
+        raise HTTPException(status_code=400, detail="Cannot download results of a cancelled backtest")
+    if task.status not in (STATUS_COMPLETED, "completed"):
         raise HTTPException(status_code=400, detail="Backtest is still running — wait for completion before downloading")
 
     # Build a descriptive filename
@@ -186,3 +266,15 @@ async def download_backtest_result(task_id: str, format: str = "csv"):
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/jobs/{job_id}/download")
+async def download_backtest_job_result(job_id: str, format: str = "csv"):
+    """Download backtest result as a file."""
+    return _handle_download(job_id, format)
+
+
+@router.get("/download/{task_id}")
+async def download_backtest_result(task_id: str, format: str = "csv"):
+    """Download backtest result as a file (backward compatibility)."""
+    return _handle_download(task_id, format)

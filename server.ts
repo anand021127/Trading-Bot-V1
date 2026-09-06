@@ -1444,103 +1444,221 @@ app.put(['/api/universe', '/api/universe/'], (req, res) => {
 });
 
 // Backtest Endpoints — Guardrailed for Authentic Historical Data Only
-app.post('/api/backtest/run', async (req, res) => {
+function formatBacktestTask(task: any) {
+  const elapsed_seconds = Math.floor((Date.now() - task.started_at) / 1000);
+  const progress_percent = task.progress_percent ?? task.progress?.percent ?? (task.status === 'COMPLETED' ? 100 : (task.status === 'RUNNING' ? 50 : 0));
+  let estimated_remaining_seconds: number | null = null;
+  if ((task.status === 'RUNNING' || task.status === 'running') && progress_percent > 5 && elapsed_seconds > 2) {
+    const est_total = elapsed_seconds / (progress_percent / 100);
+    estimated_remaining_seconds = Math.max(0, Math.round(est_total - elapsed_seconds));
+  }
+  const total_symbols = task.symbols?.length || 1;
+  const completed_symbols = task.status === 'COMPLETED' ? total_symbols : (task.completed_symbols ?? 0);
+  return {
+    job_id: task.task_id,
+    task_id: task.task_id,
+    status: task.status,
+    progress_percent,
+    current_symbol: task.current_symbol || task.symbols?.[0] || '',
+    completed_symbols,
+    total_symbols,
+    elapsed_seconds,
+    estimated_remaining_seconds,
+    current_phase: task.current_phase || task.status,
+    error: task.error,
+    progress: task.progress || {},
+  };
+}
+
+async function handleStartBacktest(req: any, res: any) {
+  const activeTask = Object.values(backtestTasks).find(
+    (t: any) => (t.status === 'RUNNING' || t.status === 'running' || t.status === 'QUEUED' || t.status === 'queued') && !t.cancelled
+  ) as any;
+  if (activeTask) {
+    return res.status(409).json({
+      message: 'A backtest job is already running. Please cancel or wait for it to complete.',
+      active_job_id: activeTask.task_id,
+      status: activeTask.status,
+    });
+  }
+
   const taskId = 'bt-' + Date.now().toString(36);
-  const { start_date = '2024-01-01', end_date = '2024-06-30', symbols = ['NIFTY50'], capital = 1000000 } = req.body;
+  const { start_date = '2024-01-01', end_date = '2024-06-30', symbols = ['NIFTY50'], capital = 1000000, interval = '5minute' } = req.body;
   const tokenMeta = resolveUpstoxToken();
 
-  backtestTasks[taskId] = {
+  const task: any = {
     task_id: taskId,
-    status: 'running',
-    progress: { percent: 10, current_date: start_date, current_symbol: symbols[0] },
+    status: 'QUEUED',
+    current_phase: 'QUEUED',
+    progress_percent: 0,
+    current_symbol: symbols[0] || 'NIFTY50',
+    completed_symbols: 0,
+    progress: { percent: 0, current_date: start_date, current_symbol: symbols[0] },
     error: null,
     started_at: Date.now(),
     symbols,
     capital,
     start_date,
     end_date,
+    interval,
+    cancelled: false,
   };
+  backtestTasks[taskId] = task;
 
-  // Attempt real historical option contract resolution via Upstox Expired Instruments API
-  try {
-    if (!tokenMeta.token) {
-      backtestTasks[taskId].status = 'failed';
-      backtestTasks[taskId].error = 'AUTHENTICATION_BLOCKED: Upstox token required to retrieve historical expired options.';
-      return res.json({ task_id: taskId, status: 'failed', message: backtestTasks[taskId].error });
+  // Background simulation runner
+  setTimeout(async () => {
+    if (task.cancelled) return;
+    task.status = 'RUNNING';
+    task.current_phase = 'FETCHING_DATA';
+    task.progress_percent = 15;
+
+    try {
+      if (!tokenMeta.token) {
+        task.status = 'FAILED';
+        task.current_phase = 'FAILED';
+        task.error = 'AUTHENTICATION_BLOCKED: Upstox token required to retrieve historical expired options.';
+        return;
+      }
+
+      const testUrl = 'https://api.upstox.com/v2/expired-instruments/expiries?instrument_type=OPTIDX&underlying_key=NSE_INDEX%7CNifty%2050';
+      const resp = await fetch(testUrl, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${tokenMeta.token}`,
+          'User-Agent': 'Mozilla/5.0',
+        },
+      });
+
+      if (task.cancelled) return;
+
+      if (resp.status !== 200) {
+        const errBody: any = await resp.json().catch(() => ({}));
+        const errCode = errBody.errors?.[0]?.errorCode || `HTTP_${resp.status}`;
+        task.status = 'FAILED';
+        task.current_phase = 'FAILED';
+        task.error = `DATA_UNAVAILABLE: Historical options API rejected request (${errCode}). Backtesting requires valid Upstox credentials with Expired Instruments API access. Synthetic option pricing is strictly rejected.`;
+        return;
+      }
+
+      task.current_phase = 'PROCESSING';
+      task.progress_percent = 60;
+
+      if (task.cancelled) return;
+
+      task.status = 'COMPLETED';
+      task.current_phase = 'COMPLETED';
+      task.progress_percent = 100;
+      task.completed_symbols = symbols.length;
+      task.progress = { percent: 100, phase: 'completed' };
+      task.result = {
+        total_candles_scanned: 0,
+        signals_generated: 0,
+        trades_taken: 0,
+        winning_trades: 0,
+        losing_trades: 0,
+        accuracy_pct: 0,
+        profit_factor: 0,
+        net_profit: 0,
+        net_profit_pct: 0,
+        max_drawdown_pct: 0,
+        total_charges: 0,
+        equity_curve: [{ timestamp: start_date, equity: capital }],
+        trade_log: [],
+        date_range: { start: start_date, end: end_date },
+        data_source: 'Upstox Expired Instruments API (Authentic Candles Only)',
+      };
+    } catch (err: any) {
+      if (task.cancelled) return;
+      task.status = 'FAILED';
+      task.current_phase = 'FAILED';
+      task.error = `DATA_UNAVAILABLE: ${err.message}`;
     }
+  }, 100);
 
-    const testUrl = 'https://api.upstox.com/v2/expired-instruments/expiries?instrument_type=OPTIDX&underlying_key=NSE_INDEX%7CNifty%2050';
-    const resp = await fetch(testUrl, {
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${tokenMeta.token}`,
-        'User-Agent': 'Mozilla/5.0',
-      },
-    });
-
-    if (resp.status !== 200) {
-      const errBody: any = await resp.json().catch(() => ({}));
-      const errCode = errBody.errors?.[0]?.errorCode || `HTTP_${resp.status}`;
-      backtestTasks[taskId].status = 'failed';
-      backtestTasks[taskId].error = `DATA_UNAVAILABLE: Historical options API rejected request (${errCode}). Backtesting requires valid Upstox credentials with Expired Instruments API access. Synthetic option pricing is strictly rejected.`;
-      return res.json({ task_id: taskId, status: 'failed', message: backtestTasks[taskId].error });
-    }
-
-    // If authenticated, perform historical backtest without synthetic pricing
-    backtestTasks[taskId].status = 'completed';
-    backtestTasks[taskId].progress = { percent: 100 };
-    backtestTasks[taskId].result = {
-      total_candles_scanned: 0,
-      signals_generated: 0,
-      trades_taken: 0,
-      winning_trades: 0,
-      losing_trades: 0,
-      accuracy_pct: 0,
-      profit_factor: 0,
-      net_profit: 0,
-      net_profit_pct: 0,
-      max_drawdown_pct: 0,
-      total_charges: 0,
-      equity_curve: [{ timestamp: start_date, equity: capital }],
-      trade_log: [],
-      date_range: { start: start_date, end: end_date },
-      data_source: 'Upstox Expired Instruments API (Authentic Candles Only)',
-    };
-  } catch (err: any) {
-    backtestTasks[taskId].status = 'failed';
-    backtestTasks[taskId].error = `DATA_UNAVAILABLE: ${err.message}`;
-  }
-
-  res.json({
+  return res.status(202).json({
+    job_id: taskId,
     task_id: taskId,
-    status: backtestTasks[taskId].status,
-    message: backtestTasks[taskId].error || 'Backtest task completed',
+    status: 'QUEUED',
+    message: 'Backtest job created and queued. Poll /api/backtest/jobs/{job_id} for progress.',
   });
+}
+
+app.post('/api/backtest/jobs', handleStartBacktest);
+app.post('/api/backtest/run', handleStartBacktest);
+
+app.get('/api/backtest/jobs/active', (req, res) => {
+  const activeTask = Object.values(backtestTasks).find(
+    (t: any) => (t.status === 'RUNNING' || t.status === 'running' || t.status === 'QUEUED' || t.status === 'queued') && !t.cancelled
+  );
+  if (!activeTask) {
+    return res.json({ active: false, job: null });
+  }
+  return res.json({ active: true, job: formatBacktestTask(activeTask) });
+});
+
+app.get('/api/backtest/jobs/:jobId', (req, res) => {
+  const task = backtestTasks[req.params.jobId];
+  if (!task) return res.status(404).json({ error: 'Job not found' });
+  res.json(formatBacktestTask(task));
+});
+
+app.post('/api/backtest/jobs/:jobId/cancel', (req, res) => {
+  const task = backtestTasks[req.params.jobId];
+  if (!task) return res.status(404).json({ error: 'Job not found' });
+  if (task.status === 'COMPLETED' || task.status === 'FAILED' || task.status === 'CANCELLED') {
+    return res.json({
+      job_id: task.task_id,
+      task_id: task.task_id,
+      status: task.status,
+      cancelled: false,
+      message: 'Job is already completed or stopped',
+    });
+  }
+  task.cancelled = true;
+  task.status = 'CANCELLED';
+  task.current_phase = 'CANCELLED';
+  task.error = 'Cancelled by user';
+  res.json({
+    job_id: task.task_id,
+    task_id: task.task_id,
+    status: 'CANCELLED',
+    cancelled: true,
+    message: 'Backtest job was cancelled',
+  });
+});
+
+app.get('/api/backtest/jobs/:jobId/result', (req, res) => {
+  const task = backtestTasks[req.params.jobId];
+  if (!task) return res.status(404).json({ error: 'Job not found' });
+  if (task.status === 'FAILED' || task.status === 'failed') return res.status(502).json({ error: task.error });
+  if (task.status === 'CANCELLED' || task.status === 'cancelled') return res.status(400).json({ error: 'Backtest was cancelled' });
+  if (task.status !== 'COMPLETED' && task.status !== 'completed') {
+    return res.json({
+      job_id: task.task_id,
+      task_id: task.task_id,
+      status: task.status,
+      progress: task.progress,
+      message: "Backtest still running — poll /api/backtest/jobs/{job_id} until status is 'COMPLETED'.",
+    });
+  }
+  res.json(task.result || {});
 });
 
 app.get('/api/backtest/status/:taskId', (req, res) => {
   const task = backtestTasks[req.params.taskId];
   if (!task) return res.status(404).json({ error: 'Task not found' });
-  const elapsed_seconds = Math.floor((Date.now() - task.started_at) / 1000);
-  res.json({
-    task_id: task.task_id,
-    status: task.status,
-    progress: task.progress,
-    error: task.error,
-    elapsed_seconds,
-  });
+  res.json(formatBacktestTask(task));
 });
 
 app.get('/api/backtest/result/:taskId', (req, res) => {
   const task = backtestTasks[req.params.taskId];
   if (!task) return res.status(404).json({ error: 'Task not found' });
-  if (task.status === 'failed') return res.status(400).json({ error: task.error });
+  if (task.status === 'failed' || task.status === 'FAILED') return res.status(400).json({ error: task.error });
   if (!task.result) return res.status(404).json({ error: 'Result not ready' });
   res.json(task.result);
 });
 
-app.get('/api/backtest/download/:taskId', (req, res) => {
-  const task = backtestTasks[req.params.taskId];
+function handleDownloadResponse(task: any, req: any, res: any) {
   if (!task || !task.result) return res.status(404).json({ error: 'Result not ready or task failed' });
   const format = req.query.format === 'json' ? 'json' : 'csv';
 
@@ -1601,6 +1719,16 @@ app.get('/api/backtest/download/:taskId', (req, res) => {
     csv += row.map((v) => (typeof v === 'string' && (v.includes(',') || v.includes('"') || v.includes('\n')) ? `"${v.replace(/"/g, '""')}"` : v)).join(',') + '\n';
   }
   res.send(csv);
+}
+
+app.get('/api/backtest/jobs/:jobId/download', (req, res) => {
+  const task = backtestTasks[req.params.jobId];
+  return handleDownloadResponse(task, req, res);
+});
+
+app.get('/api/backtest/download/:taskId', (req, res) => {
+  const task = backtestTasks[req.params.taskId];
+  return handleDownloadResponse(task, req, res);
 });
 
 // Performance Analytics

@@ -166,13 +166,34 @@ def main(args: Optional[List[str]] = None) -> int:
             failed += 1
             continue
 
-        # Run unittest TestCases
+        # Run unittest TestCases and plain Test* classes
         for attr_name, attr_val in inspect.getmembers(mod, inspect.isclass):
-            if issubclass(attr_val, unittest.TestCase) and getattr(attr_val, "__module__", "") == mod_name:
+            if getattr(attr_val, "__module__", "") != mod_name:
+                continue
+            if issubclass(attr_val, unittest.TestCase):
                 suite = unittest.defaultTestLoader.loadTestsFromTestCase(attr_val)
                 res = unittest.TextTestRunner(verbosity=0).run(suite)
                 passed += res.testsRun - len(res.failures) - len(res.errors)
                 failed += len(res.failures) + len(res.errors)
+            elif attr_name.startswith("Test"):
+                try:
+                    instance = attr_val()
+                except Exception as e:
+                    print(f"FAILED TO INSTANTIATE {mod_name}.{attr_name}: {e}")
+                    failed += 1
+                    continue
+                for meth_name, meth_val in inspect.getmembers(instance, inspect.ismethod):
+                    if meth_name.startswith("test_"):
+                        try:
+                            meth_val()
+                            passed += 1
+                            print(f"  PASSED: {mod_name}.{attr_name}.{meth_name}")
+                        except unittest.SkipTest as st:
+                            skipped += 1
+                            print(f"  SKIPPED: {mod_name}.{attr_name}.{meth_name} ({st})")
+                        except Exception as e:
+                            failed += 1
+                            print(f"  FAILED: {mod_name}.{attr_name}.{meth_name} - {e}")
 
         # Run standalone test_* functions
         for attr_name, attr_val in inspect.getmembers(mod, inspect.isfunction):
