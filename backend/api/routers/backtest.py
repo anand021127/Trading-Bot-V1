@@ -158,11 +158,15 @@ async def start_backtest(request: BacktestRequest) -> JSONResponse:
 
 @router.get("/jobs/active")
 async def get_active_backtest_job() -> Dict[str, Any]:
-    """Returns information about any currently active backtest job."""
+    """Returns information about any currently active backtest job or the latest job."""
     active = task_manager.get_active_task()
-    if active is None:
-        return {"active": False, "job": None}
-    return {"active": True, "job": active.to_status_dict()}
+    if active is not None:
+        return {"active": True, "job": active.to_status_dict()}
+    latest = task_manager.get_latest_task()
+    return {
+        "active": False,
+        "job": latest.to_status_dict() if latest else None,
+    }
 
 
 @router.get("/jobs/{job_id}")

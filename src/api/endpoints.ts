@@ -122,6 +122,10 @@ export interface BacktestJobStatus {
   elapsed_seconds?: number
   estimated_remaining_seconds?: number | null
   current_phase?: string
+  result_ready?: boolean
+  trades_taken?: number
+  candles_processed?: number
+  completed_at?: string | null
   progress?: Record<string, unknown>
   error?: string | null
   error_details?: Record<string, unknown> | null

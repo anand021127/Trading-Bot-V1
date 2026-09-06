@@ -60,6 +60,15 @@ export default function Backtest() {
         setRunning(true)
         setJobStatus(res.job)
         pollTask(activeId)
+      } else if (!res.active && res.job && (res.job.status === 'COMPLETED' || (res.job.progress as any)?.phase === 'completed')) {
+        const completedId = res.job.job_id || res.job.task_id
+        if (completedId) {
+          setTaskId(completedId)
+          setJobStatus(res.job)
+          getBacktestResult(completedId).then(r => {
+            if (r && typeof r === 'object') setResult(r)
+          }).catch(() => {})
+        }
       }
     }).catch(() => {})
 
@@ -131,26 +140,45 @@ export default function Backtest() {
   }
 
   const pollTask = (id: string) => {
+    let consecutiveErrors = 0
+    const maxConsecutiveErrors = 5
+
     const tick = async () => {
       try {
         const status = await getBacktestStatus(id)
+        consecutiveErrors = 0
         setJobStatus(status)
         const upperStatus = (status.status || '').toUpperCase()
+        const progPhase = ((status.progress as any)?.phase || '').toUpperCase()
 
-        if (upperStatus === 'COMPLETED') {
-          const finalResult = await getBacktestResult(id)
-          setResult(finalResult)
+        if (upperStatus === 'COMPLETED' || progPhase === 'COMPLETED' || status.result_ready) {
+          let finalResult = null
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              finalResult = await getBacktestResult(id)
+              if (finalResult && typeof finalResult === 'object') {
+                break
+              }
+            } catch {
+              if (attempt < 2) {
+                await new Promise(r => setTimeout(r, 1000))
+              }
+            }
+          }
+          if (finalResult) {
+            setResult(finalResult)
+          }
           setRunning(false)
           setProgress(null)
           return
         }
-        if (upperStatus === 'FAILED') {
-          setError(status.error || 'Backtest failed.')
+        if (upperStatus === 'FAILED' || progPhase === 'FAILED') {
+          setError(status.error || (status.error_details as any)?.message || 'Backtest failed.')
           setRunning(false)
           setProgress(null)
           return
         }
-        if (upperStatus === 'CANCELLED') {
+        if (upperStatus === 'CANCELLED' || progPhase === 'CANCELLED') {
           setError(status.error ? `Backtest cancelled: ${status.error}` : 'Backtest job was cancelled.')
           setRunning(false)
           setProgress(null)
@@ -160,9 +188,14 @@ export default function Backtest() {
         setProgress((status.progress as any) ?? null)
         pollRef.current = setTimeout(tick, 1000)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Lost connection while polling backtest progress.')
-        setRunning(false)
-        setProgress(null)
+        consecutiveErrors++
+        if (consecutiveErrors < maxConsecutiveErrors) {
+          pollRef.current = setTimeout(tick, 2000)
+        } else {
+          setError(e instanceof Error ? e.message : 'Lost connection while polling backtest progress.')
+          setRunning(false)
+          setProgress(null)
+        }
       }
     }
     tick()

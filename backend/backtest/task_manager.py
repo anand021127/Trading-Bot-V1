@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+from datetime import datetime, timezone
 import io
 import json
 import logging
@@ -75,6 +76,8 @@ class BacktestTask:
     error_details: Optional[Dict[str, Any]] = None
     created_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.monotonic)
+    completed_at: Optional[float] = None
+    completed_time: Optional[str] = None
     symbols: List[str] = field(default_factory=list)
     start_date: str = ""
     end_date: str = ""
@@ -151,6 +154,18 @@ class BacktestTask:
         if self.status == STATUS_COMPLETED:
             comp_symbols = tot_symbols
 
+        trades_count = 0
+        candles_scanned = 0
+        if isinstance(self.result, dict):
+            trades_count = self.result.get("trades_taken") or len(self.result.get("trade_log") or [])
+            candles_scanned = self.result.get("total_candles_scanned") or 0
+        elif isinstance(self.progress, dict):
+            trades_count = self.progress.get("trades_so_far") or 0
+            candles_scanned = self.progress.get("processed_bars") or self.progress.get("bar_index") or 0
+
+        is_completed = self.status == STATUS_COMPLETED
+        result_ready = is_completed and bool(self.result)
+
         out = {
             "job_id": self.task_id,
             "task_id": self.task_id,
@@ -162,6 +177,10 @@ class BacktestTask:
             "elapsed_seconds": elapsed,
             "estimated_remaining_seconds": est_remaining,
             "current_phase": self.current_phase or prog.get("phase") or self.status,
+            "result_ready": result_ready,
+            "trades_taken": trades_count,
+            "candles_processed": candles_scanned,
+            "completed_at": self.completed_time,
             "error": self.error,
             "progress": prog,
         }
@@ -358,7 +377,14 @@ class BacktestTaskManager:
 
     def _evict_old_tasks(self) -> None:
         cutoff = time.monotonic() - TASK_RETENTION_SECONDS
-        stale = [tid for tid, t in self._tasks.items() if t.updated_at < cutoff]
+        active_statuses = {
+            STATUS_QUEUED, STATUS_FETCHING_DATA, STATUS_RUNNING,
+            "queued", "fetching_data", "running",
+        }
+        stale = [
+            tid for tid, t in self._tasks.items()
+            if t.updated_at < cutoff and t.status not in active_statuses and not t._cancelled
+        ]
         for tid in stale:
             # Clean up any generated files
             task = self._tasks[tid]
@@ -381,6 +407,13 @@ class BacktestTaskManager:
             if task.status in active_statuses and not task._cancelled:
                 return task
         return None
+
+    def get_latest_task(self) -> Optional[BacktestTask]:
+        """Returns the most recent task created or updated."""
+        self._evict_old_tasks()
+        if not self._tasks:
+            return None
+        return max(self._tasks.values(), key=lambda t: t.created_at)
 
     def create_task(
         self,
@@ -425,6 +458,8 @@ class BacktestTaskManager:
         task = self._tasks.get(task_id)
         if task is None:
             return
+        if task.status in (STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED):
+            return
         task.progress = progress
         if status:
             task.status = status
@@ -462,6 +497,8 @@ class BacktestTaskManager:
         task = self._tasks.get(task_id)
         if task is None:
             return
+        if task.status in (STATUS_CANCELLED, STATUS_FAILED):
+            return
 
         total_scanned = result.get("total_candles_scanned", 0) if isinstance(result, dict) else 0
         exp = expected_bars if expected_bars is not None else total_scanned
@@ -491,9 +528,21 @@ class BacktestTaskManager:
             )
             return
 
+        now_mono = time.monotonic()
+        now_utc = datetime.now(timezone.utc).isoformat()
+        trades_count = result.get("trades_taken", len(result.get("trade_log", []))) if isinstance(result, dict) else 0
+        elapsed = round(now_mono - task.created_at, 1)
+
         task.status = STATUS_COMPLETED
         task.result = result
         task.error = None
+        task.completed_at = now_mono
+        task.completed_time = now_utc
+        task.current_phase = "COMPLETED"
+        task.progress_percent = 100.0
+        tot_syms = len(task.symbols) if task.symbols else (len(result.get("symbols_requested", [])) or 1)
+        task.completed_symbols = tot_syms
+
         if progress:
             task.progress = dict(progress)
             task.progress["phase"] = "completed"
@@ -501,6 +550,7 @@ class BacktestTaskManager:
             task.progress["total_bars"] = exp
             task.progress["processed_bars"] = exp
             task.progress["expected_bars"] = exp
+            task.progress["trades_so_far"] = trades_count
         else:
             task.progress = {
                 "phase": "completed",
@@ -508,15 +558,21 @@ class BacktestTaskManager:
                 "total_bars": exp,
                 "processed_bars": exp,
                 "expected_bars": exp,
-                "trades_so_far": result.get("trades_taken", len(result.get("trades", []))) if isinstance(result, dict) else 0,
+                "trades_so_far": trades_count,
             }
-        task.updated_at = time.monotonic()
+        task.updated_at = now_mono
+
+        logger.info("BACKTEST_PHASE: COMPLETED job_id=%s elapsed=%.1f trades=%d", task_id, elapsed, trades_count)
+        logger.info("BACKTEST_COMPLETED job_id=%s elapsed=%.1f trades=%d", task_id, elapsed, trades_count)
 
     def fail(self, task_id: str, error: Any, progress: Optional[Dict[str, Any]] = None) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
+        if task.status in (STATUS_COMPLETED, STATUS_CANCELLED):
+            return
         task.status = STATUS_FAILED
+        task.current_phase = "FAILED"
         if isinstance(error, dict):
             task.error_details = error
             task.error = error.get("message") or error.get("code") or str(error)
@@ -533,6 +589,9 @@ class BacktestTaskManager:
         else:
             task.progress = {"phase": "failed"}
         task.updated_at = time.monotonic()
+        safe_error = task.error or "Unknown error"
+        logger.error("BACKTEST_PHASE: FAILED job_id=%s error=%s", task_id, safe_error)
+        logger.error("BACKTEST_FAILED job_id=%s error=%s", task_id, safe_error)
 
 
 # Module-level singleton — same pattern as the rest of this codebase.
@@ -565,7 +624,9 @@ async def run_backtest_in_background(
         logger.info("BACKTEST_JOB_CANCELLED job_id=%s reason='Cancelled before start'", task_id)
         return
 
+    logger.info("BACKTEST_PHASE: QUEUED job_id=%s", task_id)
     logger.info("BACKTEST_JOB_STARTED job_id=%s symbols=%s", task_id, symbols)
+    logger.info("BACKTEST_PHASE: DATA_LOADING job_id=%s symbols=%s", task_id, symbols)
 
     try:
         task_manager.update_progress(
@@ -711,6 +772,7 @@ async def run_backtest_in_background(
         )
 
         total_expected_bars = sum(len(c) for c in symbol_candles.values())
+        logger.info("BACKTEST_PHASE: SIMULATION job_id=%s total_expected_bars=%d", task_id, total_expected_bars)
         logger.info("BACKTEST_SIMULATION_STARTED job_id=%s total_expected_bars=%d", task_id, total_expected_bars)
 
         def progress_callback(p: Dict[str, Any]) -> None:
@@ -802,59 +864,75 @@ async def run_backtest_in_background(
             )
             return
 
-        payload = backtest_result.to_dict() if hasattr(backtest_result, "to_dict") and callable(backtest_result.to_dict) else {}
-        if not isinstance(payload, dict):
-            payload = {}
-
-        payload["fetch_errors"] = fetch_errors
-        payload["symbols_requested"] = symbols
-        payload["date_range"] = {"start": start_date, "end": end_date}
-        payload["interval"] = interval
-        payload["option_data_source"] = "upstox_expired_instruments_authoritative"
-
-        trades_count = 0
-        raw_trades = getattr(backtest_result, "trades_taken", None)
-        if isinstance(raw_trades, (int, float)):
-            trades_count = int(raw_trades)
-        elif "trades" in payload and isinstance(payload["trades"], list):
-            trades_count = len(payload["trades"])
-
-        if trades_count == 0 and not skipped_symbols:
-            payload["message"] = (
-                "Real historical candle data was processed but no trades executed — "
-                "see rejection_reason_counts for exact breakdown (e.g. strategy filters or data availability). "
-                "This is a genuine result, not an error."
-            )
-
-        final_progress = {
-            "phase": "completed",
-            "symbol": symbols[-1] if symbols else "",
-            "symbol_index": len(symbols),
-            "total_symbols": len(symbols),
-            "bar_index": total_expected_bars,
-            "total_bars": total_expected_bars,
-            "processed_bars": total_expected_bars,
-            "expected_bars": total_expected_bars,
-            "trades_so_far": trades_count,
-        }
-
-        elapsed = round(time.monotonic() - (task.created_at if task else time.monotonic()), 1)
-        logger.info("BACKTEST_JOB_COMPLETED job_id=%s trades_taken=%d elapsed_seconds=%.1f", task_id, trades_count, elapsed)
-
-        task_manager.complete(
+        logger.info("BACKTEST_PHASE: FINALIZING job_id=%s", task_id)
+        task_manager.update_progress(
             task_id,
-            payload,
-            progress=final_progress,
-            expected_bars=total_expected_bars,
-            processed_bars=total_expected_bars,
+            {"phase": "finalizing", "bar_index": total_expected_bars, "total_bars": total_expected_bars},
+            status=STATUS_RUNNING,
         )
+
+        try:
+            payload = backtest_result.to_dict() if hasattr(backtest_result, "to_dict") and callable(backtest_result.to_dict) else {}
+            if not isinstance(payload, dict):
+                payload = {}
+
+            payload["fetch_errors"] = fetch_errors
+            payload["symbols_requested"] = symbols
+            payload["date_range"] = {"start": start_date, "end": end_date}
+            payload["interval"] = interval
+            payload["option_data_source"] = "upstox_expired_instruments_authoritative"
+
+            trades_count = 0
+            raw_trades = getattr(backtest_result, "trades_taken", None)
+            if isinstance(raw_trades, (int, float)):
+                trades_count = int(raw_trades)
+            elif "trades" in payload and isinstance(payload["trades"], list):
+                trades_count = len(payload["trades"])
+
+            if trades_count == 0 and not skipped_symbols:
+                payload["message"] = (
+                    "Real historical candle data was processed but no trades executed — "
+                    "see rejection_reason_counts for exact breakdown (e.g. strategy filters or data availability). "
+                    "This is a genuine result, not an error."
+                )
+
+            final_progress = {
+                "phase": "completed",
+                "symbol": symbols[-1] if symbols else "",
+                "symbol_index": len(symbols),
+                "total_symbols": len(symbols),
+                "bar_index": total_expected_bars,
+                "total_bars": total_expected_bars,
+                "processed_bars": total_expected_bars,
+                "expected_bars": total_expected_bars,
+                "trades_so_far": trades_count,
+            }
+
+            elapsed = round(time.monotonic() - (task.created_at if task else time.monotonic()), 1)
+            logger.info("BACKTEST_JOB_COMPLETED job_id=%s trades_taken=%d elapsed_seconds=%.1f", task_id, trades_count, elapsed)
+
+            task_manager.complete(
+                task_id,
+                payload,
+                progress=final_progress,
+                expected_bars=total_expected_bars,
+                processed_bars=total_expected_bars,
+            )
+        except Exception as ser_err:
+            logger.error("BACKTEST_SERIALIZATION_FAILED job_id=%s error=%s", task_id, str(ser_err))
+            task_manager.fail(
+                task_id,
+                error={
+                    "code": "SERIALIZATION_ERROR",
+                    "message": f"Failed to serialize backtest result: {ser_err}",
+                },
+            )
+            return
 
     except asyncio.CancelledError:
         logger.info("BACKTEST_JOB_CANCELLED job_id=%s reason='asyncio.CancelledError'", task_id)
-        if task:
-            task.status = STATUS_CANCELLED
-            task.current_phase = "CANCELLED"
-            task.updated_at = time.monotonic()
+        task_manager.cancel(task_id, reason="asyncio.CancelledError")
+        raise
     except Exception as e:
         logger.error("BACKTEST_JOB_FAILED job_id=%s error=%s", task_id, str(e))
         task_manager.fail(
