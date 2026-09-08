@@ -110,27 +110,87 @@ export const fetchUniverse = () =>
 export const updateUniverse = (body: Partial<UniverseConfigResponse>) =>
   api.put<UniverseConfigResponse>('/api/universe/', body).then(r => r.data)
 
-// Backtest — no cache (user-triggered), now an async background task
-export const runBacktest = (params: BacktestRequest) =>
-  api.post<{ task_id: string; status: string; message: string }>('/api/backtest/run', params).then(r => r.data)
+// Backtest — no cache (user-triggered), async background task execution
+export interface BacktestJobStatus {
+  job_id: string
+  task_id: string
+  status: string
+  progress_percent?: number
+  current_symbol?: string
+  completed_symbols?: number
+  total_symbols?: number
+  elapsed_seconds?: number
+  estimated_remaining_seconds?: number | null
+  current_phase?: string
+  result_ready?: boolean
+  trades_taken?: number
+  candles_processed?: number
+  completed_at?: string | null
+  progress?: Record<string, unknown>
+  error?: string | null
+  error_details?: Record<string, unknown> | null
+}
 
-export const getBacktestStatus = (taskId: string) =>
-  api.get<{ task_id: string; status: string; progress: Record<string, unknown>; error: string | null; elapsed_seconds: number }>(
-    `/api/backtest/status/${taskId}`,
+export const runBacktest = (params: BacktestRequest) =>
+  api.post<{ job_id: string; task_id: string; status: string; message: string }>('/api/backtest/jobs', params)
+    .then(r => r.data)
+    .catch(err => {
+      // Fallback to /api/backtest/run if needed
+      if (err.response?.status === 404) {
+        return api.post<{ job_id: string; task_id: string; status: string; message: string }>('/api/backtest/run', params).then(r => r.data)
+      }
+      throw err
+    })
+
+export const getBacktestStatus = (taskIdOrJobId: string) =>
+  api.get<BacktestJobStatus>(`/api/backtest/jobs/${taskIdOrJobId}`)
+    .then(r => r.data)
+    .catch(err => {
+      if (err.response?.status === 404) {
+        return api.get<BacktestJobStatus>(`/api/backtest/status/${taskIdOrJobId}`).then(r => r.data)
+      }
+      throw err
+    })
+
+export const fetchActiveBacktestJob = () =>
+  api.get<{ active: boolean; job: BacktestJobStatus | null }>('/api/backtest/jobs/active').then(r => r.data)
+
+export const cancelBacktestJob = (jobId: string) =>
+  api.post<{ job_id: string; task_id: string; status: string; cancelled: boolean; message: string }>(
+    `/api/backtest/jobs/${jobId}/cancel`,
   ).then(r => r.data)
 
-export const getBacktestResult = (taskId: string) =>
-  api.get<BacktestResponse>(`/api/backtest/result/${taskId}`).then(r => r.data)
+export const getBacktestResult = (taskIdOrJobId: string) =>
+  api.get<BacktestResponse>(`/api/backtest/jobs/${taskIdOrJobId}/result`)
+    .then(r => r.data)
+    .catch(err => {
+      if (err.response?.status === 404) {
+        return api.get<BacktestResponse>(`/api/backtest/result/${taskIdOrJobId}`).then(r => r.data)
+      }
+      throw err
+    })
 
-export const downloadBacktestResult = async (taskId: string, format: 'csv' | 'json' = 'csv') => {
-  const response = await api.get(`/api/backtest/download/${taskId}`, {
-    params: { format },
-    responseType: 'blob',
-  })
+export const downloadBacktestResult = async (taskIdOrJobId: string, format: 'csv' | 'json' = 'csv') => {
+  let response: any
+  try {
+    response = await api.get(`/api/backtest/jobs/${taskIdOrJobId}/download`, {
+      params: { format },
+      responseType: 'blob',
+    })
+  } catch (err: any) {
+    if (err.response?.status === 404) {
+      response = await api.get(`/api/backtest/download/${taskIdOrJobId}`, {
+        params: { format },
+        responseType: 'blob',
+      })
+    } else {
+      throw err
+    }
+  }
   // Extract filename from Content-Disposition header
   const contentDisposition = response.headers['content-disposition'] ?? ''
   const filenameMatch = contentDisposition.match(/filename="?([^";\s]+)"?/)
-  const filename = filenameMatch?.[1] ?? `backtest_result.${format}`
+  const filename = filenameMatch?.[1] ?? `backtest_${taskIdOrJobId}.${format}`
 
   // Create download link
   const url = window.URL.createObjectURL(new Blob([response.data]))

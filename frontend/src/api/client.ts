@@ -1,9 +1,9 @@
 import axios, { type AxiosError } from 'axios'
 
 // Production backend URL on Oracle Cloud DuckDNS
-const PROD_BACKEND_URL = 'https://upstoxbot-anand.duckdns.org'
+export const PROD_BACKEND_URL = 'https://upstoxbot-anand.duckdns.org'
 
-function resolveBaseUrl(): string {
+export function resolveBaseUrl(): string {
   // If explicitly configured via VITE_BACKEND_URL
   const envUrl = import.meta.env.VITE_BACKEND_URL?.replace(/\/+$/, '')
   if (envUrl && envUrl !== 'undefined' && envUrl !== 'null') {
@@ -27,6 +27,16 @@ function resolveBaseUrl(): string {
 
   // Deployed external frontend (e.g. Vercel production) -> target production DuckDNS backend
   return PROD_BACKEND_URL
+}
+
+export function buildWsUrl(): string {
+  const base = resolveBaseUrl()
+  if (base) {
+    return base.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/api/ws'
+  }
+  const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = typeof window !== 'undefined' ? window.location.host : 'localhost:3000'
+  return `${proto}//${host}/api/ws`
 }
 
 const BACKEND_URL = resolveBaseUrl()

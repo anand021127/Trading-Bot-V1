@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, ClipboardList, FileText,
   BarChart2, PieChart, Wrench, Settings, Menu, X, Wifi, WifiOff, Radar, Table2,
-  AlertTriangle, KeyRound, Moon, RefreshCw, Download, Sparkles, Smartphone, Zap,
+  AlertTriangle, KeyRound, Moon, RefreshCw, Download, Sparkles, Smartphone, Zap, Bot,
 } from 'lucide-react'
 import { useState } from 'react'
 import { Toaster } from 'react-hot-toast'
@@ -11,6 +11,7 @@ import { usePWA } from '../hooks/usePWA'
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Overview' },
+  { to: '/copilot', icon: Bot, label: 'AI Copilot' },
   { to: '/live-premiums', icon: Zap, label: 'Live Premiums' },
   { to: '/option-chain', icon: Table2, label: 'Option Chain' },
   { to: '/scanner', icon: Radar, label: 'Option Scanner' },
