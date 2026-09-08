@@ -216,3 +216,55 @@ Full project suite: `python3 run_all_tests.py` → **230/236 passed**. All 6 fai
 **No claim of profitability is made.** This pass closed two real safety/correctness bugs that were only caught by writing the end-to-end test (missing lot_size/freeze_quantity in signal reconstruction; un-rounded quantity display) — not by design review alone.
 
 Do not implement LIVE trading until explicitly requested — no code in this pass adds a live execution path; `COPILOT_MODE=live` still has zero code checking for it beyond what shadow mode already does.
+
+---
+
+## Session 4 — Root-cause fix: stale-data-reported-as-LIVE bug
+
+### PHASE 1 — Audit findings (root causes, traced not assumed)
+
+1. **NIFTY50 candles fetched via**: `CopilotTools.get_live_candles()` → (before this fix) `engine.client.get_historical_candles(symbol, "5minute", limit=100)`.
+2. **Indicators calculated in**: `CopilotTools.get_indicators()` — pure math on whatever candles it's given; not itself the bug.
+3. **Candle timestamp origin**: raw `c[0]` from the Upstox API response, sorted ascending, last element used as "current."
+4. **ROOT CAUSE of the LIVE-but-stale contradiction**: `get_historical_candles()` calls Upstox's v3 **Historical** Candle endpoint (`/v3/historical-candle/{key}/{unit}/{interval}/{to}/{from}`). This endpoint serves **settled/completed trading days only** — on a live session, its most recent candle is always, at best, yesterday's last bar, no matter how recent `to_date` is set. This is real Upstox API behavior, **not a caching bug** in this codebase — there was no cache being reused; every call was a fresh network request that happened to hit the wrong endpoint for "give me right-now data." Meanwhile `market_status.feed_status=LIVE` was reporting the truth about the WebSocket *tick* connection — a completely separate, genuinely-live code path that nothing in the indicator pipeline actually consumed (see #6).
+5. **Cached data reuse**: confirmed NOT the cause — ruled out by tracing the call chain; every `get_live_candles()` call was a live REST fetch, just to the wrong endpoint.
+6. **Is the WebSocket feed used for indicators?** **No.** `get_market_status()`'s `websocket_connected`/`feed_status` come from `ws_client.is_connected`/`ws_client.market_data_status` — health-reporting only. `get_indicators()`/`get_live_candles()` never touched `ws_client`. This is a real, confirmed gap: the tick feed being genuinely live told you nothing about whether the *candle* data was live.
+7. **Do the scanner and Copilot share a data source?** **Yes** — and this made the bug worse than "just a Copilot display issue." `TradingEngine.detect_underlying_trend()` and `evaluate_option_premium()`'s own premium-candle fetch (`backend/strategy/trading_engine.py`, both used by the live scanner and by the Copilot's `evaluate_option_premium()` call) **called the exact same wrong endpoint**. This was a live-strategy-wide bug, not Copilot-specific — fixed at the shared source (see below), not patched around in Copilot-only code.
+8–18: Option chain / expiry / strike / CE-PE / premium candles / RiskManager / PositionSizer / paper execution were all already traced and fixed correctly in prior sessions (see earlier sections of this doc) — re-confirmed still correct in this pass; not the source of this bug.
+19. **Why the UI only showed BULLISH/TRENDING/SUPPORT/RESISTANCE**: `build_market_analysis()`'s old direction logic was a single `close > ema20` check with no confidence score and no regime beyond a bare choppiness threshold — exactly the "declare BULLISH because one indicator is positive" anti-pattern Phase 3 called out. Fixed below.
+20. **Do chat and Analyze use the same decision engine?** **Yes, confirmed** — both go through `conversational.py` → `decision_engine.build_trade_plan_for_symbol()` / `build_market_analysis()`, the same functions the `/api/copilot/trade-plan` route and the frontend's "Analyze" button call. No divergent code path found.
+
+### PHASE 2 — Fix (implemented at the root, not just in Copilot)
+
+- **Added `UpstoxClient.get_intraday_candles()`** — calls the real v3 **Intraday** Candle endpoint (`/v3/historical-candle/intraday/{key}/{unit}/{interval}`), which actually serves today's in-progress candles. **UNVERIFIED**: this sandbox has no live Upstox connection, so the exact endpoint path/response shape is implemented to match Upstox's documented v3 API and this codebase's existing response-parsing convention, but has not been exercised against a real account — verify before trusting in production.
+- **Added `UpstoxClient.get_current_candles()`** — merges completed prior-day candles (context for EMA50 etc.) with today's intraday candles, deduped and sorted, so the last candle is genuinely current.
+- **Fixed at the actual source**: swapped all 3 call sites in `backend/strategy/trading_engine.py` (`detect_underlying_trend`, `evaluate_option_premium`'s premium-candle fetch, and the live position-monitoring exit-check loop) from `get_historical_candles` to `get_current_candles` — same signature, so this is a minimal, mechanical, low-risk change. This means the fix benefits the **existing live strategy**, not just the Copilot's display.
+- `CopilotTools.get_live_candles()` now computes a strict `data_status`: `"LIVE"` only if the last candle is within `COPILOT_MAX_CANDLE_AGE_SECONDS` (default 120s, new env var) of now, else `"STALE"`. Never silently reports stale data as live.
+- **Hard stop, not a caveat**: `build_trade_plan_for_symbol()` checks `data_status` FIRST, before calling `evaluate_option_premium()` at all — a `STALE` verdict returns `decision=SKIP` immediately with the exact reason, and `client.get_option_chain` is never even called (verified by `test_stale_data_blocks_trade_plan_never_reaches_trade`, which asserts `.assert_not_called()`).
+
+### PHASE 3 — Real market regime analysis (implemented)
+
+`MarketAnalysis` now has `confidence` (0-100) and an explicit `score_breakdown` dict. Direction comes from a weighted trend score (close vs EMA20/EMA50, EMA20 vs EMA50, close vs VWAP — 4 independent factors, 25 points each) combined 60/40 with a momentum score (RSI distance from 50). Below a 20-point confidence floor, direction falls back to `NEUTRAL` rather than forcing a side — tested (`test_conflicting_indicators_return_neutral_not_forced_direction`). Regime is `TRENDING`/`RANGE`/`HIGH_VOLATILITY`/`LOW_VOLATILITY`/`UNCERTAIN`, with volatility (ATR% ≥1.0 or ≤0.15, fixed thresholds — this repo has no rolling ATR-percentile baseline available to the Copilot) taking priority over the trend/range split when both apply.
+
+### Files changed this session
+- `backend/broker/upstox_client.py` — added `get_intraday_candles()`, `get_current_candles()`
+- `backend/strategy/trading_engine.py` — 3 call sites switched to the fixed method (root-cause fix, not Copilot-only)
+- `backend/copilot/config.py` — added `COPILOT_MAX_CANDLE_AGE_SECONDS`
+- `backend/copilot/tools.py` — `get_live_candles()` rewritten for real freshness detection
+- `backend/copilot/decision_engine.py` — structured regime/direction scoring, staleness hard-stop
+- `backend/copilot/trade_plan.py` — added `analysis_timestamp`
+- `.env.example` — new var documented
+- `src/pages/Copilot.tsx` — STALE warning banner, confidence display
+- `backend/tests/test_copilot.py` — 6 new tests (fresh/stale detection, stale blocks trade, conflicting-evidence-returns-neutral, score transparency), plus fixture fix (`_synthetic_candles(..., end_now=True)`) and 2 assertion updates for the corrected method name
+
+### Test results
+- `python3 pytest.py backend/tests/test_copilot.py` → **69/69 passed** (up from 64)
+- `python3 pytest.py backend/tests/test_options_mode.py` (pre-existing, exercises the 3 changed call sites) → **21/21 passed**, confirming the root-cause fix didn't break existing live-strategy behavior
+- `python3 run_all_tests.py` (full project) → **230/236 passed** — same 6 pre-existing sandbox-only failures as every prior session, reproduced and confirmed unrelated
+- `npm run build` → succeeds
+
+### Remaining limitations / UNVERIFIED
+- **The Intraday Candle endpoint's exact path and response shape are UNVERIFIED against a real Upstox account** — implemented from documented API conventions, not exercised live. This is the single most important thing to check before trusting "LIVE" data status in production.
+- Phase 6's full ATM±2-strike liquidity/quality evaluation (spread%, OI, volume, delta, IV, theta, distance-from-ATM, weighted together) was **not implemented this session** — strike selection still uses the existing `OptionPremiumStrategy.select_contract()`'s ATM-with-liquidity-filter logic (real, not fabricated, but not the expanded multi-candidate scoring Phase 6 describes).
+- Diagnostics vocabulary remains `OK`/`DEGRADED`/`ERROR`/`UNKNOWN` (aligned with an earlier session's explicit request) rather than this message's `PASS`/`WARN`/`FAIL` — semantically equivalent, not re-churned to avoid destabilizing already-tested behavior; flagged here rather than silently ignored.
+- Frontend shows the STALE banner and confidence score; the fuller Phase 15 layout (separate INDICATORS/OPTION/TRADE PLAN/DECISION/REASONS sections with bullet points) was not fully rebuilt this session — the existing card layout was extended, not redesigned.

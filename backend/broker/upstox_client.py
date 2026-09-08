@@ -290,6 +290,97 @@ class UpstoxClient:
             logger.warning("get_multiple_quotes error: %s", e)
             return {s: self._empty_quote(s) for s in symbols}
 
+    def get_intraday_candles(
+        self,
+        symbol: str,
+        interval: str = "5minute",
+    ) -> List[Dict[str, Any]]:
+        """Fetch TODAY's still-forming intraday candles via the Upstox v3
+        Intraday Candle Data API — a DIFFERENT endpoint from
+        get_historical_candles() above.
+
+        ROOT CAUSE this method fixes: `/v3/historical-candle/...` (used by
+        get_historical_candles) only serves settled/completed trading
+        days. On a live trading day, its most recent candle is always
+        AT BEST yesterday's last bar — it never contains today's
+        in-progress data, no matter how recent `to_date` is set to. That
+        is a real Upstox API behavior, not a caching bug in this codebase.
+        Both `TradingEngine.detect_underlying_trend()` and (until this
+        fix) `backend/copilot/tools.py:get_live_candles()` called
+        get_historical_candles() for "current" data and were therefore
+        both silently working off stale candles during live sessions.
+
+        Endpoint: GET /v3/historical-candle/intraday/{instrument_key}/{unit}/{interval}
+        (no date range — Upstox returns everything from today's market
+        open to the most recent completed candle for that interval).
+
+        IMPORTANT — UNVERIFIED: this sandbox has no live Upstox
+        connection, so the exact endpoint path/response shape below is
+        implemented to match Upstox's documented v3 Intraday Candle API
+        and the same response shape as get_historical_candles(), but has
+        NOT been exercised against a real Upstox account. Verify against
+        current Upstox API docs and a real account before trusting this
+        in production — see docs/COPILOT.md.
+        """
+        instrument_key = self._resolve_key(symbol)
+        unit, unit_interval = V3_INTERVAL_MAP.get(interval.lower(), ("minutes", 5))
+        encoded_key = urllib.parse.quote(instrument_key, safe="")
+        path = f"/historical-candle/intraday/{encoded_key}/{unit}/{unit_interval}"
+
+        try:
+            data = self._get_url(f"{V3_BASE_URL}{path}")
+            rows = data.get("data", {}).get("candles", [])
+        except UpstoxAPIError as e:
+            logger.warning("Intraday candle fetch failed for %s %s/%s: %s", symbol, unit, unit_interval, e)
+            return []  # empty, not fabricated — caller falls back to historical-only with STALE marked
+
+        result: List[Dict[str, Any]] = []
+        seen: set = set()
+        for c in rows:
+            if len(c) < 6:
+                continue
+            ts = str(c[0])
+            if ts in seen:
+                continue
+            seen.add(ts)
+            result.append({
+                "timestamp": ts, "open": float(c[1]), "high": float(c[2]),
+                "low": float(c[3]), "close": float(c[4]), "volume": int(c[5]),
+            })
+        result.sort(key=lambda r: r["timestamp"])
+        return result
+
+    def get_current_candles(
+        self,
+        symbol: str,
+        interval: str = "5minute",
+        context_days: int = 5,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """The correct method for "give me current data for indicators
+        right now": merges completed prior-day candles (via
+        get_historical_candles, for EMA50-length context) with TODAY's
+        in-progress candles (via get_intraday_candles, the actual live
+        data) — deduped and sorted, so the LAST candle in the result is
+        genuinely current, not stuck on yesterday's close.
+
+        `context_days` controls how much prior history to pull for
+        indicator warm-up; it does not affect whether today's data is
+        included (today's intraday candles are always fetched)."""
+        historical = self.get_historical_candles(
+            symbol, interval,
+            from_date=(date.today() - timedelta(days=context_days)).strftime("%Y-%m-%d"),
+            to_date=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"),
+            limit=limit,
+        )
+        intraday = self.get_intraday_candles(symbol, interval)
+
+        by_ts: Dict[str, Dict[str, Any]] = {c["timestamp"]: c for c in historical}
+        for c in intraday:
+            by_ts[c["timestamp"]] = c  # intraday wins on any overlap (shouldn't normally happen)
+        merged = sorted(by_ts.values(), key=lambda r: r["timestamp"])
+        return merged[-limit:] if limit else merged
+
     def get_historical_candles(
         self,
         symbol: str,

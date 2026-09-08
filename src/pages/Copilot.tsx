@@ -23,6 +23,7 @@ interface TradePlanResult {
   reason?: string
   analysis?: {
     direction: string
+    confidence: number
     market_regime: string
     volatility: number | null
     momentum: number | null
@@ -30,6 +31,9 @@ interface TradePlanResult {
     resistance: number | null
     preferred_side: string | null
     setup_quality: number | null
+    data_status: string
+    data_age_seconds: number | null
+    candle_timestamp: string | null
   } | null
   trade_plan?: {
     option_type: string
@@ -193,9 +197,17 @@ export default function Copilot() {
           <div className="text-xs text-slate-500">{plan.reason || 'Not available.'}</div>
         )}
 
+        {analysis?.data_status === 'STALE' && (
+          <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/25 rounded-lg px-3 py-2">
+            <AlertTriangle size={14} />
+            STALE DATA — indicator snapshot is {analysis.data_age_seconds != null ? `${Math.round(analysis.data_age_seconds)}s` : ''} old
+            (as of {analysis.candle_timestamp || 'unknown'}). Trade decisions are blocked until fresh data is available.
+          </div>
+        )}
+
         {analysis && (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <MetricCard title="Direction" value={analysis.direction} />
+            <MetricCard title="Direction" value={analysis.direction} sub={`${analysis.confidence}% confidence`} />
             <MetricCard title="Regime" value={analysis.market_regime} />
             <MetricCard title="Support" value={analysis.support != null ? analysis.support.toFixed(2) : '—'} />
             <MetricCard title="Resistance" value={analysis.resistance != null ? analysis.resistance.toFixed(2) : '—'} />

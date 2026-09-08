@@ -20,9 +20,10 @@ from backend.copilot.trade_plan import TradePlan, ValidationResult, validate_tra
 class MarketAnalysis:
     symbol: str
     direction: str            # "BULLISH" | "BEARISH" | "NEUTRAL" | "UNKNOWN"
-    market_regime: str        # "TRENDING" | "RANGING" | "UNKNOWN"
+    confidence: float         # 0-100 — how strongly the evidence supports `direction`
+    market_regime: str        # "TRENDING" | "RANGE" | "HIGH_VOLATILITY" | "LOW_VOLATILITY" | "UNCERTAIN"
     volatility: Optional[float]      # ATR as % of price
-    momentum: Optional[float]        # rate-of-change, existing indicator
+    momentum: Optional[float]        # RSI, existing indicator
     support: Optional[float]
     resistance: Optional[float]
     preferred_side: Optional[str]    # "CE" | "PE" | None
@@ -30,33 +31,86 @@ class MarketAnalysis:
     risk_reward: Optional[float]
     decision: str              # "WAIT" | "SKIP" | "TRADE"
     decision_reason: str
+    data_status: str = "UNKNOWN"     # "LIVE" | "STALE" | "UNKNOWN"
+    data_age_seconds: Optional[float] = None
+    candle_timestamp: Optional[str] = None
+    fallback_data: bool = False      # true only if diagnostics explicitly requested stale data anyway
+    score_breakdown: Dict[str, float] = field(default_factory=dict)  # transparency into the scoring, not just the verdict
     data_gaps: List[str] = field(default_factory=list)   # things this analysis could NOT verify
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
-def _classify_regime(choppiness_index: Optional[float]) -> str:
-    # Standard Choppiness Index interpretation (already computed by
-    # backend/indicators/choppiness.py): >61.8 = ranging/choppy,
-    # <38.2 = trending. This is the conventional threshold for this
-    # specific indicator, not an invented rule.
+def _classify_regime(choppiness_index: Optional[float], atr_pct: Optional[float]) -> str:
+    """Standard Choppiness Index interpretation (already computed by
+    backend/indicators/choppiness.py): >=61.8 = ranging/choppy, <=38.2 =
+    trending — the conventional thresholds for this specific indicator,
+    not invented. Extreme volatility (ATR > 1.0% of price, a deliberately
+    simple fixed threshold — this repo has no rolling ATR-percentile
+    baseline available to the Copilot) overrides the chop-based label,
+    since an operator deciding whether to trade cares more about "is this
+    unusually violent right now" than the trend/range distinction when
+    both are true at once."""
     if choppiness_index is None:
-        return "UNKNOWN"
+        return "UNCERTAIN"
+    if atr_pct is not None and atr_pct >= 1.0:
+        return "HIGH_VOLATILITY"
+    if atr_pct is not None and atr_pct <= 0.15:
+        return "LOW_VOLATILITY"
     if choppiness_index >= 61.8:
-        return "RANGING"
+        return "RANGE"
     if choppiness_index <= 38.2:
         return "TRENDING"
-    return "TRANSITIONAL"
+    return "UNCERTAIN"
 
 
-def build_market_analysis(tools: Any, symbol: str, candles: List[Dict[str, Any]]) -> MarketAnalysis:
+def _score_direction(ind: Dict[str, Any]) -> Dict[str, float]:
+    """PHASE 3 structured scoring — trend + momentum, each a weighted sum
+    of independent factors, not a single indicator forcing a verdict.
+    Returns a breakdown dict so the reasoning is inspectable, not just a
+    final number."""
+    close, ema20, ema50, vwap, rsi = ind.get("last_close"), ind.get("ema20"), ind.get("ema50"), ind.get("vwap"), ind.get("rsi")
+    breakdown: Dict[str, float] = {}
+
+    trend_points = 0.0
+    trend_max = 0.0
+    for label, cond_available, is_bullish in [
+        ("close_vs_ema20", close is not None and ema20 is not None, close is not None and ema20 is not None and close > ema20),
+        ("close_vs_ema50", close is not None and ema50 is not None, close is not None and ema50 is not None and close > ema50),
+        ("ema20_vs_ema50", ema20 is not None and ema50 is not None, ema20 is not None and ema50 is not None and ema20 > ema50),
+        ("close_vs_vwap", close is not None and vwap is not None, close is not None and vwap is not None and close > vwap),
+    ]:
+        if cond_available:
+            trend_max += 25.0
+            trend_points += 25.0 if is_bullish else -25.0
+    breakdown["trend_score"] = trend_points  # -100..+100, 0 if nothing was available
+
+    momentum_score = 0.0
+    if rsi is not None:
+        momentum_score = max(-100.0, min(100.0, (rsi - 50.0) * 2.5))
+    breakdown["momentum_score"] = momentum_score
+
+    # Trend carries more weight than momentum (momentum alone flips too
+    # easily on noise) — 60/40, and only actually usable if at least the
+    # trend factors had SOME data.
+    combined = 0.6 * breakdown["trend_score"] + 0.4 * breakdown["momentum_score"] if trend_max > 0 else momentum_score
+    breakdown["combined_score"] = combined
+    return breakdown
+
+
+def build_market_analysis(
+    tools: Any, symbol: str, candles: List[Dict[str, Any]],
+    data_status: str = "UNKNOWN", data_age_seconds: Optional[float] = None, candle_timestamp: Optional[str] = None,
+) -> MarketAnalysis:
     data_gaps: List[str] = []
 
     ind = tools.get_indicators(symbol, candles)
     if not ind.get("available"):
         data_gaps.append(f"indicators: {ind.get('reason')}")
         ind = {}
+
+    data_status, data_age, candle_ts = data_status, data_age_seconds, candle_timestamp
 
     sr = tools.get_support_resistance(candles)
     if not sr.get("available"):
@@ -70,12 +124,25 @@ def build_market_analysis(tools: Any, symbol: str, candles: List[Dict[str, Any]]
     elif not sig.get("available"):
         data_gaps.append(f"strategy_signals: {sig.get('reason')}")
 
-    regime = _classify_regime(ind.get("choppiness_index"))
     close = ind.get("last_close")
-    ema20 = ind.get("ema20")
-    direction = "UNKNOWN"
-    if close is not None and ema20 is not None:
-        direction = "BULLISH" if close > ema20 else ("BEARISH" if close < ema20 else "NEUTRAL")
+    volatility = ind.get("atr") / close * 100.0 if (ind.get("atr") and close) else None
+    regime = _classify_regime(ind.get("choppiness_index"), volatility)
+    momentum = ind.get("rsi")
+
+    breakdown = _score_direction(ind) if ind else {}
+    combined = breakdown.get("combined_score", 0.0)
+    confidence = round(min(100.0, abs(combined)), 1)
+
+    # Do NOT force a direction on weak/conflicting evidence — this is the
+    # exact requirement from Phase 3: "If indicators conflict, return
+    # NEUTRAL or UNCERTAIN rather than forcing a trade direction."
+    MIN_DIRECTIONAL_CONFIDENCE = 20.0
+    if not ind:
+        direction = "UNKNOWN"
+    elif confidence < MIN_DIRECTIONAL_CONFIDENCE:
+        direction = "NEUTRAL"
+    else:
+        direction = "BULLISH" if combined > 0 else "BEARISH"
 
     preferred_side = None
     setup_quality = None
@@ -85,11 +152,15 @@ def build_market_analysis(tools: Any, symbol: str, candles: List[Dict[str, Any]]
             or (signal_dict.get("indicators", {}) or {}).get("directional_intent")
         setup_quality = signal_dict.get("setup_score") or signal_dict.get("confidence")
 
-    volatility = ind.get("atr") / close * 100.0 if (ind.get("atr") and close) else None
-    momentum = ind.get("rsi")
-
     # ── Decision (deterministic — no model in the loop) ──────────────
-    if not candles or ind == {} and sig == {}:
+    # PHASE 2/14: stale data is a hard block — checked FIRST, before any
+    # other reasoning, and cannot be overridden by a strong signal.
+    if data_status == "STALE":
+        decision = "SKIP"
+        decision_reason = (f"Indicator data is stale (age={data_age:.0f}s if known) — trade decision blocked. "
+                            f"Data as of {candle_ts}." if data_age is not None else
+                            f"Indicator data is stale (age unknown) — trade decision blocked. Data as of {candle_ts}.")
+    elif not candles or not ind:
         decision, decision_reason = "WAIT", "Insufficient data to analyze this symbol right now."
     elif not signal_dict:
         decision, decision_reason = "SKIP", "No qualifying strategy setup on the existing strategy engine right now."
@@ -99,11 +170,13 @@ def build_market_analysis(tools: Any, symbol: str, candles: List[Dict[str, Any]]
         decision, decision_reason = "WAIT", "A qualifying setup exists — building a TradePlan for risk validation."
 
     return MarketAnalysis(
-        symbol=symbol, direction=direction, market_regime=regime,
+        symbol=symbol, direction=direction, confidence=confidence, market_regime=regime,
         volatility=round(volatility, 3) if volatility is not None else None,
         momentum=momentum, support=sr.get("support"), resistance=sr.get("resistance"),
         preferred_side=preferred_side, setup_quality=setup_quality, risk_reward=risk_reward,
-        decision=decision, decision_reason=decision_reason, data_gaps=data_gaps,
+        decision=decision, decision_reason=decision_reason,
+        data_status=data_status, data_age_seconds=data_age, candle_timestamp=candle_ts,
+        score_breakdown=breakdown, data_gaps=data_gaps,
     )
 
 
@@ -229,12 +302,28 @@ def build_trade_plan_for_symbol(tools: Any, symbol: str, candles: Optional[List[
     # informational only here — evaluate_option_premium() does its own
     # independent trend detection internally via the real broker client.
     analysis = None
+    live_status, live_age, live_ts = "UNKNOWN", None, None
     if candles is None:
         live = tools.get_live_candles(symbol)
         if live.get("available"):
             candles = live["candles"]
+            live_status = live.get("data_status", "UNKNOWN")
+            live_age = live.get("data_age_seconds")
+            live_ts = live.get("candle_timestamp")
     if candles:
-        analysis = build_market_analysis(tools, symbol, candles)
+        analysis = build_market_analysis(tools, symbol, candles, data_status=live_status,
+                                          data_age_seconds=live_age, candle_timestamp=live_ts)
+
+    # PHASE 2/14 hard stop: never let stale underlying data reach a trade
+    # decision, no matter what evaluate_option_premium() would otherwise
+    # return. Diagnostics/explanatory callers still get the analysis
+    # (fallback_data=True, clearly labeled) — only the TRADE path is blocked.
+    if analysis is not None and analysis.data_status == "STALE":
+        return {
+            "available": True, "analysis": analysis.to_dict(), "strategy_signal": None,
+            "decision": "SKIP", "trade_plan": None, "validation": None,
+            "reason": analysis.decision_reason,
+        }
 
     try:
         signal = tools.engine.evaluate_option_premium(symbol)

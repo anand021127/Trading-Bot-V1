@@ -46,6 +46,7 @@ class TradePlan:
     theta: Optional[float] = None
     iv: Optional[float] = None
     quote_timestamp: Optional[str] = None   # when the live data behind this plan was fetched
+    analysis_timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:

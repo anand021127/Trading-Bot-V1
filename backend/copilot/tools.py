@@ -68,13 +68,31 @@ class CopilotTools:
         }
 
     def get_live_candles(self, symbol: str, timeframe: str = "5minute", limit: int = 100) -> Dict[str, Any]:
+        """Uses `client.get_current_candles()` (historical context + TODAY's
+        intraday candles merged) — NOT get_historical_candles() alone,
+        which only serves settled/completed days and would silently
+        return yesterday's last candle as "current" during a live
+        session (the exact bug this fixes — see
+        backend/broker/upstox_client.py:get_current_candles docstring).
+
+        Computes a strict `data_status`: "LIVE" only if the last candle
+        is within COPILOT_MAX_CANDLE_AGE_SECONDS of now, else "STALE".
+        Callers (decision_engine.py) must check this and refuse to trade
+        on STALE data — this function itself does not raise or block,
+        it only reports the truth."""
         client = getattr(self.engine, "client", None)
         if client is None:
             return _unavailable("No broker client attached to the trading engine — cannot fetch candles.")
         try:
-            candles = client.get_historical_candles(symbol, timeframe, limit=limit)
+            if hasattr(client, "get_current_candles"):
+                candles = client.get_current_candles(symbol, timeframe, limit=limit)
+            else:
+                # Older/mocked clients without the merged method — fall
+                # back to historical-only, but this WILL be stale during
+                # a live session, so mark it explicitly rather than lie.
+                candles = client.get_historical_candles(symbol, timeframe, limit=limit)
         except Exception as e:
-            return _unavailable(f"get_historical_candles({symbol!r}) failed: {e}")
+            return _unavailable(f"get_current_candles({symbol!r}) failed: {e}")
         if not candles:
             return _unavailable(f"Broker returned no candles for {symbol} ({timeframe}).")
 
@@ -88,6 +106,15 @@ class CopilotTools:
         except Exception:
             pass
 
+        from backend.copilot.config import load_copilot_settings
+        max_age = load_copilot_settings().max_candle_age_seconds
+        if age_seconds is None:
+            data_status = "UNKNOWN"
+        elif age_seconds <= max_age:
+            data_status = "LIVE"
+        else:
+            data_status = "STALE"
+
         return {
             "available": True,
             "symbol": symbol,
@@ -95,8 +122,11 @@ class CopilotTools:
             "candles": candles,
             "latest_candle": candles[-1],
             "candle_count": len(candles),
-            "last_candle_timestamp": last_ts,
+            "candle_timestamp": last_ts,
+            "last_candle_timestamp": last_ts,  # kept for backward compatibility with earlier callers
             "data_age_seconds": age_seconds,
+            "data_status": data_status,
+            "max_age_seconds": max_age,
         }
 
     def get_live_prices(self, symbols: List[str]) -> Dict[str, Any]:

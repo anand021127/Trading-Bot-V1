@@ -30,6 +30,7 @@ class CopilotSettings:
     llm_base_url: str          # e.g. http://localhost:11434/v1 for Ollama
     llm_model: str
     llm_timeout_seconds: float
+    max_candle_age_seconds: float = 120.0  # COPILOT_MAX_CANDLE_AGE_SECONDS — underlying/premium candle staleness limit
 
 
 def load_copilot_settings() -> CopilotSettings:
@@ -50,4 +51,5 @@ def load_copilot_settings() -> CopilotSettings:
         llm_base_url=os.getenv("COPILOT_LLM_BASE_URL", "http://localhost:11434/v1"),
         llm_model=os.getenv("COPILOT_LLM_MODEL", "llama3.1:8b"),
         llm_timeout_seconds=float(os.getenv("COPILOT_LLM_TIMEOUT_SECONDS", "8")),
+        max_candle_age_seconds=float(os.getenv("COPILOT_MAX_CANDLE_AGE_SECONDS", "120")),
     )

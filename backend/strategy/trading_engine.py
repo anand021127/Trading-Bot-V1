@@ -530,7 +530,7 @@ class TradingEngine:
         mode, since we're trading the index's option premium, not the
         index itself, so we still need to know its direction."""
         try:
-            candles = self.client.get_historical_candles(symbol, "5minute", limit=100)
+            candles = self.client.get_current_candles(symbol, "5minute", limit=100)
         except Exception as e:
             TradeLogger.log_error("TradingEngine.detect_underlying_trend", e, {"symbol": symbol})
             return "NEUTRAL"
@@ -608,7 +608,7 @@ class TradingEngine:
             return sig
 
         try:
-            premium_candles = self.client.get_historical_candles(
+            premium_candles = self.client.get_current_candles(
                 contract["instrument_key"], "5minute", limit=30,
             )
         except Exception as e:
@@ -968,7 +968,7 @@ class TradingEngine:
                 exit_reason = "TARGET_HIT"
             else:
                 try:
-                    candles = await asyncio.to_thread(self.client.get_historical_candles, price_lookup_key, "5minute", limit=100)
+                    candles = await asyncio.to_thread(self.client.get_current_candles, price_lookup_key, "5minute", limit=100)
                     exit_context = {"expiry_date": pos.get("expiry_date")} if pos.get("expiry_date") else None
                     strat_exit = await asyncio.to_thread(
                         self.strategy_engine.check_exits,

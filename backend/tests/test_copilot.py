@@ -22,12 +22,21 @@ from backend.database.db_manager import DatabaseManager
 from backend.strategy.trading_engine import TradingEngine
 
 
-def _synthetic_candles(n=400, start=100.0, drift=0.03, seed=7):
+def _synthetic_candles(n=400, start=100.0, drift=0.03, seed=7, end_now=False):
     import random
     rnd = random.Random(seed)
     candles = []
     price = start
-    ts = datetime(2024, 6, 3, 9, 15)
+    if end_now:
+        # Anchor the LAST candle to "now" (walking backward) so freshness
+        # checks (data_status=LIVE) pass — used by fixtures that exercise
+        # the real trade-plan pipeline, where stale synthetic timestamps
+        # would incorrectly trip the STALE gate this session added.
+        last_ts = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        start_ts = last_ts - timedelta(minutes=5 * (n - 1))
+        ts = start_ts
+    else:
+        ts = datetime(2024, 6, 3, 9, 15)
     for i in range(n):
         o = price
         price += drift + rnd.uniform(-0.25, 0.25)
@@ -221,13 +230,88 @@ def _mock_client_with_realistic_chain(spot=22000.0, atm_strike=22000.0):
         # Real-shaped candles with a clear uptrend so
         # detect_underlying_trend / OptionPremiumStrategy momentum
         # conditions actually fire BULLISH -> CE, deterministically.
-        candles = _synthetic_candles(n=max(limit, 40), start=spot - 40, drift=1.2, seed=3)
+        candles = _synthetic_candles(n=max(limit, 40), start=spot - 40, drift=1.2, seed=3, end_now=True)
         if symbol.startswith("NSE_FO") or "CE" in symbol or "PE" in symbol:
             # Premium candle series, independent scale from the underlying.
-            candles = _synthetic_candles(n=max(limit, 40), start=118.0, drift=0.3, seed=5)
+            candles = _synthetic_candles(n=max(limit, 40), start=118.0, drift=0.3, seed=5, end_now=True)
         return candles
     client.get_historical_candles.side_effect = _historical
+    client.get_current_candles.side_effect = _historical  # test fixture: no live/intraday distinction needed here
     return client
+
+
+class TestDataFreshness:
+    """PHASE 2/14: the core bug report this session fixes — a stale
+    underlying candle (e.g. yesterday's last bar during a live session)
+    must never be reported as LIVE, and must hard-block a trade
+    decision, not just be noted as a caveat."""
+
+    def test_fresh_candles_are_marked_live(self):
+        engine, db = _real_engine()
+        client = MagicMock()
+        client.get_current_candles.return_value = _synthetic_candles(n=60, end_now=True)
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db)
+        result = tools.get_live_candles("NIFTY50")
+        assert result["available"] is True
+        assert result["data_status"] == "LIVE"
+        assert result["data_age_seconds"] is not None and result["data_age_seconds"] < 120
+
+    def test_stale_candles_are_marked_stale_not_live(self):
+        """The exact bug reported: market_status can say LIVE while the
+        candle data itself is from a prior session — get_live_candles()
+        must independently flag THAT, not trust the websocket status."""
+        engine, db = _real_engine()
+        client = MagicMock()
+        client.get_current_candles.return_value = _synthetic_candles(n=60, end_now=False)  # old 2024 timestamps
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db)
+        result = tools.get_live_candles("NIFTY50")
+        assert result["available"] is True
+        assert result["data_status"] == "STALE"
+        assert result["data_age_seconds"] > 120
+
+    def test_stale_data_blocks_trade_plan_never_reaches_trade(self):
+        engine, db = _real_engine()
+        client = _mock_client_with_realistic_chain()
+        # Override with stale (2024) underlying candles specifically for
+        # the get_current_candles path get_live_candles() uses.
+        client.get_current_candles.side_effect = None
+        client.get_current_candles.return_value = _synthetic_candles(n=60, end_now=False)
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+
+        result = build_trade_plan_for_symbol(tools, "NIFTY50")
+
+        assert result["decision"] == "SKIP"
+        assert result["trade_plan"] is None
+        assert "stale" in result["reason"].lower()
+        assert result["analysis"]["data_status"] == "STALE"
+        # Critical: evaluate_option_premium (and thus the option chain
+        # fetch) must NEVER be reached when the underlying is stale.
+        client.get_option_chain.assert_not_called()
+
+    def test_conflicting_indicators_return_neutral_not_forced_direction(self):
+        """PHASE 3: bullish EMA structure but deeply oversold RSI should
+        not force BULLISH — weak/conflicting evidence must fall back to
+        NEUTRAL rather than pick a side."""
+        from backend.copilot.decision_engine import build_market_analysis
+        tools = CopilotTools()
+        # Flat/choppy candles with barely-there drift -> weak trend score,
+        # RSI near 50 -> weak momentum score -> low combined confidence.
+        candles = _synthetic_candles(n=60, drift=0.0, seed=99, end_now=True)
+        analysis = build_market_analysis(tools, "NIFTY50", candles, data_status="LIVE", data_age_seconds=5.0)
+        if analysis.confidence < 20.0:
+            assert analysis.direction in ("NEUTRAL", "UNKNOWN")
+
+    def test_score_breakdown_is_exposed_not_just_verdict(self):
+        from backend.copilot.decision_engine import build_market_analysis
+        tools = CopilotTools()
+        candles = _synthetic_candles(n=60, drift=0.5, seed=11, end_now=True)
+        analysis = build_market_analysis(tools, "NIFTY50", candles, data_status="LIVE", data_age_seconds=5.0)
+        assert "trend_score" in analysis.score_breakdown
+        assert "momentum_score" in analysis.score_breakdown
+        assert "combined_score" in analysis.score_breakdown
 
 
 class TestRealOptionPipeline:
@@ -250,7 +334,7 @@ class TestRealOptionPipeline:
         result = tools.get_live_candles("NIFTY50", "5minute", limit=50)
         assert result["available"] is True
         assert result["candle_count"] >= 40
-        client.get_historical_candles.assert_called()
+        client.get_current_candles.assert_called()
 
     def test_get_option_chain_uses_the_real_client_and_summarizer(self):
         engine, db, client = self._engine_with_mock_chain()
@@ -739,7 +823,7 @@ class TestConversationalLiveWiring:
         tools = CopilotTools(engine=engine, db_manager=db)
         resp = chat("Is NIFTY bullish or bearish?", tools, candles_by_symbol={})
         assert "decision" in resp["resolved_context"]["analysis"]
-        client.get_historical_candles.assert_called()
+        client.get_current_candles.assert_called()
 
 
 class TestDiagnosticsExtended:
