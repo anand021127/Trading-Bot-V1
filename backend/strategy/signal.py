@@ -37,6 +37,14 @@ class StrategySignal:
     stop_loss: float = 0.0
     target: float = 0.0
 
+    # Setup classification from ConfidenceScorer, when the strategy used it
+    # (currently OptionPremiumStrategy). "" / {} for strategies that don't.
+    # Added for the AI decision-filter layer (backend/ai/) so its features
+    # match exactly what training saw — purely additive, defaults preserve
+    # every existing caller's behavior.
+    setup_name: str = ""
+    factor_scores: Dict[str, float] = field(default_factory=dict)
+
     # condition_name -> passed/failed, in the order they were checked.
     conditions: Dict[str, bool] = field(default_factory=dict)
     # Every reason a trade was NOT taken, even if only one condition failed —
@@ -67,6 +75,8 @@ class StrategySignal:
             # V21-FINAL Item 13: transparency relabeling — this is NOT a
             # probability of profit, it's a conditions-passed score (0-100).
             "setup_score": round(self.confidence, 1),
+            "setup_name": self.setup_name,
+            "factor_scores": self.factor_scores,
             "entry_reason": self.entry_reason,
             "exit_reason": self.exit_reason,
             "entry_price": self.entry_price,

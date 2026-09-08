@@ -19,6 +19,8 @@ if str(_backend_root) not in sys.path:
     sys.path.insert(0, str(_backend_root))
 
 from .routers import (
+    ai_router,
+    copilot_router,
     alerts_router,
     backtest_router,
     bot_control_router,
@@ -131,11 +133,26 @@ async def lifespan(app: FastAPI):
                 return "OPTIONS"
 
         if app.state.engine is not None:
+            copilot_hook = None
+            _copilot_tools = None
+            try:
+                from backend.copilot.tools import CopilotTools
+                from backend.copilot.scan_loop import live_scanner_copilot_hook, CopilotScanState
+                _copilot_tools = CopilotTools(
+                    engine=app.state.engine, db_manager=db,
+                    health_monitor=getattr(app.state, "health_monitor", None),
+                    ws_client=getattr(app.state, "ws_client", None),
+                )
+                copilot_hook = live_scanner_copilot_hook(_copilot_tools, CopilotScanState())
+            except Exception as e:
+                logger.warning("Could not wire Copilot into the scanner cadence: %s", e)
+
             scanner = LiveScanner(
                 trading_engine=app.state.engine,
                 universe_resolver=_resolve_universe,
                 mode_resolver=_resolve_universe_mode,
                 seconds_between_symbols=3.0,
+                copilot_hook=copilot_hook,
             )
             set_scanner(scanner)
             app.state.scanner = scanner
@@ -148,6 +165,21 @@ async def lifespan(app: FastAPI):
                 factory=scanner.run_forever,
                 max_restarts=10,
             )
+
+            # Shadow-log reconciliation — same supervisor pattern as the
+            # scanner, so it auto-restarts if it dies. Only meaningfully
+            # active once COPILOT_ENABLED=true; reconcile_shadow_log()
+            # itself is a no-op-safe no-crash call otherwise (no log file
+            # yet, or no broker client attached, both handled gracefully).
+            try:
+                from backend.copilot.reconciliation import reconcile_forever
+                supervisor.register(
+                    "copilot_reconciliation",
+                    factory=lambda: reconcile_forever(_copilot_tools, interval_seconds=300.0),
+                    max_restarts=10,
+                )
+            except Exception as e:
+                logger.warning("Could not start Copilot shadow-log reconciliation: %s", e)
     except Exception as e:
         print(f"[WARN] Could not start live scanner: {e}")
         health_monitor.record_error("scanner", str(e))
@@ -309,6 +341,8 @@ app.include_router(bot_control_router,    prefix="/api/bot")
 app.include_router(strategy_router,       prefix="/api/strategy")
 app.include_router(universe_router,       prefix="/api/universe")
 app.include_router(scanner_router,        prefix="/api/scanner")
+app.include_router(ai_router,             prefix="/api/ai")
+app.include_router(copilot_router,        prefix="/api/copilot")
 
 
 # ─── Core endpoints ────────────────────────────────────────────────────────────

@@ -1,0 +1,144 @@
+{
+  "symbol": "NIFTY50",
+  "generated_at": "2026-09-06T21:18:16.883477Z",
+  "dataset_build_report": {
+    "symbol": "NIFTY50",
+    "total_bars": 17322,
+    "warmup_bars_skipped": 120,
+    "setups_with_direction": 13065,
+    "rows_emitted": 13035,
+    "rows_skipped_no_horizon": 30,
+    "positive_rate": 0.3328
+  },
+  "folds": [
+    {
+      "test_month": "2024-08",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06"
+      ],
+      "val_month": "2024-07",
+      "model_type": "random_forest",
+      "val_auc": 0.6029,
+      "n_train": 6878,
+      "n_val": 1230,
+      "n_test": 1193
+    },
+    {
+      "test_month": "2024-09",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06",
+        "2024-07"
+      ],
+      "val_month": "2024-08",
+      "model_type": "hist_gradient_boosting",
+      "val_auc": 0.6577,
+      "n_train": 8108,
+      "n_val": 1193,
+      "n_test": 289
+    },
+    {
+      "test_month": "2024-10",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06",
+        "2024-07",
+        "2024-08"
+      ],
+      "val_month": "2024-09",
+      "model_type": "logistic_regression",
+      "val_auc": 0.7728,
+      "n_train": 9301,
+      "n_val": 289,
+      "n_test": 1267
+    },
+    {
+      "test_month": "2024-11",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06",
+        "2024-07",
+        "2024-08",
+        "2024-09"
+      ],
+      "val_month": "2024-10",
+      "model_type": "hist_gradient_boosting",
+      "val_auc": 0.5765,
+      "n_train": 9590,
+      "n_val": 1267,
+      "n_test": 1033
+    },
+    {
+      "test_month": "2024-12",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06",
+        "2024-07",
+        "2024-08",
+        "2024-09",
+        "2024-10"
+      ],
+      "val_month": "2024-11",
+      "model_type": "random_forest",
+      "val_auc": 0.6026,
+      "n_train": 10857,
+      "n_val": 1033,
+      "n_test": 1145
+    }
+  ],
+  "baseline": {
+    "trades": 4515,
+    "wins": 1397,
+    "losses": 3118,
+    "win_rate_pct": 30.94,
+    "gross_profit_R": 2794.0,
+    "gross_loss_R": 3118.0,
+    "net_R": -324.0,
+    "profit_factor": 0.896,
+    "expectancy_R": -0.0718,
+    "max_drawdown_R": -551.0,
+    "max_consecutive_losses": 127
+  },
+  "ai_filtered": {
+    "trades": 36,
+    "wins": 8,
+    "losses": 28,
+    "win_rate_pct": 22.22,
+    "gross_profit_R": 16.0,
+    "gross_loss_R": 28.0,
+    "net_R": -12.0,
+    "profit_factor": 0.571,
+    "expectancy_R": -0.3333,
+    "max_drawdown_R": -27.0,
+    "max_consecutive_losses": 27
+  },
+  "trades_filtered_out_by_ai": 4479,
+  "config": {
+    "min_tradeable_confidence": 70.0,
+    "ai_min_probability": 0.65,
+    "r_win": 2.0,
+    "r_loss": 1.0,
+    "note": "R-multiples on the underlying move (1.5x ATR stop / 2R target, matching backend/strategy/strategies/ema_trend.py), not real INR options premium P&L \u2014 see module docstring."
+  }
+}
