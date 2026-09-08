@@ -1,4 +1,6 @@
 """API routers package — exports all router instances."""
+from .ai         import router as ai_router
+from .copilot     import router as copilot_router
 from .alerts      import router as alerts_router
 from .backtest    import router as backtest_router
 from .bot_control import router as bot_control_router
@@ -16,6 +18,8 @@ from .upstox_v3_auth import router as upstox_v3_auth_router
 from .websocket   import router as websocket_router
 
 __all__ = [
+    "ai_router",
+    "copilot_router",
     "alerts_router",
     "backtest_router",
     "bot_control_router",

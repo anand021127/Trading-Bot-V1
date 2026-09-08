@@ -1,0 +1,51 @@
+{
+  "model_version": "v20260907_022022",
+  "model_type": "random_forest",
+  "created_at": "2026-09-07T02:20:22.592112+00:00",
+  "training_months": [
+    "2024-01",
+    "2024-02",
+    "2024-03",
+    "2024-04",
+    "2024-05",
+    "2024-06",
+    "2024-07",
+    "2024-08",
+    "2024-09",
+    "2024-10"
+  ],
+  "validation_month": "2024-11",
+  "test_months": [
+    "2024-12"
+  ],
+  "feature_list": [
+    "setup_confidence",
+    "direction_is_ce",
+    "factor_trend",
+    "factor_momentum",
+    "factor_vwap",
+    "factor_volume",
+    "rsi",
+    "choppiness_index",
+    "volume_ratio",
+    "roc_1bar",
+    "roc_3bar",
+    "roc_5bar",
+    "ema20_slope",
+    "dist_ema20_atr",
+    "is_overextended",
+    "close_vs_vwap_pct",
+    "close_vs_ema50_pct",
+    "atr_pct",
+    "minutes_since_open",
+    "day_of_week",
+    "setup_is_momentum",
+    "setup_is_pullback",
+    "setup_is_breakout"
+  ],
+  "target_definition": "1 if 2R target (3x entry-ATR) is hit before 1.5x-ATR stop within 48 bars (4h) of the decision bar, else 0 (stop-first or timeout).",
+  "val_auc": 0.602555410691004,
+  "val_log_loss": 0.589632738261872,
+  "val_brier": 0.20208468363979326,
+  "notes": "NOT RECOMMENDED FOR LIVE/PAPER USE. Walk-forward validation (see docs/AI_LAYER.md) shows this modeling approach does not improve on the existing strategy: rejected-vs-accepted trades show no meaningful win-rate separation, and the existing ConfidenceScorer score itself shows no monotonic relationship to forward outcome in this proxy. Saved for reproducibility only. AI_ENABLED must remain false until a materially different feature set / target shows real discriminative power on out-of-sample data."
+}

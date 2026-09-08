@@ -298,6 +298,12 @@ class BacktestResult:
     real_options_required: bool = True
     real_options_used: bool = True
     data_unavailable_count: int = 0
+    # PHASE 10 — AI layer backtest integration. All default to the
+    # "AI wasn't here" state so existing baseline-only callers see no change.
+    ai_mode: str = "disabled"
+    ai_signals_evaluated: int = 0
+    ai_signals_filtered: int = 0
+    ai_shadow_log_sample: List[Dict[str, Any]] = field(default_factory=list)
     # V21-FINAL: data quality report for backtest transparency
     data_quality: Optional[DataQualityReport] = None
     # Detailed diagnostic counters for auditability
@@ -401,7 +407,18 @@ class BacktestEngine:
         max_window_bars: int = 400,
         max_simultaneous_positions: int = 6,
         allow_same_bar_reentry: bool = False,
+        ai_mode: str = "disabled",  # "disabled" | "shadow" | "filter" — see PHASE 10
     ) -> None:
+        # ai_mode="disabled": identical behavior to before the AI layer existed.
+        # ai_mode="shadow": AI runs and every decision is recorded on the
+        #   RejectedSignal/trade metadata, but it never blocks a trade.
+        # ai_mode="filter": AI can additionally reject a candidate signal,
+        #   same as any other pre-risk rejection reason already in this loop.
+        self.ai_mode = ai_mode if ai_mode in ("disabled", "shadow", "filter") else "disabled"
+        self.ai_predictor = None
+        if self.ai_mode != "disabled":
+            from backend.ai.predictor import AIPredictor
+            self.ai_predictor = AIPredictor()
         self.strategy_engine = strategy_engine or MultiStrategyEngine()
         self.costs = costs or CostConfig()
         self.trailing_stop_manager = TrailingStopManager()
@@ -441,6 +458,7 @@ class BacktestEngine:
         result.real_options_required = require_real_options
         result.real_options_used = require_real_options
         result.data_mode = "REAL_HISTORICAL_OPTIONS" if require_real_options else "SPOT_ONLY"
+        result.ai_mode = self.ai_mode
         result.instrument_type = InstrumentType.INDEX_OPTION.value if (is_option_premium and require_real_options) else InstrumentType.EQUITY.value
 
         if require_real_options and options_data_loader is None:
@@ -831,6 +849,31 @@ class BacktestEngine:
                                 symbol=sym, timestamp=ts, strategy=best.strategy_name, reasons=[rej_reason],
                             ))
                         continue
+
+                    # ── PHASE 10: optional AI decision-filter layer ──
+                    # disabled -> zero behavior change. shadow -> AI runs and
+                    # is logged but never blocks. filter -> AI can reject,
+                    # exactly like any other pre-risk rejection reason above.
+                    if self.ai_predictor is not None:
+                        result.ai_signals_evaluated += 1
+                        ai_decision = self.ai_predictor.evaluate_signal(bar, best)
+                        if len(result.ai_shadow_log_sample) < self.rejected_sample_size:
+                            result.ai_shadow_log_sample.append({
+                                "symbol": sym, "timestamp": ts,
+                                "ai_ran": ai_decision.ran, "ai_probability": ai_decision.probability,
+                                "ai_should_allow": ai_decision.should_allow, "ai_reason": ai_decision.reason,
+                            })
+                        if self.ai_mode == "filter" and not ai_decision.should_allow:
+                            result.ai_signals_filtered += 1
+                            rej_reason = f"AI_FILTERED — {ai_decision.reason}"
+                            rejected_total += 1
+                            reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                            symbol_stats[sym]["risk_rejections"] += 1
+                            if len(rejected_sample) < self.rejected_sample_size:
+                                rejected_sample.append(RejectedSignal(
+                                    symbol=sym, timestamp=ts, strategy=best.strategy_name, reasons=[rej_reason],
+                                ))
+                            continue
 
                     spot_close = float(bar["close"])
                     opt_type_intent = best.indicators.get("directional_intent") or best.indicators.get("option_type")

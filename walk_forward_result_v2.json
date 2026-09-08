@@ -1,0 +1,162 @@
+{
+  "symbol": "NIFTY50",
+  "generated_at": "2026-09-07T02:18:17.168158Z",
+  "methodology_note": "Trade counts are DE-DUPLICATED to one open position at a time per symbol (matching RiskManager's max_simultaneous_positions gating), not one 'trade' per 5-min bar the setup remains active \u2014 see backend/ai/dataset.py:select_non_overlapping.",
+  "dataset_build_report": {
+    "symbol": "NIFTY50",
+    "total_bars": 17322,
+    "warmup_bars_skipped": 120,
+    "setups_with_direction": 13065,
+    "rows_emitted": 13035,
+    "rows_skipped_no_horizon": 30,
+    "positive_rate": 0.3328
+  },
+  "folds": [
+    {
+      "test_month": "2024-08",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06"
+      ],
+      "val_month": "2024-07",
+      "model_type": "random_forest",
+      "val_auc": 0.6029,
+      "n_train": 6878,
+      "n_val": 1230,
+      "n_test": 1193
+    },
+    {
+      "test_month": "2024-09",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06",
+        "2024-07"
+      ],
+      "val_month": "2024-08",
+      "model_type": "hist_gradient_boosting",
+      "val_auc": 0.6577,
+      "n_train": 8108,
+      "n_val": 1193,
+      "n_test": 289
+    },
+    {
+      "test_month": "2024-10",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06",
+        "2024-07",
+        "2024-08"
+      ],
+      "val_month": "2024-09",
+      "model_type": "logistic_regression",
+      "val_auc": 0.7728,
+      "n_train": 9301,
+      "n_val": 289,
+      "n_test": 1267
+    },
+    {
+      "test_month": "2024-11",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06",
+        "2024-07",
+        "2024-08",
+        "2024-09"
+      ],
+      "val_month": "2024-10",
+      "model_type": "hist_gradient_boosting",
+      "val_auc": 0.5765,
+      "n_train": 9590,
+      "n_val": 1267,
+      "n_test": 1033
+    },
+    {
+      "test_month": "2024-12",
+      "train_months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06",
+        "2024-07",
+        "2024-08",
+        "2024-09",
+        "2024-10"
+      ],
+      "val_month": "2024-11",
+      "model_type": "random_forest",
+      "val_auc": 0.6026,
+      "n_train": 10857,
+      "n_val": 1033,
+      "n_test": 1145
+    }
+  ],
+  "baseline": {
+    "trades": 136,
+    "wins": 44,
+    "losses": 92,
+    "win_rate_pct": 32.35,
+    "gross_profit_R": 88.0,
+    "gross_loss_R": 92.0,
+    "net_R": -4.0,
+    "profit_factor": 0.957,
+    "expectancy_R": -0.0294,
+    "max_drawdown_R": -21.0,
+    "max_consecutive_losses": 9
+  },
+  "ai_filtered": {
+    "trades": 4,
+    "wins": 2,
+    "losses": 2,
+    "win_rate_pct": 50.0,
+    "gross_profit_R": 4.0,
+    "gross_loss_R": 2.0,
+    "net_R": 2.0,
+    "profit_factor": 2.0,
+    "expectancy_R": 0.5,
+    "max_drawdown_R": -1.0,
+    "max_consecutive_losses": 1
+  },
+  "trades_filtered_out_by_ai": 132,
+  "accepted_vs_rejected_diagnostics": {
+    "total_baseline_eligible_trades_evaluated_by_ai": 136,
+    "accepted_by_ai": {
+      "n": 1,
+      "win_rate_pct": 0.0,
+      "mean_ai_probability": 0.7692,
+      "mean_setup_confidence": 94.0
+    },
+    "rejected_by_ai": {
+      "n": 135,
+      "win_rate_pct": 32.59,
+      "mean_ai_probability": 0.3321,
+      "mean_setup_confidence": 84.7
+    },
+    "interpretation_note": "If the AI is adding real signal, 'accepted_by_ai' should show a meaningfully higher win_rate_pct than 'rejected_by_ai'. If the two win rates are close (within noise for these sample sizes) and/or 'rejected_by_ai' is nearly empty, the model isn't discriminating \u2014 it's applying a near-constant threshold that happens to reject almost everything, not learning which setups are better."
+  },
+  "config": {
+    "min_tradeable_confidence": 70.0,
+    "ai_min_probability": 0.65,
+    "horizon_bars": 48,
+    "r_win": 2.0,
+    "r_loss": 1.0,
+    "note": "R-multiples on the underlying move (1.5x ATR stop / 2R target, matching backend/strategy/strategies/ema_trend.py), not real INR options premium P&L \u2014 see module docstring."
+  }
+}

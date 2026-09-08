@@ -80,11 +80,19 @@ class LiveScanner:
         universe_resolver: Any,
         seconds_between_symbols: float = 3.0,
         mode_resolver: Optional[Any] = None,
+        copilot_hook: Optional[Any] = None,
     ) -> None:
         self.trading_engine = trading_engine
         self.universe_resolver = universe_resolver  # callable -> List[str]
         self.mode_resolver = mode_resolver or (lambda: "OPTIONS")
         self.seconds_between_symbols = seconds_between_symbols
+        # Optional callable(symbol: str, signal: StrategySignal, entry: ScannerEntry) -> None,
+        # invoked at the end of each scan_symbol() call — i.e. at exactly
+        # this scanner's own cadence, not a second competing loop. Default
+        # None means zero behavior change from before this parameter
+        # existed. See backend/copilot/scan_loop.py:live_scanner_copilot_hook
+        # for the Copilot's implementation of this callable.
+        self.copilot_hook = copilot_hook
 
         self._results: Dict[str, ScannerEntry] = {}
         self._results_lock = threading.Lock()
@@ -168,6 +176,15 @@ class LiveScanner:
 
         with self._results_lock:
             self._results[symbol] = entry
+
+        if self.copilot_hook is not None:
+            try:
+                self.copilot_hook(symbol, best, entry)
+            except Exception as e:
+                # The Copilot hook must NEVER be able to break the
+                # existing scanner — log and move on.
+                logger.warning("copilot_hook raised for %s: %s", symbol, e)
+
         return entry
 
     def scan_once(self) -> List[ScannerEntry]:

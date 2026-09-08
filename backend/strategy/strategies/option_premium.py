@@ -314,6 +314,8 @@ class OptionPremiumStrategy(Strategy):
             sig.rejected_reasons = setup_res.rejected_reasons or ["Underlying market is choppy or has no clear directional structure"]
             sig.entry_reason = f"NO TRADE — {setup_res.summary_text or 'No directional setup identified'}"
             sig.indicators = dict(setup_res.indicators)
+            sig.setup_name = setup_res.setup_name
+            sig.factor_scores = dict(setup_res.factor_scores)
             sig.indicators["spot_price"] = closes[-1]
             return sig
 
@@ -337,6 +339,8 @@ class OptionPremiumStrategy(Strategy):
             sig.rejected_reasons = rejected_reasons
             sig.conditions = conditions
             sig.indicators = dict(setup_res.indicators)
+            sig.setup_name = setup_res.setup_name
+            sig.factor_scores = dict(setup_res.factor_scores)
             sig.indicators.update({
                 "directional_intent": opt_type,
                 "option_type": opt_type,
@@ -360,6 +364,8 @@ class OptionPremiumStrategy(Strategy):
         sig.confidence = setup_res.confidence
         sig.conditions = conditions
         sig.indicators = dict(setup_res.indicators)
+        sig.setup_name = setup_res.setup_name
+        sig.factor_scores = dict(setup_res.factor_scores)
         sig.indicators.update({
             "directional_intent": opt_type,
             "option_type": opt_type,

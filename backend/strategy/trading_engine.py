@@ -43,6 +43,8 @@ from backend.risk.risk_manager import RiskManager
 from backend.strategy.exit_manager import ExitManager, TrailingStopManager
 from backend.strategy.session_manager import session_manager
 from backend.strategy.strategy_engine import MultiStrategyEngine
+from backend.ai.predictor import AIPredictor
+from backend.ai.shadow_logger import log_decision
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -262,6 +264,10 @@ class TradingEngine:
         # Modular option-premium strategy registry.
         self.strategy_engine = MultiStrategyEngine()
         self.trailing_stop_manager = TrailingStopManager()
+        # Optional AI decision-filter layer — see backend/ai/. Disabled by
+        # default; behaves as a pure pass-through when AI_ENABLED=false, so
+        # this line alone changes nothing about existing behavior.
+        self.ai_predictor = AIPredictor()
         # V21-FINAL Item 12: Daily floor trade DISABLED.
         # The bot must NOT trade merely because "there were zero trades today."
         # A zero-trade day is completely acceptable.
@@ -675,6 +681,27 @@ class TradingEngine:
                 signal.symbol,
                 self._mismatch_reason,
             )
+            return None
+
+        # ── Optional AI decision-filter layer (backend/ai/) ─────────────────
+        # Runs strictly AFTER the existing strategy has produced a BUY signal
+        # and BEFORE any risk/sizing/execution logic. Disabled by default
+        # (AI_ENABLED=false), and fails open (passes the trade through
+        # unfiltered) on any model/config problem unless AI_FAIL_OPEN=false.
+        # In shadow mode it only logs — it never returns None here.
+        _ai_candle = {
+            "timestamp": signal.generated_at,
+            "close": (signal.indicators or {}).get("spot_price", signal.entry_price),
+        }
+        ai_decision = self.ai_predictor.evaluate_signal(_ai_candle, signal)
+        if ai_decision.ran or ai_decision.mode == "shadow":
+            log_decision(
+                symbol=signal.symbol, strategy_signal=signal.signal,
+                strategy_confidence=signal.confidence, ai_decision=ai_decision,
+            )
+        if self.ai_predictor.settings.enabled and self.ai_predictor.settings.mode in ("paper", "live") and not ai_decision.should_allow:
+            TradeLogger.log_risk_event("AI_FILTERED", ai_decision.reason, signal.symbol)
+            logger.info("Trade filtered by AI for %s: %s", signal.symbol, ai_decision.reason)
             return None
 
         allowed, reason = self.risk_manager.can_take_trade(signal.symbol)
