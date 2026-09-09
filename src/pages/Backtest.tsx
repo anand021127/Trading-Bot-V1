@@ -33,18 +33,6 @@ const defaultStartDate = new Date(today.getFullYear() - 1, today.getMonth(), tod
 
 function strategyParam(id: string): string[] { return [id] }
 
-const isRealResult = (data: unknown): data is BacktestResponse => {
-  if (!data || typeof data !== 'object') return false
-  const d = data as Record<string, unknown>
-  return (
-    'total_candles_scanned' in d ||
-    'trades_taken' in d ||
-    'trade_log' in d ||
-    'equity_curve' in d ||
-    'signals_generated' in d
-  )
-}
-
 export default function Backtest() {
   const [startDate, setStartDate]             = useState(defaultStartDate)
   const [endDate, setEndDate]                 = useState(defaultEndDate)
@@ -64,7 +52,7 @@ export default function Backtest() {
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    // Check if there is already an active or recent completed backtest job on mount
+    // Check if there is already an active running backtest job on mount
     fetchActiveBacktestJob().then(res => {
       if (res.active && res.job) {
         const activeId = res.job.job_id || res.job.task_id
@@ -72,21 +60,14 @@ export default function Backtest() {
         setRunning(true)
         setJobStatus(res.job)
         pollTask(activeId)
-      } else if (!res.active && res.job) {
-        const upper = (res.job.status || '').toUpperCase()
-        const progUpper = ((res.job.progress as any)?.phase || '').toUpperCase()
-        if (upper === 'COMPLETED' || progUpper === 'COMPLETED' || res.job.result_ready) {
-          const completedId = res.job.job_id || res.job.task_id
-          if (completedId) {
-            setTaskId(completedId)
-            setJobStatus(res.job)
-            getBacktestResult(completedId).then(r => {
-              if (isRealResult(r)) {
-                setResult(r)
-                setRunning(false)
-              }
-            }).catch(() => {})
-          }
+      } else if (!res.active && res.job && (res.job.status === 'COMPLETED' || (res.job.progress as any)?.phase === 'completed')) {
+        const completedId = res.job.job_id || res.job.task_id
+        if (completedId) {
+          setTaskId(completedId)
+          setJobStatus(res.job)
+          getBacktestResult(completedId).then(r => {
+            if (r && typeof r === 'object') setResult(r)
+          }).catch(() => {})
         }
       }
     }).catch(() => {})
@@ -169,33 +150,23 @@ export default function Backtest() {
         setJobStatus(status)
         const upperStatus = (status.status || '').toUpperCase()
         const progPhase = ((status.progress as any)?.phase || '').toUpperCase()
-        const isComplete =
-          upperStatus === 'COMPLETED' ||
-          progPhase === 'COMPLETED' ||
-          status.result_ready === true ||
-          (status.progress_percent !== undefined && status.progress_percent >= 100)
 
-        if (isComplete) {
-          let finalResult: BacktestResponse | null = null
-          for (let attempt = 0; attempt < 5; attempt++) {
+        if (upperStatus === 'COMPLETED' || progPhase === 'COMPLETED' || status.result_ready) {
+          let finalResult = null
+          for (let attempt = 0; attempt < 3; attempt++) {
             try {
-              const res = await getBacktestResult(id)
-              if (isRealResult(res)) {
-                finalResult = res
+              finalResult = await getBacktestResult(id)
+              if (finalResult && typeof finalResult === 'object') {
                 break
               }
-            } catch (fetchErr) {
-              console.warn(`Attempt ${attempt + 1} to fetch backtest result:`, fetchErr)
-            }
-            if (attempt < 4) {
-              await new Promise(r => setTimeout(r, 1200))
+            } catch {
+              if (attempt < 2) {
+                await new Promise(r => setTimeout(r, 1000))
+              }
             }
           }
-          if (finalResult && isRealResult(finalResult)) {
+          if (finalResult) {
             setResult(finalResult)
-            setError(null)
-          } else {
-            setError('Backtest completed, but final results could not be parsed from server.')
           }
           setRunning(false)
           setProgress(null)
@@ -372,18 +343,8 @@ export default function Backtest() {
         <div className="flex flex-wrap items-center gap-3">
           <button onClick={handleRun} disabled={running || selectedSymbols.length === 0}
             className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors">
-            {running ? (
-              <>
-                <RefreshCw size={14} className="animate-spin" />
-                <span>
-                  {jobStatus?.progress_percent !== undefined && jobStatus.progress_percent > 0
-                    ? `Running backtest... (${Math.round(jobStatus.progress_percent)}%)`
-                    : 'Running backtest...'}
-                </span>
-              </>
-            ) : (
-              <><Play size={14} /> Run Backtest</>
-            )}
+            {running ? <><RefreshCw size={14} className="animate-spin" /> Running backtest...</>
+                     : <><Play size={14} /> Run Backtest</>}
           </button>
 
           {running && taskId && (

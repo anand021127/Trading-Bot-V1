@@ -517,6 +517,96 @@ class UpstoxClient:
         upcoming = [e for e in expiries if e >= today]
         return upcoming[0] if upcoming else None
 
+    def _fetch_option_chain_raw(self, underlying_symbol: str, expiry_date: str) -> List[Dict[str, Any]]:
+        """Raw Upstox `/option/chain` response rows, unparsed. Shared by
+        `get_option_chain()` and `get_option_chain_with_spot()` so both
+        parse from a single real fetch rather than hitting the endpoint
+        twice for the same data."""
+        instrument_key = self._resolve_key(underlying_symbol)
+        data = self._get("/option/chain", params={
+            "instrument_key": instrument_key,
+            "expiry_date": expiry_date,
+        })
+        return data.get("data", [])
+
+    def _parse_chain_contracts(self, raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        contracts: List[Dict[str, Any]] = []
+        for row in raw_rows:
+            strike = row.get("strike_price")
+            for opt_type, key_field in (("CE", "call_options"), ("PE", "put_options")):
+                opt = row.get(key_field)
+                if not opt:
+                    continue
+                market_data = opt.get("market_data", {}) or {}
+                greeks = opt.get("option_greeks", {}) or {}
+                contract = {
+                    "strike": float(strike) if strike is not None else None,
+                    "option_type": opt_type,
+                    "instrument_key": opt.get("instrument_key"),
+                    "ltp": market_data.get("ltp"),
+                    "close_price": market_data.get("close_price"),
+                    "volume": market_data.get("volume"),
+                    "oi": market_data.get("oi"),
+                    "oi_change": market_data.get("oi_change"),
+                    "bid_price": market_data.get("bid_price"),
+                    "ask_price": market_data.get("ask_price"),
+                    "iv": greeks.get("iv"),
+                    "delta": greeks.get("delta"),
+                    "theta": greeks.get("theta"),
+                    "gamma": greeks.get("gamma"),
+                    "vega": greeks.get("vega"),
+                    "lot_size": opt.get("lot_size") or row.get("lot_size"),
+                    "freeze_quantity": opt.get("freeze_quantity") or row.get("freeze_quantity"),
+                }
+                if contract["instrument_key"]:
+                    from backend.broker.instrument_master import get_instrument_metadata
+                    metadata = get_instrument_metadata(contract["instrument_key"])
+                    contract["lot_size"] = contract["lot_size"] or metadata.get("lot_size")
+                    contract["freeze_quantity"] = contract["freeze_quantity"] or metadata.get("freeze_quantity")
+                contracts.append(contract)
+        return contracts
+
+    @staticmethod
+    def _extract_underlying_spot(raw_rows: List[Dict[str, Any]]) -> Optional[float]:
+        """Upstox's `/option/chain` response repeats `underlying_spot_price`
+        on every row — a real, live spot quote that `get_option_chain()`
+        was previously discarding entirely. Used as a fallback when
+        `get_multiple_quotes()` returns 0.0/no-data for an index symbol
+        (a real, observed gap for at least NIFTY50 — see
+        get_option_chain_with_spot's docstring)."""
+        for row in raw_rows:
+            val = row.get("underlying_spot_price")
+            if val is not None:
+                try:
+                    f = float(val)
+                    if f > 0:
+                        return f
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    def get_option_chain_with_spot(
+        self, underlying_symbol: str, expiry_date: str,
+    ) -> Tuple[List[Dict[str, Any]], Optional[float]]:
+        """Same contracts as get_option_chain(), PLUS the real
+        `underlying_spot_price` Upstox includes on every chain row —
+        needed because `get_multiple_quotes()` has been observed
+        returning `ltp=0.0/has_data=False` for at least NIFTY50 (likely
+        an index-symbol quote-endpoint quirk, not something this client
+        can fix at the quotes endpoint itself), which previously made
+        ATM contract selection fail outright even though a live spot
+        price was available right there in the chain response the
+        strategy had already fetched. One real fetch; never fabricated —
+        returns (contracts, None) if the API call itself fails."""
+        try:
+            raw_rows = self._fetch_option_chain_raw(underlying_symbol, expiry_date)
+        except UpstoxAPIError as e:
+            logger.error("Option chain fetch failed for %s (%s): %s", underlying_symbol, expiry_date, e)
+            raise
+        except Exception as e:
+            raise UpstoxAPIError(500, str(e))
+        return self._parse_chain_contracts(raw_rows), self._extract_underlying_spot(raw_rows)
+
     def get_option_chain(self, underlying_symbol: str, expiry_date: str) -> List[Dict[str, Any]]:
         """
         Fetch the option chain for a supported index underlying and expiry.
@@ -534,49 +624,14 @@ class UpstoxClient:
         fabricated contracts — an API failure raises UpstoxAPIError, and the
         caller (OptionPremiumStrategy) treats an empty chain as "contract not
         resolved," not as a signal to trade.
+
+        Kept for backward compatibility with existing callers/tests that
+        only need contracts — see get_option_chain_with_spot() for the
+        version that also returns the real underlying spot price.
         """
-        instrument_key = self._resolve_key(underlying_symbol)
         try:
-            data = self._get("/option/chain", params={
-                "instrument_key": instrument_key,
-                "expiry_date": expiry_date,
-            })
-            raw = data.get("data", [])
-            contracts: List[Dict[str, Any]] = []
-            for row in raw:
-                strike = row.get("strike_price")
-                for opt_type, key_field in (("CE", "call_options"), ("PE", "put_options")):
-                    opt = row.get(key_field)
-                    if not opt:
-                        continue
-                    market_data = opt.get("market_data", {}) or {}
-                    greeks = opt.get("option_greeks", {}) or {}
-                    contract = {
-                        "strike": float(strike) if strike is not None else None,
-                        "option_type": opt_type,
-                        "instrument_key": opt.get("instrument_key"),
-                        "ltp": market_data.get("ltp"),
-                        "close_price": market_data.get("close_price"),
-                        "volume": market_data.get("volume"),
-                        "oi": market_data.get("oi"),
-                        "oi_change": market_data.get("oi_change"),
-                        "bid_price": market_data.get("bid_price"),
-                        "ask_price": market_data.get("ask_price"),
-                        "iv": greeks.get("iv"),
-                        "delta": greeks.get("delta"),
-                        "theta": greeks.get("theta"),
-                        "gamma": greeks.get("gamma"),
-                        "vega": greeks.get("vega"),
-                        "lot_size": opt.get("lot_size") or row.get("lot_size"),
-                        "freeze_quantity": opt.get("freeze_quantity") or row.get("freeze_quantity"),
-                    }
-                    if contract["instrument_key"]:
-                        from backend.broker.instrument_master import get_instrument_metadata
-                        metadata = get_instrument_metadata(contract["instrument_key"])
-                        contract["lot_size"] = contract["lot_size"] or metadata.get("lot_size")
-                        contract["freeze_quantity"] = contract["freeze_quantity"] or metadata.get("freeze_quantity")
-                    contracts.append(contract)
-            return contracts
+            raw_rows = self._fetch_option_chain_raw(underlying_symbol, expiry_date)
+            return self._parse_chain_contracts(raw_rows)
         except UpstoxAPIError as e:
             logger.error("Option chain fetch failed for %s (%s): %s", underlying_symbol, expiry_date, e)
             raise

@@ -27,13 +27,40 @@ class DiagnosticRow:
 
 
 def _row_from_health_component(name: str, comp: Any) -> DiagnosticRow:
+    """Maps HealthMonitor's REAL ComponentStatus vocabulary (STARTING /
+    RUNNING / DEGRADED / PAUSED / RECONNECTING / STOPPED / FAILED /
+    UNKNOWN — see backend/health/health_monitor.py's own docstring) onto
+    this diagnostics report's OK/DEGRADED/ERROR/UNKNOWN vocabulary.
+
+    ROOT CAUSE this fixes (Issue 3): the previous version only accepted
+    the literal strings "OK"/"DEGRADED"/"ERROR" and silently downgraded
+    everything else — including "RUNNING", HealthMonitor's actual
+    healthy-and-normal status — to "UNKNOWN". A component that was
+    genuinely fine was being reported as unverifiable, which is worse
+    than useless: it looks exactly like a real problem in the UI."""
     try:
         d = comp.to_dict() if hasattr(comp, "to_dict") else dict(comp)
     except Exception as e:
         return DiagnosticRow(name, "UNKNOWN", "", f"Could not read component state: {e}", "MEDIUM",
                               "Investigate why this component's status can't be read.")
     status_raw = str(d.get("status", "unknown")).upper()
-    status = status_raw if status_raw in ("OK", "DEGRADED", "ERROR") else "UNKNOWN"
+
+    # RUNNING is HealthMonitor's actual "healthy" value — PAUSED and
+    # STOPPED are intentional, non-error states (e.g. outside market
+    # hours) and are reported as OK too, just with the real reason
+    # visible in `evidence` so an operator can tell "paused on purpose"
+    # from "silently fine."
+    if status_raw in ("RUNNING", "OK"):
+        status = "OK"
+    elif status_raw in ("DEGRADED", "RECONNECTING", "STARTING"):
+        status = "DEGRADED"
+    elif status_raw in ("FAILED", "ERROR"):
+        status = "ERROR"
+    elif status_raw in ("PAUSED", "STOPPED"):
+        status = "OK"  # intentional state, not a problem
+    else:
+        status = "UNKNOWN"  # only when genuinely unrecognized/no heartbeat
+
     problem = "" if status == "OK" else (d.get("last_error") or f"Component reported status={status_raw}.")
     severity = {"OK": "NONE", "DEGRADED": "MEDIUM", "ERROR": "HIGH", "UNKNOWN": "MEDIUM"}[status]
     action = "" if status == "OK" else "Check component logs and recent errors; restart if the process supports it."
@@ -276,11 +303,19 @@ def run_full_diagnostics(tools: Any) -> Dict[str, Any]:
         rows.append(DiagnosticRow("recent_errors", "UNKNOWN", "", errors.get("reason", ""), "LOW",
                                    "No error log found — this may be expected if none have occurred yet."))
 
+    # ISSUE 3 fix: UNKNOWN ("can't verify") is not the same as DEGRADED
+    # ("verified and it has a real problem") — conflating them meant a
+    # handful of unattached-in-this-context components (normal in a test
+    # or partial-wiring context) made the WHOLE bot look degraded even
+    # when everything actually running was healthy. Overall status now
+    # only degrades on a genuinely-verified problem.
     overall = "OK"
     if any(r.status == "ERROR" for r in rows):
         overall = "ERROR"
-    elif any(r.status in ("DEGRADED", "UNKNOWN") for r in rows):
+    elif any(r.status == "DEGRADED" for r in rows):
         overall = "DEGRADED"
+    elif any(r.status == "UNKNOWN" for r in rows):
+        overall = "UNKNOWN"
 
     return {
         "available": True,

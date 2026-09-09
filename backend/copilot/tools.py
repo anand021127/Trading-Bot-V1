@@ -15,12 +15,78 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 
 def _unavailable(reason: str) -> Dict[str, Any]:
     return {"available": False, "reason": reason}
+
+
+def _interval_seconds(timeframe: str) -> int:
+    """Seconds in one candle of `timeframe`, reusing the same interval
+    vocabulary as backend/broker/upstox_client.py's V3_INTERVAL_MAP
+    rather than a second mapping. Defaults to 300s (5min) if unrecognized
+    — the most common case in this codebase — rather than raising."""
+    try:
+        from backend.broker.upstox_client import V3_INTERVAL_MAP
+        unit, count = V3_INTERVAL_MAP.get(timeframe.lower(), ("minutes", 5))
+        seconds_per_unit = {"minutes": 60, "days": 86400, "weeks": 604800}.get(unit, 60)
+        return count * seconds_per_unit
+    except Exception:
+        return 300
+
+
+def _classify_candle_freshness(
+    candle_timestamp: Optional[str], interval_seconds: int, max_stale_buffer_seconds: float,
+) -> Dict[str, Any]:
+    """PHASE freshness fix (see docs/COPILOT.md — false STALE warning):
+    candle timestamps are the START of the interval, not a point-in-time
+    snapshot. A 5-min candle stamped 15:00 legitimately covers 15:00-15:05
+    — comparing `now - 15:00` against a flat 120s threshold would (and
+    did) misclassify the still-forming active candle as stale within its
+    own first 2 minutes.
+
+    Correct model: compute the candle's CLOSE time (start + interval).
+      - now < close_time            -> "LIVE"    (actively forming candle)
+      - close_time <= now < close_time + buffer -> "CURRENT" (just closed,
+        the next candle hasn't posted yet — normal, not stale)
+      - now >= close_time + buffer  -> "STALE"   (a new candle should
+        have appeared by now and didn't — genuinely old data, including
+        yesterday's/previous-session candles during a live session)
+
+    Both LIVE and CURRENT are tradeable; only STALE blocks a decision.
+    `max_stale_buffer_seconds` is the grace period after a candle's own
+    close before it's considered stale (independent of
+    COPILOT_MAX_CANDLE_AGE_SECONDS, which now means "grace after candle
+    close," not "grace after candle start")."""
+    if not candle_timestamp:
+        return {"data_status": "UNKNOWN", "data_age_seconds": None, "candle_close_time": None}
+    try:
+        start = datetime.fromisoformat(candle_timestamp)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+    except Exception:
+        return {"data_status": "UNKNOWN", "data_age_seconds": None, "candle_close_time": None}
+
+    now = datetime.now(timezone.utc)
+    close_time = start + timedelta(seconds=interval_seconds)
+    age_from_start = (now - start).total_seconds()
+    age_from_close = (now - close_time).total_seconds()
+
+    if now < close_time:
+        status = "LIVE"
+    elif age_from_close < max_stale_buffer_seconds:
+        status = "CURRENT"
+    else:
+        status = "STALE"
+
+    return {
+        "data_status": status,
+        "data_age_seconds": round(age_from_start, 1),
+        "candle_close_time": close_time.isoformat(),
+        "age_from_close_seconds": round(age_from_close, 1),
+    }
 
 
 class CopilotTools:
@@ -97,23 +163,10 @@ class CopilotTools:
             return _unavailable(f"Broker returned no candles for {symbol} ({timeframe}).")
 
         last_ts = candles[-1].get("timestamp")
-        age_seconds = None
-        try:
-            ts = datetime.fromisoformat(last_ts)
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            age_seconds = (datetime.now(timezone.utc) - ts).total_seconds()
-        except Exception:
-            pass
-
+        interval_s = _interval_seconds(timeframe)
         from backend.copilot.config import load_copilot_settings
         max_age = load_copilot_settings().max_candle_age_seconds
-        if age_seconds is None:
-            data_status = "UNKNOWN"
-        elif age_seconds <= max_age:
-            data_status = "LIVE"
-        else:
-            data_status = "STALE"
+        fresh = _classify_candle_freshness(last_ts, interval_s, max_age)
 
         return {
             "available": True,
@@ -124,8 +177,9 @@ class CopilotTools:
             "candle_count": len(candles),
             "candle_timestamp": last_ts,
             "last_candle_timestamp": last_ts,  # kept for backward compatibility with earlier callers
-            "data_age_seconds": age_seconds,
-            "data_status": data_status,
+            "data_age_seconds": fresh["data_age_seconds"],
+            "data_status": fresh["data_status"],  # "LIVE" | "CURRENT" | "STALE" | "UNKNOWN"
+            "candle_close_time": fresh.get("candle_close_time"),
             "max_age_seconds": max_age,
         }
 

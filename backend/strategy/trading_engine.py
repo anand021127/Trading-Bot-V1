@@ -575,18 +575,36 @@ class TradingEngine:
             underlying_trend = self.detect_underlying_trend(underlying_symbol)
 
         try:
-            chain = self.client.get_option_chain(underlying_symbol, expiry_date)
+            chain, chain_underlying_spot = self.client.get_option_chain_with_spot(underlying_symbol, expiry_date)
         except Exception as e:
             TradeLogger.log_error("TradingEngine.evaluate_option_premium", e,
                                    {"symbol": underlying_symbol})
-            chain = []
+            chain, chain_underlying_spot = [], None
 
+        # Spot resolution, in order of preference:
+        #   1. The normal live quote (get_multiple_quotes) — the everyday path.
+        #   2. If that's missing/zero/invalid, fall back to the REAL
+        #      underlying_spot_price Upstox already returned on the option
+        #      chain response above (observed gap: get_multiple_quotes can
+        #      return ltp=0.0/has_data=False for at least NIFTY50). This is
+        #      never a hardcoded price and never a stale historical close —
+        #      it's the same live chain fetch that just resolved `chain`.
+        #   3. If BOTH are unavailable, spot stays None and contract
+        #      selection below correctly returns "no trade" rather than
+        #      guessing a price.
         spot = None
+        spot_source = None
         try:
             spot_quotes = self.client.get_multiple_quotes([underlying_symbol])
-            spot = spot_quotes.get(underlying_symbol, {}).get("ltp")
+            candidate = spot_quotes.get(underlying_symbol, {}).get("ltp")
+            if candidate:
+                spot = float(candidate)
+                spot_source = "live_quote"
         except Exception:
             pass
+        if not spot and chain_underlying_spot:
+            spot = chain_underlying_spot
+            spot_source = "option_chain_underlying_spot_price"
 
         strat = next(
             (s for s in self.strategy_engine.strategies if s.name == "OPTION_PREMIUM"), None
@@ -603,8 +621,13 @@ class TradingEngine:
         contract = strat.select_contract(context)
         if contract is None or not contract.get("instrument_key"):
             sig = StrategySignal(strategy_name="OPTION_PREMIUM", symbol=underlying_symbol)
-            sig.rejected_reasons = ["Could not resolve ATM contract from live option chain/spot"]
-            sig.entry_reason = "NO TRADE — " + sig.rejected_reasons[0]
+            if spot is None:
+                reason = ("Could not resolve ATM contract: no valid underlying spot price available "
+                          "from either the live quote or the option chain's underlying_spot_price.")
+            else:
+                reason = f"Could not resolve ATM contract from live option-chain spot data (spot={spot}, source={spot_source})."
+            sig.rejected_reasons = [reason]
+            sig.entry_reason = "NO TRADE — " + reason
             return sig
 
         try:

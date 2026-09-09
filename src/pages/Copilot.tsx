@@ -46,6 +46,7 @@ interface TradePlanResult {
     risk_reward: number | null
     open_interest: number | null
     spread_pct: number | null
+    analysis_timestamp?: string
   } | null
   validation?: { approved: boolean; reasons_rejected: string[] } | null
 }
@@ -78,6 +79,15 @@ export default function Copilot() {
   const [chatLoading, setChatLoading] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  // ISSUE 4 fix: both the manual "Analyze" button and the 10s poll call
+  // the same trade-plan endpoint independently. Without sequencing, a
+  // slower OLDER request can resolve AFTER a newer one and overwrite
+  // fresher state with stale data (the reported "confidence keeps
+  // flipping" symptom). requestIdRef guarantees only the response to the
+  // most-recently-ISSUED request is ever applied, regardless of which
+  // network call happens to complete first.
+  const requestIdRef = useRef(0)
+
   useEffect(() => {
     api.get<CopilotStatus>('/api/copilot/status').then(r => setStatus(r.data)).catch(() => setStatus(null))
   }, [])
@@ -86,29 +96,44 @@ export default function Copilot() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
 
+  async function fetchPlanFor(sym: string) {
+    const myId = ++requestIdRef.current
+    try {
+      const r = await api.post<TradePlanResult>('/api/copilot/trade-plan', { symbol: sym })
+      if (myId === requestIdRef.current) {
+        setPlan(r.data)
+        setLastUpdated(new Date())
+      }
+      // else: a newer request has since been issued — this response is
+      // stale and is deliberately discarded, not applied.
+    } catch {
+      if (myId === requestIdRef.current) {
+        setPlan({ available: false, reason: 'Request failed — is the Copilot enabled and the backend reachable?' })
+      }
+    }
+  }
+
   async function refreshPlan() {
     setPlanLoading(true)
-    try {
-      const r = await api.post<TradePlanResult>('/api/copilot/trade-plan', { symbol })
-      setPlan(r.data)
-    } catch {
-      setPlan({ available: false, reason: 'Request failed — is the Copilot enabled and the backend reachable?' })
-    } finally {
-      setPlanLoading(false)
-    }
+    await fetchPlanFor(symbol)
+    setPlanLoading(false)
   }
 
   // Sensible, non-excessive auto-refresh — same 10s cadence as the
   // Overview page (a state-summary page, not a fast tape like Scanner's
   // 4s). Pulls the current TradePlan, open positions, and bot health
   // together so "last update time" reflects one consistent snapshot.
+  // Uses the SAME sequencing guard as the manual Analyze button, since
+  // both write to the same `plan` state.
   usePolling(async () => {
     try {
+      const myId = ++requestIdRef.current
       const [planRes, posRes, diagRes] = await Promise.all([
         api.post<TradePlanResult>('/api/copilot/trade-plan', { symbol }).catch(() => null),
         api.get('/api/copilot/positions').catch(() => null),
         api.get('/api/copilot/diagnostics').catch(() => null),
       ])
+      if (myId !== requestIdRef.current) return  // superseded by a newer request — discard
       if (planRes) setPlan(planRes.data)
       if (posRes) setPositions(posRes.data)
       if (diagRes) setHealth(diagRes.data)
@@ -192,6 +217,13 @@ export default function Copilot() {
           </div>
           {plan && <DecisionBadge decision={plan.decision} />}
         </div>
+
+        {(analysis?.candle_timestamp || tp?.analysis_timestamp) && (
+          <div className="text-[10px] text-slate-600 flex gap-3">
+            {tp?.analysis_timestamp && <span>Analysis: {new Date(tp.analysis_timestamp).toLocaleTimeString()}</span>}
+            {analysis?.candle_timestamp && <span>Data: {new Date(analysis.candle_timestamp).toLocaleTimeString()}</span>}
+          </div>
+        )}
 
         {plan && !plan.available && (
           <div className="text-xs text-slate-500">{plan.reason || 'Not available.'}</div>

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
-import api, { buildWsUrl } from '../api/client'
+import api from '../api/client'
 
 export type ConnectionState =
   | 'CONNECTED'
@@ -42,6 +42,15 @@ function checkIsMarketOpen(): boolean {
   const minutes = istTime.getMinutes()
   const totalMin = hours * 60 + minutes
   return totalMin >= 9 * 60 + 15 && totalMin <= 15 * 60 + 30
+}
+
+function buildWsUrl(): string {
+  const raw = import.meta.env.VITE_BACKEND_URL?.replace(/\/+$/, '') ?? ''
+  if (raw) {
+    return raw.replace(/^https/, 'wss').replace(/^http/, 'ws') + '/api/ws'
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  return `${proto}://${window.location.host}/api/ws`
 }
 
 export function ConnectionProvider({ children }: { children: React.ReactNode }) {

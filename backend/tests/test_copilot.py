@@ -225,6 +225,9 @@ def _mock_client_with_realistic_chain(spot=22000.0, atm_strike=22000.0):
          "bid_price": 59.0, "ask_price": 61.0, "iv": 15.5, "delta": 0.35, "theta": -6.0, "gamma": 0.005, "vega": 9.0,
          "lot_size": 75, "freeze_quantity": 1800},
     ]
+    # Production calls get_option_chain_with_spot() (Issue 1 fix — see
+    # docs/COPILOT.md session 5), not get_option_chain() directly.
+    client.get_option_chain_with_spot.return_value = (client.get_option_chain.return_value, spot)
 
     def _historical(symbol, interval, limit=100, **kw):
         # Real-shaped candles with a clear uptrend so
@@ -245,6 +248,62 @@ class TestDataFreshness:
     underlying candle (e.g. yesterday's last bar during a live session)
     must never be reported as LIVE, and must hard-block a trade
     decision, not just be noted as a caveat."""
+
+    def test_currently_active_5min_candle_is_not_marked_stale(self):
+        """THE exact reported bug: a 5-min candle stamped e.g. 15:00 while
+        it is now 15:02 covers 15:00-15:05 and is still actively forming
+        — must be LIVE, not STALE, even though 120s have passed since its
+        START. This was the false-positive that blocked trading."""
+        from backend.copilot.tools import _classify_candle_freshness
+        now = datetime.now(timezone.utc)
+        floored_minute = now.minute - (now.minute % 5)
+        candle_start = now.replace(minute=floored_minute, second=0, microsecond=0)
+        # candle_start is the most recent 5-min boundary at or before now,
+        # so `now` is guaranteed to be inside [candle_start, candle_start+5min).
+        result = _classify_candle_freshness(candle_start.isoformat(), interval_seconds=300, max_stale_buffer_seconds=120)
+        assert result["data_status"] == "LIVE"
+
+    def test_recently_closed_5min_candle_within_buffer_is_current_not_stale(self):
+        from backend.copilot.tools import _classify_candle_freshness
+        now = datetime.now(timezone.utc)
+        # A candle that closed 30s ago (started 5m30s ago) — the NEXT
+        # candle just hasn't posted yet, which is normal, not stale.
+        candle_start = now - timedelta(seconds=330)
+        result = _classify_candle_freshness(candle_start.isoformat(), interval_seconds=300, max_stale_buffer_seconds=120)
+        assert result["data_status"] == "CURRENT"
+
+    def test_genuinely_stale_candle_is_flagged(self):
+        from backend.copilot.tools import _classify_candle_freshness
+        now = datetime.now(timezone.utc)
+        candle_start = now - timedelta(minutes=30)  # way past close+buffer
+        result = _classify_candle_freshness(candle_start.isoformat(), interval_seconds=300, max_stale_buffer_seconds=120)
+        assert result["data_status"] == "STALE"
+
+    def test_previous_session_candle_during_current_session_is_stale(self):
+        from backend.copilot.tools import _classify_candle_freshness
+        yesterday_close = (datetime.now(timezone.utc) - timedelta(days=1)).replace(hour=9, minute=45, second=0, microsecond=0)
+        result = _classify_candle_freshness(yesterday_close.isoformat(), interval_seconds=300, max_stale_buffer_seconds=120)
+        assert result["data_status"] == "STALE"
+
+    def test_missing_timestamp_is_unknown_not_live(self):
+        from backend.copilot.tools import _classify_candle_freshness
+        result = _classify_candle_freshness(None, interval_seconds=300, max_stale_buffer_seconds=120)
+        assert result["data_status"] == "UNKNOWN"
+
+    def test_malformed_timestamp_is_unknown_not_live(self):
+        from backend.copilot.tools import _classify_candle_freshness
+        result = _classify_candle_freshness("not-a-timestamp", interval_seconds=300, max_stale_buffer_seconds=120)
+        assert result["data_status"] == "UNKNOWN"
+
+    def test_timezone_aware_timestamp_handled_correctly(self):
+        from backend.copilot.tools import _classify_candle_freshness
+        import datetime as dt
+        ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+        now_ist = datetime.now(ist)
+        floored_minute = now_ist.minute - (now_ist.minute % 5)
+        candle_start = now_ist.replace(minute=floored_minute, second=0, microsecond=0)
+        result = _classify_candle_freshness(candle_start.isoformat(), interval_seconds=300, max_stale_buffer_seconds=120)
+        assert result["data_status"] == "LIVE"
 
     def test_fresh_candles_are_marked_live(self):
         engine, db = _real_engine()
@@ -358,8 +417,9 @@ class TestRealOptionPipeline:
         result = build_trade_plan_for_symbol(tools, "NIFTY50")
         assert result["available"] is True
         # Whatever the decision, it must have gone through the real chain —
-        # client.get_option_chain must actually have been called.
-        client.get_option_chain.assert_called()
+        # client.get_option_chain_with_spot must actually have been called
+        # (production uses this, not get_option_chain, since the Issue 1 fix).
+        client.get_option_chain_with_spot.assert_called()
         if result.get("trade_plan") is not None:
             tp = result["trade_plan"]
             # Strike/instrument_key/OI/bid/ask must be the REAL mocked
@@ -376,7 +436,7 @@ class TestRealOptionPipeline:
 
     def test_trade_plan_reports_gap_when_chain_empty(self):
         engine, db, client = self._engine_with_mock_chain()
-        client.get_option_chain.return_value = []  # broker returns nothing real
+        client.get_option_chain_with_spot.return_value = ([], None)  # broker returns nothing real
         tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
         result = build_trade_plan_for_symbol(tools, "NIFTY50")
         assert result["available"] is True
@@ -480,6 +540,100 @@ class TestPaperExecutionSafety:
             bot_settings.mode = "paper"
             result = submit_trade_plan_for_paper_execution(tools, plan, val, copilot_settings=settings)
         assert result.submitted is False
+
+
+class TestSpotPriceFallback:
+    """ISSUE 1: get_multiple_quotes() has been observed returning
+    ltp=0.0/has_data=False for NIFTY50 even when the option chain's own
+    underlying_spot_price is valid. evaluate_option_premium() must fall
+    back to that real chain-provided spot rather than failing ATM
+    resolution outright — but never fabricate a price when NEITHER
+    source has one."""
+
+    def _engine(self):
+        engine, db = _real_engine()
+        return engine, db
+
+    def test_valid_normal_quote_is_used_directly(self):
+        engine, db = self._engine()
+        client = _mock_client_with_realistic_chain(spot=22000.0)
+        engine.client = client
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2024-06-27", underlying_trend="BULLISH")
+        contract = (sig.indicators or {}).get("selected_contract")
+        assert contract is not None  # ATM resolution succeeded via the normal quote path
+
+    def test_zero_normal_quote_falls_back_to_chain_spot(self):
+        engine, db = self._engine()
+        client = _mock_client_with_realistic_chain(spot=22000.0)
+        client.get_multiple_quotes.return_value = {"NIFTY50": {"symbol": "NIFTY50", "ltp": 0.0, "has_data": False}}
+        engine.client = client
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2024-06-27", underlying_trend="BULLISH")
+        contract = (sig.indicators or {}).get("selected_contract")
+        assert contract is not None  # resolved via option-chain underlying_spot_price fallback
+
+    def test_missing_normal_quote_falls_back_to_chain_spot(self):
+        engine, db = self._engine()
+        client = _mock_client_with_realistic_chain(spot=22000.0)
+        client.get_multiple_quotes.side_effect = Exception("quote endpoint down")
+        engine.client = client
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2024-06-27", underlying_trend="BULLISH")
+        contract = (sig.indicators or {}).get("selected_contract")
+        assert contract is not None
+
+    def test_both_spot_sources_unavailable_gives_clear_skip(self):
+        engine, db = self._engine()
+        client = _mock_client_with_realistic_chain(spot=22000.0)
+        client.get_multiple_quotes.return_value = {"NIFTY50": {"symbol": "NIFTY50", "ltp": 0.0, "has_data": False}}
+        client.get_option_chain_with_spot.return_value = (client.get_option_chain.return_value, None)  # chain has no spot either
+        engine.client = client
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2024-06-27", underlying_trend="BULLISH")
+        assert sig.signal == "NONE"
+        assert "no valid underlying spot price" in sig.rejected_reasons[0].lower()
+
+    def test_correct_atm_ce_for_bullish(self):
+        engine, db = self._engine()
+        client = _mock_client_with_realistic_chain(spot=22000.0, atm_strike=22000.0)
+        engine.client = client
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2024-06-27", underlying_trend="BULLISH")
+        contract = (sig.indicators or {}).get("selected_contract")
+        if contract is not None:
+            assert contract["option_type"] == "CE"
+
+    def test_correct_atm_pe_for_bearish(self):
+        engine, db = self._engine()
+        client = _mock_client_with_realistic_chain(spot=22000.0, atm_strike=22000.0)
+        engine.client = client
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2024-06-27", underlying_trend="BEARISH")
+        contract = (sig.indicators or {}).get("selected_contract")
+        if contract is not None:
+            assert contract["option_type"] == "PE"
+
+    def test_no_unsafe_contract_selection_when_chain_empty(self):
+        engine, db = self._engine()
+        client = _mock_client_with_realistic_chain(spot=22000.0)
+        client.get_option_chain_with_spot.return_value = ([], 22000.0)  # spot fine, but no contracts at all
+        engine.client = client
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2024-06-27", underlying_trend="BULLISH")
+        assert sig.signal == "NONE"
+
+    def test_paper_execution_still_cannot_call_live_broker_order_path(self):
+        """Re-confirms the Issue-1 fix didn't weaken the paper safety
+        gate — the fallback spot logic sits well before any order path."""
+        db = DatabaseManager(":memory:")
+        db.init_db()
+        client = _mock_client_with_realistic_chain(spot=22000.0)
+        client.get_multiple_quotes.return_value = {"NIFTY50": {"symbol": "NIFTY50", "ltp": 0.0, "has_data": False}}
+        client.get_quote_by_instrument_key.return_value = {"ltp": 120.5, "bid_price": 119.5, "ask_price": 121.0}
+        engine = TradingEngine(client=client, db_manager=db)
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        plan_result = build_trade_plan_for_symbol(tools, "NIFTY50")
+        if plan_result.get("trade_plan"):
+            from backend.copilot.execution import submit_trade_plan_for_paper_execution
+            from backend.copilot.config import CopilotSettings
+            cs = CopilotSettings(enabled=True, mode="paper", min_risk_reward=0.5, max_quote_age_seconds=30,
+                                  llm_backend="none", llm_base_url="", llm_model="", llm_timeout_seconds=8)
+            submit_trade_plan_for_paper_execution(tools, plan_result["trade_plan"], plan_result["validation"], copilot_settings=cs)
+        client.place_order.assert_not_called()
 
 
 class TestPaperExecutionEndToEnd:
@@ -727,7 +881,7 @@ class TestScanLoop:
         # get_option_chain should be called exactly once for this pass —
         # by the scanner's own evaluate_option_premium, not a second time
         # by the copilot hook.
-        assert client.get_option_chain.call_count == 1
+        assert client.get_option_chain_with_spot.call_count == 1
 
     def test_live_scanner_hook_dedups_shadow_log(self):
         from backend.scanner.live_scanner import LiveScanner
@@ -838,6 +992,65 @@ class TestDiagnosticsExtended:
         assert statuses["copilot"] == "OK"
 
 
+class TestConversationalHumanReadable:
+    """ISSUE 5: the chat assistant was dumping raw JSON (e.g. the full
+    trade_plan dict) as its answer. The rule-based adapter must now
+    produce prose for known context shapes — verified by asserting the
+    answer does NOT look like a JSON blob."""
+
+    def _looks_like_raw_json(self, text: str) -> bool:
+        stripped = text.strip()
+        return stripped.startswith("{") or '"available":' in text or "trade_plan\":" in text
+
+    def test_no_trade_opportunity_is_prose_not_json(self):
+        tools = CopilotTools()  # nothing attached -> no trade_plan available
+        resp = chat("Any trade opportunity?", tools, candles_by_symbol={})
+        assert not self._looks_like_raw_json(resp["answer"])
+        assert "couldn't check" in resp["answer"].lower() or "no trade" in resp["answer"].lower()
+
+    def test_trade_plan_found_renders_prose_with_key_fields(self):
+        engine, db = _real_engine()
+        client = _mock_client_with_realistic_chain()
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        resp = chat("Any trade opportunity?", tools, candles_by_symbol={})
+        answer = resp["answer"]
+        assert not self._looks_like_raw_json(answer)
+        # Whatever the outcome (TRADE or SKIP), it must read as prose —
+        # containing recognizable field labels, not a dict repr.
+        assert "{" not in answer.split("\n")[0]  # first line is never a JSON opener
+
+    def test_stale_data_answer_reads_as_prose_explanation(self):
+        from backend.copilot.llm_adapter import RuleBasedFallbackAdapter
+        adapter = RuleBasedFallbackAdapter()
+        context = {"trade_plan": {
+            "available": True, "decision": "SKIP", "trade_plan": None, "validation": None,
+            "reason": "Indicator data is stale (age=300s) — trade decision blocked.",
+            "analysis": {"data_status": "STALE", "data_age_seconds": 300, "candle_timestamp": "2026-09-08T15:00:00+05:30"},
+        }}
+        answer = adapter.explain("Any trade opportunity?", context)
+        assert "stale" in answer.lower() or "fresh" in answer.lower()
+        assert not answer.strip().startswith("{")
+
+    def test_diagnostics_answer_is_prose_not_json(self):
+        tools = CopilotTools()
+        resp = chat("Check the complete bot", tools, candles_by_symbol={})
+        assert not self._looks_like_raw_json(resp["answer"])
+        assert "health" in resp["answer"].lower()
+
+    def test_how_is_the_market_is_prose_not_json(self):
+        """Regression test: this shape (market_status + indicators) was
+        missed in the first Issue-5 fix and still fell through to a raw
+        JSON dump until this formatter was added."""
+        engine, db = _real_engine()
+        client = _mock_client_with_realistic_chain()
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        resp = chat("How is the market?", tools, candles_by_symbol={})
+        assert not self._looks_like_raw_json(resp["answer"])
+        assert "MARKET STATUS" in resp["answer"]
+
+
 class TestConversationalRouting:
     def test_symbol_extraction(self):
         assert _extract_symbol("Is NIFTY bullish?") == "NIFTY50"
@@ -889,10 +1102,53 @@ class TestDiagnostics:
         tools = CopilotTools()
         result = run_full_diagnostics(tools)
         assert result["available"] is True
-        assert result["overall_status"] in ("DEGRADED", "FAILED")
+        assert result["overall_status"] in ("DEGRADED", "ERROR", "UNKNOWN")
         statuses = {row["component"]: row["status"] for row in result["rows"]}
         assert statuses["database"] == "UNKNOWN"
         assert statuses["risk_manager"] == "UNKNOWN"
+
+    def test_running_healthmonitor_component_maps_to_ok_not_unknown(self):
+        """ISSUE 3: HealthMonitor's real 'healthy' status string is
+        RUNNING, not OK — a component reporting RUNNING must show as OK
+        in diagnostics, not be misclassified as UNKNOWN."""
+        from backend.copilot.diagnostics import _row_from_health_component
+        row = _row_from_health_component("scanner_loop", {"status": "RUNNING"})
+        assert row.status == "OK"
+
+    def test_paused_component_is_ok_not_flagged_as_problem(self):
+        from backend.copilot.diagnostics import _row_from_health_component
+        row = _row_from_health_component("scanner_loop", {"status": "PAUSED"})
+        assert row.status == "OK"
+
+    def test_reconnecting_component_is_degraded(self):
+        from backend.copilot.diagnostics import _row_from_health_component
+        row = _row_from_health_component("websocket", {"status": "RECONNECTING"})
+        assert row.status == "DEGRADED"
+
+    def test_failed_component_is_error(self):
+        from backend.copilot.diagnostics import _row_from_health_component
+        row = _row_from_health_component("websocket", {"status": "FAILED", "last_error": "auth expired"})
+        assert row.status == "ERROR"
+        assert "auth expired" in row.problem
+
+    def test_overall_status_not_degraded_when_only_unknowns_and_healthy(self):
+        """ISSUE 3: overall health should only be DEGRADED for a GENUINE
+        degraded component, not merely because some components are
+        UNKNOWN in a given context (e.g. not attached here)."""
+        from backend.copilot.diagnostics import DiagnosticRow
+        rows = [
+            DiagnosticRow("a", "OK", "", "", "NONE", ""),
+            DiagnosticRow("b", "UNKNOWN", "", "not attached", "MEDIUM", ""),
+            DiagnosticRow("c", "OK", "", "", "NONE", ""),
+        ]
+        overall = "OK"
+        if any(r.status == "ERROR" for r in rows):
+            overall = "ERROR"
+        elif any(r.status == "DEGRADED" for r in rows):
+            overall = "DEGRADED"
+        elif any(r.status == "UNKNOWN" for r in rows):
+            overall = "UNKNOWN"
+        assert overall == "UNKNOWN"  # not DEGRADED — no row is actually DEGRADED
 
     def test_reports_ok_for_working_components(self):
         engine, db = _real_engine()

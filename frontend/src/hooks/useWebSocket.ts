@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { buildWsUrl } from '../api/client'
 
 export type WsStatus = 'connecting' | 'connected' | 'error' | 'closed'
+
+// Build WebSocket URL from the backend URL env var
+function buildWsUrl(): string {
+  const raw = import.meta.env.VITE_BACKEND_URL?.replace(/\/+$/, '') ?? ''
+  if (raw) {
+    return raw.replace(/^https/, 'wss').replace(/^http/, 'ws') + '/api/ws'
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  return `${proto}://${window.location.host}/api/ws`
+}
 
 const WS_URL = buildWsUrl()
 

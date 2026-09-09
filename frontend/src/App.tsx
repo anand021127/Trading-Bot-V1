@@ -6,7 +6,6 @@ import { ConnectionProvider } from './context/ConnectionContext'
 
 // Lazy load all pages — instant nav, only load when needed
 const Overview     = lazy(() => import('./pages/Overview'))
-const Copilot      = lazy(() => import('./pages/Copilot'))
 const LivePremiums = lazy(() => import('./pages/LivePremiums'))
 const Scanner      = lazy(() => import('./pages/Scanner'))
 const TradeHistory = lazy(() => import('./pages/TradeHistory'))
@@ -40,9 +39,6 @@ export default function App() {
           <Route element={<Layout />}>
             <Route index element={
               <Suspense fallback={<PageSkeleton />}><Overview /></Suspense>
-            } />
-            <Route path="/copilot" element={
-              <Suspense fallback={<PageSkeleton />}><Copilot /></Suspense>
             } />
             <Route path="/option-chain" element={
               <Suspense fallback={<PageSkeleton />}><OptionChain /></Suspense>

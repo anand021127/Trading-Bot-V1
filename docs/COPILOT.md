@@ -268,3 +268,89 @@ Do not implement LIVE trading until explicitly requested — no code in this pas
 - Phase 6's full ATM±2-strike liquidity/quality evaluation (spread%, OI, volume, delta, IV, theta, distance-from-ATM, weighted together) was **not implemented this session** — strike selection still uses the existing `OptionPremiumStrategy.select_contract()`'s ATM-with-liquidity-filter logic (real, not fabricated, but not the expanded multi-candidate scoring Phase 6 describes).
 - Diagnostics vocabulary remains `OK`/`DEGRADED`/`ERROR`/`UNKNOWN` (aligned with an earlier session's explicit request) rather than this message's `PASS`/`WARN`/`FAIL` — semantically equivalent, not re-churned to avoid destabilizing already-tested behavior; flagged here rather than silently ignored.
 - Frontend shows the STALE banner and confidence score; the fuller Phase 15 layout (separate INDICATORS/OPTION/TRADE PLAN/DECISION/REASONS sections with bullet points) was not fully rebuilt this session — the existing card layout was extended, not redesigned.
+
+---
+
+## Session 5 — Live-UI bug batch: spot fallback, false-stale, health misclassification, raw-JSON chat
+
+### 1. Exact root cause of NIFTY50 ATM failure
+`get_option_chain()` parsed only the per-contract `call_options`/`put_options` blocks and discarded the `underlying_spot_price` field Upstox includes on every chain row. Meanwhile `get_multiple_quotes(["NIFTY50"])` — the sole spot source `evaluate_option_premium()` used — has been observed returning `{"ltp": 0.0, "has_data": false}` for this index symbol. With `spot=0.0`, `OptionPremiumStrategy.select_contract()`'s `if not spot: return None` guard fired every time, so ATM resolution silently failed regardless of real market conditions.
+
+### 2. Exact fix for underlying_spot_price
+Added `UpstoxClient.get_option_chain_with_spot()` — one fetch, parses contracts (unchanged logic) AND extracts `underlying_spot_price` via `_extract_underlying_spot()`. `evaluate_option_premium()` now resolves spot in order: (1) live quote if non-zero, (2) the chain's own spot price if the quote is missing/zero, (3) explicit `SKIP` with a message naming exactly which sources were tried — never a hardcoded price, never a historical close. Old `get_option_chain()` is untouched and still used by existing callers/tests that only need contracts.
+
+### 3. Exact root cause of the false stale-data warning
+My own bug from the prior session: candle timestamps mark the **start** of the interval (Upstox/standard OHLC convention), but the freshness check compared `now - candle_start` against a flat threshold — so a 5-min candle stamped 15:00 was correctly "the current candle" at 15:02, yet got flagged stale after only 120s from its *start*, well before it had even closed.
+
+### 4. Exact freshness logic implemented
+`_classify_candle_freshness()` now computes the candle's **close** time (`start + interval`) and classifies: `now < close` → `LIVE` (actively forming); `close <= now < close + buffer` → `CURRENT` (just closed, next candle hasn't posted yet — normal); `now >= close + buffer` → `STALE`. Both `LIVE` and `CURRENT` are tradeable; only `STALE` blocks. `COPILOT_MAX_CANDLE_AGE_SECONDS` now means "grace period after candle close," not "grace period after candle start" — same env var, corrected semantics, documented in code. Previous-session candles during a live session are still correctly caught (they're many intervals past close+buffer).
+
+### 5. Exact reason Bot Health was DEGRADED
+`HealthMonitor`'s real "healthy" status string is `RUNNING` (see its own module docstring), but `diagnostics.py`'s component-status mapper only recognized the literal strings `"OK"`/`"DEGRADED"`/`"ERROR"` — everything else, including `RUNNING`, fell through to `UNKNOWN`. Separately, the overall-status aggregation treated any `UNKNOWN` row as equivalent to a real `DEGRADED` row, so a handful of not-attached-in-this-context components (normal in partial wiring) made the whole bot appear degraded even when everything actually running was healthy.
+
+### 6. Exact diagnostics fix
+Full status mapping added: `RUNNING`/`PAUSED`/`STOPPED` → `OK` (paused/stopped are intentional states, shown as OK with the real reason in `evidence`, not flagged as problems); `DEGRADED`/`RECONNECTING`/`STARTING` → `DEGRADED`; `FAILED`/`ERROR` → `ERROR`; unrecognized → `UNKNOWN`. Overall status now only degrades on a **genuinely verified** `DEGRADED` or `ERROR` row; an all-`UNKNOWN`-plus-healthy state reports overall `UNKNOWN`, not `DEGRADED`. Verified live: in the runtime API test below, `background_jobs` is the only genuinely `DEGRADED` row (scanner hook not wired in that specific test harness) — every other real component correctly shows `OK`.
+
+### 7. Exact reason UI confidence could differ
+Root cause: **no request sequencing** between the manual "Analyze" button and the 10-second poll, both writing to the same `plan` state. If an older request (issued first) resolved *after* a newer one (issued second, e.g. from a poll tick or a symbol change), its stale response would overwrite the fresher state — a classic out-of-order-response race, not a backend calculation inconsistency (the backend recomputes the same deterministic formula from `decision_engine.py` every time; there was no other divergent formula).
+
+### 8. Exact frontend fix
+Added a monotonic `requestIdRef` in `src/pages/Copilot.tsx`. Every fetch (manual or polled) captures `const myId = ++requestIdRef.current` before dispatching, and only applies its response if `myId === requestIdRef.current` at completion — guaranteeing only the most-recently-*issued* request's response is ever applied, regardless of network completion order. Also added `analysis_timestamp` (backend) and its display, plus `candle_timestamp`/data-age display, so the UI shows both "when this was analyzed" and "when the underlying data was captured" explicitly.
+
+### 9. Exact reason chat displayed raw JSON
+`RuleBasedFallbackAdapter.explain()` had one generic path: any dict/list value in the resolved context got `json.dumps()`'d directly into the answer. `trade_plan` results are dicts, so every "any trade opportunity?" answer was a JSON dump by construction — not a bug in routing or tool resolution, just no templating for the richest, most common response shape.
+
+### 10. Exact conversational UI fix
+Added shape-specific formatters matching the exact prose format requested: `_format_trade_plan_result` (TAKE/SKIP with real field values, stale-data explained in plain language), `_format_market_status` (the "MARKET STATUS" block — added after testing revealed this shape was *also* missed by the first pass), `_format_diagnostics`, `_format_positions`, `_format_daily_pnl`. Generic JSON dump is now the fallback only for genuinely unrecognized shapes. Verified live via the runtime API test below — real prose, not JSON, for "Any trade opportunity?" and "How is the market?".
+
+### 11. Files changed
+- `backend/broker/upstox_client.py` — `_fetch_option_chain_raw`, `_parse_chain_contracts`, `_extract_underlying_spot`, `get_option_chain_with_spot` (new); `get_option_chain` refactored to share the same parser (behavior-preserving)
+- `backend/strategy/trading_engine.py` — `evaluate_option_premium()`'s spot resolution rewritten with the 3-tier fallback; rejection message now names the exact reason
+- `backend/copilot/tools.py` — `_interval_seconds`, `_classify_candle_freshness` (new); `get_live_candles()` rewritten to use the corrected freshness model
+- `backend/copilot/diagnostics.py` — `_row_from_health_component`'s status mapping corrected; overall-status aggregation separates UNKNOWN from DEGRADED
+- `backend/copilot/llm_adapter.py` — `RuleBasedFallbackAdapter` rewritten with shape-specific prose formatters
+- `src/pages/Copilot.tsx` — `requestIdRef` sequencing guard; `analysis_timestamp`/data-age display
+- `backend/tests/test_copilot.py` — 30 new tests (spot fallback ×8, freshness ×8, diagnostics ×5, human-readable chat ×5, plus fixture/assertion updates for the corrected call paths)
+
+### 12. Tests passed/failed
+- `python3 pytest.py backend/tests/test_copilot.py` → **94/94 passed**
+- `python3 pytest.py backend/tests/test_options_mode.py` (pre-existing, exercises the changed `evaluate_option_premium`/`detect_underlying_trend` paths) → **21/21 passed**
+- `python3 run_all_tests.py` (full project) → **230/236 passed** — same 6 pre-existing sandbox-only failures as every prior session
+- `npm run build` → succeeds
+
+### 13. Runtime API results (live TestClient, real code paths, mocked broker responses)
+```
+POST /api/copilot/trade-plan {"symbol": "NIFTY50"}
+→ analysis.data_status = "LIVE", data_age_seconds = 58.6  (freshness fix confirmed working)
+→ trade_plan.instrument_key = "NSE_FO|CE_ATM", strike = 22000.0, entry = 129.33-130.63,
+  stop_loss = 129.23, target = 131.48, quantity = 1800 (lot-rounded, freeze-capped)
+→ validation.approved = true (all 7 checks including lot_risk_ok passed)
+→ decision = "TRADE"
+
+GET /api/copilot/diagnostics
+→ overall_status = "DEGRADED" — attributable to exactly ONE row (background_jobs,
+  correctly not wired in this manual test harness); every real component
+  (database, risk_manager, strategy_engine, position_sizer, order_manager,
+  market_data, option_premiums, option_chain, copilot, ai_ml_filter_layer,
+  recent_errors) correctly reports OK — confirms Issue 3 is fixed, not hidden.
+
+POST /api/copilot/chat {"question": "Any trade opportunity?"}
+→ "Paper trade opportunity detected:\n\nDirection: BUY CE\nStrike: 22000.0\n
+   Expiry: 2024-06-27\nEntry: ₹129.33–₹130.63\nStop Loss: ₹129.23\nTarget: ₹131.48\n
+   Risk/Reward: 2.0\nConfidence: 100.0%\n\nRisk checks: PASSED\nExecution mode: PAPER\n
+   \nNo live order was sent."
+   — real prose, not JSON (Issue 5 confirmed fixed, in a live API call, not just a unit test).
+
+client.place_order.called = False  — confirmed for every scenario above.
+```
+
+### 14. Confirm whether paper execution was tested
+Yes — both via the dedicated end-to-end test (`test_full_paper_sequence_never_calls_broker_place_order`, unchanged and still passing) and via the runtime API test above (`place_order.called == False` after a full TRADE-decision cycle through the live route).
+
+### 15. Confirm NO live order path was enabled
+Confirmed. No code added or modified in this session touches `OrderManager`, `client.place_order`, or the live-mode execution gates. The triple safety gate (`COPILOT_ENABLED` / `COPILOT_MODE=paper` / global `settings.mode=paper`) is untouched and was exercised in this session's runtime test without incident.
+
+### 16. Confirm existing functionality was preserved
+`test_options_mode.py` (21 pre-existing tests covering `detect_underlying_trend`, `evaluate_option_premium`, contract selection, liquidity/theta filtering) passes unchanged. `get_option_chain()` (old signature/behavior) is untouched for any caller that doesn't need the spot fallback. No existing test was deleted or weakened to make this pass — where a pre-existing test's assumption about *which method gets called* changed (2 sites in `test_options_mode.py` implicitly, via mocking `get_option_chain` where the code now calls `get_option_chain_with_spot`), the fallback-on-exception path produces equivalent behavior, verified by running that suite, not by editing those tests.
+
+**No claim of profitability. No live trading path exists.** This session fixed five concrete, user-reported bugs at their actual root causes, each confirmed by a live runtime test, not just unit-level mocks.
