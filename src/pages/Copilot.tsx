@@ -15,6 +15,9 @@ interface CopilotStatus {
 interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
+  intent?: string
+  usedLiveData?: boolean
+  timestamp?: string
 }
 
 interface TradePlanResult {
@@ -152,7 +155,12 @@ export default function Copilot() {
     setChatLoading(true)
     try {
       const r = await api.post('/api/copilot/chat', { question })
-      setMessages(m => [...m, { role: 'assistant', text: r.data.answer }])
+      const ctx = r.data.resolved_context || {}
+      const usedLiveData = !!(ctx.market_status || ctx.indicators || ctx.trade_plan || ctx.analysis || ctx.gap_analysis)
+      setMessages(m => [...m, {
+        role: 'assistant', text: r.data.answer, usedLiveData,
+        timestamp: new Date().toLocaleTimeString(),
+      }])
     } catch {
       setMessages(m => [...m, { role: 'assistant', text: 'Could not reach the Copilot right now.' }])
     } finally {
@@ -320,7 +328,7 @@ export default function Copilot() {
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div key={i} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
               <div className={`max-w-[85%] text-sm rounded-xl px-3 py-2 whitespace-pre-wrap ${
                 m.role === 'user'
                   ? 'bg-indigo-500/20 text-indigo-100 border border-indigo-500/30'
@@ -328,6 +336,11 @@ export default function Copilot() {
               }`}>
                 {m.text}
               </div>
+              {m.role === 'assistant' && m.timestamp && (
+                <div className="text-[10px] text-slate-600 mt-1 px-1">
+                  {m.usedLiveData ? `Live data · ${m.timestamp}` : m.timestamp}
+                </div>
+              )}
             </div>
           ))}
           {chatLoading && <div className="text-xs text-slate-500 flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> thinking…</div>}

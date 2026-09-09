@@ -636,6 +636,129 @@ class TestSpotPriceFallback:
         client.place_order.assert_not_called()
 
 
+class TestIntentRouter:
+    """ISSUE: 'Hi' was returning a market-data/stale-data response.
+    GENERAL/EDUCATION intents must resolve to ZERO tool calls."""
+
+    def test_hi_is_general_not_market(self):
+        from backend.copilot.conversational import _classify_intent, route_question, _plan_general
+        assert _classify_intent("Hi") == "GENERAL"
+        assert route_question("Hi") is _plan_general
+
+    def test_hello_is_general(self):
+        from backend.copilot.conversational import _classify_intent
+        assert _classify_intent("Hello there") == "GENERAL"
+
+    def test_what_can_you_do_is_general(self):
+        from backend.copilot.conversational import _classify_intent
+        assert _classify_intent("What can you do?") == "GENERAL"
+
+    def test_hi_triggers_no_tool_calls(self):
+        """The actual regression test: chatting 'Hi' against an engine
+        with a client attached must NEVER call the broker."""
+        engine, db = _real_engine()
+        client = _mock_client_with_realistic_chain()
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        resp = chat("Hi", tools, candles_by_symbol={})
+        client.get_current_candles.assert_not_called()
+        client.get_option_chain_with_spot.assert_not_called()
+        assert "stale" not in resp["answer"].lower()
+
+    def test_what_is_vwap_is_education(self):
+        from backend.copilot.conversational import _classify_intent
+        assert _classify_intent("What is VWAP?") == "EDUCATION"
+
+    def test_what_is_a_gap_up_is_education(self):
+        from backend.copilot.conversational import _classify_intent
+        assert _classify_intent("What is a gap up?") == "EDUCATION"
+
+    def test_education_question_triggers_no_tool_calls(self):
+        engine, db = _real_engine()
+        client = _mock_client_with_realistic_chain()
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        resp = chat("What is VWAP?", tools, candles_by_symbol={})
+        client.get_current_candles.assert_not_called()
+        assert "vwap" in resp["answer"].lower()
+        assert "volume" in resp["answer"].lower()
+
+    def test_market_question_is_market_intent(self):
+        from backend.copilot.conversational import _classify_intent
+        assert _classify_intent("How is the market?") == "MARKET"
+
+    def test_trading_question_is_trading_intent(self):
+        from backend.copilot.conversational import _classify_intent
+        assert _classify_intent("Should I buy CE?") == "TRADING"
+        assert _classify_intent("Find a trade") == "TRADING"
+
+    def test_diagnostics_question_is_diagnostics_intent(self):
+        from backend.copilot.conversational import _classify_intent
+        assert _classify_intent("Is my bot healthy?") == "DIAGNOSTICS" or \
+               _classify_intent("Check the complete bot") == "DIAGNOSTICS"
+
+    def test_unrecognized_message_defaults_general_not_market(self):
+        """The actual root-cause fix: no keyword match must NEVER
+        default to fetching market data."""
+        from backend.copilot.conversational import route_question, _plan_general
+        assert route_question("asdkfjasldkfj random text") is _plan_general
+
+
+class TestGapAnalysis:
+    def test_gap_up_detected(self):
+        engine, db = _real_engine()
+        client = MagicMock()
+        today_str = datetime.now(timezone.utc).date().isoformat()
+        yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+        yesterday = _synthetic_candles(n=10, start=100.0, drift=0.0, seed=1, end_now=False)
+        for i, c in enumerate(yesterday):
+            c["timestamp"] = f"{yesterday_str}T{9+i//12:02d}:{(i%12)*5:02d}:00+00:00"
+        today = [{"timestamp": f"{today_str}T09:15:00+00:00", "open": 103.0, "high": 104, "low": 102, "close": 103.5, "volume": 100}]
+        client.get_current_candles.return_value = yesterday + today
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db)
+        result = tools.get_gap_analysis("NIFTY50")
+        assert result["available"] is True
+        assert result["today_open"] == 103.0
+        assert result["classification"] in ("GAP_UP", "FLAT")  # depends on exact drift, but must be deterministic and not fabricated
+
+    def test_gap_calculation_is_deterministic_formula(self):
+        engine, db = _real_engine()
+        client = MagicMock()
+        today_str = datetime.now(timezone.utc).date().isoformat()
+        yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+        yesterday = [{"timestamp": f"{yesterday_str}T15:25:00+00:00", "open": 99, "high": 101, "low": 98, "close": 100.0, "volume": 100}]
+        today = [{"timestamp": f"{today_str}T09:15:00+00:00", "open": 101.0, "high": 102, "low": 100, "close": 101.5, "volume": 100}]
+        client.get_current_candles.return_value = yesterday + today
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db)
+        result = tools.get_gap_analysis("NIFTY50")
+        assert result["gap_points"] == 1.0  # 101.0 - 100.0
+        assert abs(result["gap_percent"] - 1.0) < 0.01  # 1/100*100 = 1%
+        assert result["classification"] == "GAP_UP"  # 1% >= default 0.3% threshold
+
+    def test_no_prior_day_data_reports_unavailable_not_fabricated(self):
+        engine, db = _real_engine()
+        client = MagicMock()
+        today_str = datetime.now(timezone.utc).date().isoformat()
+        client.get_current_candles.return_value = [
+            {"timestamp": f"{today_str}T09:15:00+00:00", "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 100}
+        ]
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db)
+        result = tools.get_gap_analysis("NIFTY50")
+        assert result["available"] is False
+
+
+class TestMarketClosedHandling:
+    def test_market_closed_not_reported_as_websocket_failure(self):
+        """Diagnostics/health for a closed market shouldn't be indistinguishable
+        from a genuine WebSocket problem — PAUSED/STOPPED map to OK."""
+        from backend.copilot.diagnostics import _row_from_health_component
+        row = _row_from_health_component("websocket", {"status": "STOPPED"})
+        assert row.status == "OK"  # intentional (e.g. outside market hours), not a failure
+
+
 class TestPaperExecutionEndToEnd:
     """PHASE 6: a full simulated sequence through the REAL engine —
     TradePlan -> validation -> RiskManager -> PositionSizer -> OrderManager

@@ -31,6 +31,7 @@ class CopilotSettings:
     llm_model: str
     llm_timeout_seconds: float
     max_candle_age_seconds: float = 120.0  # COPILOT_MAX_CANDLE_AGE_SECONDS — underlying/premium candle staleness limit
+    gap_threshold_pct: float = 0.3  # COPILOT_GAP_THRESHOLD_PCT — |gap_percent| at/above this is GAP_UP/GAP_DOWN, else FLAT
 
 
 def load_copilot_settings() -> CopilotSettings:
@@ -52,4 +53,5 @@ def load_copilot_settings() -> CopilotSettings:
         llm_model=os.getenv("COPILOT_LLM_MODEL", "llama3.1:8b"),
         llm_timeout_seconds=float(os.getenv("COPILOT_LLM_TIMEOUT_SECONDS", "8")),
         max_candle_age_seconds=float(os.getenv("COPILOT_MAX_CANDLE_AGE_SECONDS", "120")),
+        gap_threshold_pct=float(os.getenv("COPILOT_GAP_THRESHOLD_PCT", "0.3")),
     )

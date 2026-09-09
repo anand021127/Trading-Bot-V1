@@ -48,7 +48,57 @@ class RuleBasedFallbackAdapter(LLMAdapter):
     isn't already in `context` — every value printed here is read
     straight out of the resolved tool output, not computed or guessed."""
 
+    # Small, deterministic knowledge base for EDUCATION questions — zero
+    # cost, no model needed. Matched by substring on the question, longest
+    # term first so e.g. "gap up" doesn't get shadowed by a shorter "gap".
+    EDUCATION_TERMS: Dict[str, str] = {
+        "gap up": "A gap up is when a stock/index opens today's session above yesterday's closing price, "
+                  "with no trading in between — often driven by overnight news.",
+        "gap down": "A gap down is when a stock/index opens today's session below yesterday's closing price, "
+                    "with no trading in between.",
+        "vwap": "VWAP (Volume-Weighted Average Price) is the average price a security has traded at "
+                "today, weighted by volume. Price above VWAP is often read as intraday bullish pressure, "
+                "below as bearish.",
+        "ema": "EMA (Exponential Moving Average) is a moving average that weights recent prices more "
+               "heavily than older ones, so it reacts faster to new price action than a simple average.",
+        "rsi": "RSI (Relative Strength Index) measures recent price momentum on a 0-100 scale. "
+               "Above ~70 is often read as overbought, below ~30 as oversold.",
+        "atr": "ATR (Average True Range) measures how much a price typically moves over a given period — "
+               "a volatility measure, not a direction indicator.",
+        "choppiness index": "The Choppiness Index measures whether a market is trending or ranging, "
+                             "on a 0-100 scale — high values suggest a choppy/ranging market, low values a trending one.",
+        "support": "Support is a price level where buying pressure has historically been strong enough "
+                   "to stop a decline.",
+        "resistance": "Resistance is a price level where selling pressure has historically been strong "
+                      "enough to stop a rally.",
+        "ce": "CE (Call European/Call option) gives the buyer the right to buy the underlying at a fixed "
+              "strike price — bought when expecting the price to rise.",
+        "pe": "PE (Put European/Put option) gives the buyer the right to sell the underlying at a fixed "
+              "strike price — bought when expecting the price to fall.",
+        "atm": "ATM (At-The-Money) describes an option contract whose strike price is closest to the "
+               "current underlying price.",
+        "oi": "OI (Open Interest) is the total number of outstanding option/futures contracts that "
+              "haven't been closed — higher OI generally means more liquidity.",
+        "iv": "IV (Implied Volatility) is the market's expectation of how much an underlying will move, "
+              "derived from option prices — higher IV means pricier options.",
+        "delta": "Delta measures how much an option's price is expected to move for a ₹1 move in the "
+                 "underlying — roughly the option's directional exposure.",
+        "theta": "Theta measures how much an option's price is expected to decay per day, all else equal "
+                 "— option buyers lose value to theta as expiry approaches.",
+        "stop loss": "A stop loss is a predefined price at which a losing trade is exited to cap risk.",
+        "risk reward": "Risk/reward is the ratio between what you stand to lose (risk, to the stop loss) "
+                       "and what you stand to gain (reward, to the target) on a trade.",
+        "lot size": "Lot size is the fixed number of underlying units one options contract represents — "
+                    "you can only trade in whole multiples of it.",
+    }
+
     def explain(self, question: str, context: Dict[str, Any]) -> str:
+        intent = context.get("_intent")
+        if intent == "GENERAL":
+            return self._format_general(context.get("_question", question))
+        if intent == "EDUCATION":
+            return self._format_education(context.get("_question", question))
+
         # Prefer the most specific, richest shape available.
         if "trade_plan" in context:
             return self._format_trade_plan_result(context["trade_plan"])
@@ -65,6 +115,32 @@ class RuleBasedFallbackAdapter(LLMAdapter):
         if "bot_health" in context:
             return self._format_health(context)
         return self._generic(context)
+
+    def _format_general(self, question: str) -> str:
+        q = question.lower()
+        if any(g in q for g in ("thanks", "thank you")):
+            return "You're welcome! Let me know if you want a market update or a trade check."
+        if any(g in q for g in ("hi", "hello", "hey", "good morning", "good afternoon", "good evening")):
+            return ("Hi! I'm your trading Copilot. I can check the market, explain a term, look for a "
+                    "trade opportunity, or run bot diagnostics — just ask.")
+        return (
+            "I can help with a few things:\n"
+            "- Market: \"How is the market?\", \"Is NIFTY bullish?\", \"Did it gap up?\"\n"
+            "- Trading: \"Any trade opportunity?\", \"Should I buy CE?\", \"Why did we skip?\"\n"
+            "- Positions: \"Check my open position\", \"How much am I risking?\"\n"
+            "- Diagnostics: \"Check the complete bot\", \"Why is the WebSocket down?\"\n"
+            "- Education: \"What is VWAP?\", \"What is a gap up?\"\n\n"
+            "Everything is PAPER mode only — no live orders are ever placed."
+        )
+
+    def _format_education(self, question: str) -> str:
+        q = question.lower()
+        for term in sorted(self.EDUCATION_TERMS, key=len, reverse=True):
+            if term in q:
+                return self.EDUCATION_TERMS[term]
+        return ("I don't have a canned definition for that one yet. I can explain VWAP, EMA, RSI, ATR, "
+                "gap up/down, support/resistance, CE/PE, ATM, OI, IV, delta, theta, stop loss, risk/reward, "
+                "or lot size — try asking about one of those.")
 
     # ── Known-shape formatters ────────────────────────────────────────
     def _format_trade_plan_result(self, result: Dict[str, Any]) -> str:
@@ -160,11 +236,19 @@ class RuleBasedFallbackAdapter(LLMAdapter):
     def _format_market_status(self, context: Dict[str, Any]) -> str:
         ms = context.get("market_status", {})
         ind = context.get("indicators", {})
+        gap = context.get("gap_analysis", {})
         if not ms.get("available"):
             return f"I couldn't check the market right now: {ms.get('reason', 'unknown reason')}"
         lines = ["MARKET STATUS"]
-        lines.append(f"Market open: {ms.get('market_open')}")
+        market_open = ms.get("market_open")
+        lines.append(f"Market open: {market_open}" if market_open is not None else "Market open: unknown")
+        if market_open is False:
+            lines.append("(Market is closed — this is expected outside session hours, not an error.)")
         lines.append(f"WebSocket connected: {ms.get('websocket_connected')}, feed status: {ms.get('feed_status') or 'unknown'}")
+        if gap and gap.get("available"):
+            lines.append("")
+            lines.append(f"Gap: {gap['classification']} ({gap['gap_points']:+.2f} pts, {gap['gap_percent']:+.2f}%) "
+                          f"— prev close {gap['previous_close']}, today open {gap['today_open']}")
         if ind and ind.get("available"):
             lines.append("")
             lines.append(f"NIFTY50 spot: {ind.get('last_close')}")
@@ -240,15 +324,28 @@ class LocalOpenAICompatibleAdapter(LLMAdapter):
         self._fallback = RuleBasedFallbackAdapter()
 
     def explain(self, question: str, context: Dict[str, Any]) -> str:
-        system_prompt = (
-            "You are a trading bot's explanation assistant. You are given "
-            "ALREADY-COMPUTED structured data below. Explain it in plain "
-            "language, in at most 6 sentences. Do NOT invent any price, "
-            "percentage, or status that is not present in the data. If the "
-            "data says something is unavailable, say so plainly instead of "
-            "guessing."
-        )
-        user_prompt = f"Question: {question}\n\nData:\n{json.dumps(context, indent=2, default=str)}"
+        intent = context.get("_intent")
+        if intent in ("GENERAL", "EDUCATION"):
+            # Conversational/educational — no live data involved, so the
+            # LLM can just answer naturally. Still deterministic-safe: if
+            # it's unreachable, falls back to the same canned responses.
+            system_prompt = (
+                "You are a friendly trading-bot assistant. Answer briefly and naturally. "
+                "You are NEVER given live market data for this kind of question, so do not "
+                "invent any price, indicator, or trade detail — if asked about the market, "
+                "say you'd need to check current data for that."
+            )
+            user_prompt = question
+        else:
+            system_prompt = (
+                "You are a trading bot's explanation assistant. You are given "
+                "ALREADY-COMPUTED structured data below. Explain it in plain "
+                "language, in at most 6 sentences. Do NOT invent any price, "
+                "percentage, or status that is not present in the data. If the "
+                "data says something is unavailable, say so plainly instead of "
+                "guessing."
+            )
+            user_prompt = f"Question: {question}\n\nData:\n{json.dumps(context, indent=2, default=str)}"
 
         payload = {
             "model": self.settings.llm_model,

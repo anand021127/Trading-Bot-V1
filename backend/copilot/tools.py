@@ -322,6 +322,58 @@ class CopilotTools:
                              f"Use get_option_chain() for the latest REST snapshot instead.")
 
     # ── Strategy / decisions ────────────────────────────────────────
+    def get_gap_analysis(self, symbol: str) -> Dict[str, Any]:
+        """PHASE 4: deterministic gap-up/down calculation. Uses the SAME
+        merged candle series as get_live_candles() (get_current_candles)
+        — no separate fetch, no invented numbers. previous_close is the
+        last candle from the most recent day that isn't today; today_open
+        is the first candle whose date IS today. If either is missing
+        (e.g. pre-market, or no prior-day data), returns available=False
+        rather than guessing."""
+        client = getattr(self.engine, "client", None)
+        if client is None:
+            return _unavailable("No broker client attached — cannot compute gap.")
+        try:
+            candles = client.get_current_candles(symbol, "5minute", limit=200) \
+                if hasattr(client, "get_current_candles") else client.get_historical_candles(symbol, "5minute", limit=200)
+        except Exception as e:
+            return _unavailable(f"Candle fetch failed: {e}")
+        if not candles:
+            return _unavailable("No candle data available.")
+
+        today_str = datetime.now(timezone.utc).date().isoformat()
+        prev_day_candles = [c for c in candles if str(c.get("timestamp", ""))[:10] != today_str]
+        today_candles = [c for c in candles if str(c.get("timestamp", ""))[:10] == today_str]
+
+        if not prev_day_candles:
+            return _unavailable("No prior trading day candle data available to compute previous close.")
+        if not today_candles:
+            return _unavailable("No candle for today yet — market may not have opened.")
+
+        previous_close = float(prev_day_candles[-1]["close"])
+        today_open = float(today_candles[0]["open"])
+
+        gap_points = round(today_open - previous_close, 2)
+        gap_percent = round(gap_points / previous_close * 100.0, 3) if previous_close else None
+
+        from backend.copilot.config import load_copilot_settings
+        threshold = load_copilot_settings().gap_threshold_pct
+        if gap_percent is None:
+            classification = "UNKNOWN"
+        elif gap_percent >= threshold:
+            classification = "GAP_UP"
+        elif gap_percent <= -threshold:
+            classification = "GAP_DOWN"
+        else:
+            classification = "FLAT"
+
+        return {
+            "available": True, "symbol": symbol,
+            "previous_close": previous_close, "today_open": today_open,
+            "gap_points": gap_points, "gap_percent": gap_percent,
+            "classification": classification, "threshold_pct": threshold,
+        }
+
     def get_strategy_signals(self, symbol: str, candles: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Underlying-level strategies only (EMA/ORB/etc — whatever's
         registered besides OPTION_PREMIUM). For the option-premium signal
@@ -432,6 +484,7 @@ def build_tool_registry(tools: CopilotTools) -> Dict[str, Callable[..., Dict[str
         "get_market_status": tools.get_market_status,
         "get_live_prices": tools.get_live_prices,
         "get_indicators": tools.get_indicators,
+        "get_gap_analysis": tools.get_gap_analysis,
         "get_option_chain": tools.get_option_chain,
         "get_option_quote": tools.get_option_quote,
         "get_support_resistance": tools.get_support_resistance,

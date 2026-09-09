@@ -7,6 +7,12 @@ resolves through a real tool call before any explanation is generated,
 satisfying "AI should never hallucinate live information" without
 relying on the model to behave. The LLM/rule-based adapter never sees
 the raw question without the resolved data attached.
+
+Intent taxonomy (this session's addition): GENERAL / EDUCATION / MARKET /
+TRADING / DIAGNOSTICS. GENERAL and EDUCATION are checked FIRST and route
+to NO tool calls at all — a greeting or a "what is VWAP?" question must
+never trigger a live market-data fetch, which was the reported bug
+("Hi" returning a stale-data warning).
 """
 from __future__ import annotations
 
@@ -16,6 +22,12 @@ from backend.copilot.llm_adapter import get_llm_adapter
 from backend.copilot.tools import CopilotTools
 
 KNOWN_SYMBOLS = ["NIFTY50", "NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "BANKEX"]
+
+INTENT_GENERAL = "GENERAL"
+INTENT_EDUCATION = "EDUCATION"
+INTENT_MARKET = "MARKET"
+INTENT_TRADING = "TRADING"
+INTENT_DIAGNOSTICS = "DIAGNOSTICS"
 
 
 def _extract_symbol(question: str, default: str = "NIFTY50") -> str:
@@ -37,11 +49,20 @@ def _get_candles(tools: CopilotTools, symbol: str, candles_by_symbol: Dict[str, 
     return live["candles"] if live.get("available") else []
 
 
+# ── GENERAL / EDUCATION — NO tool calls, ever ────────────────────────
+def _plan_general(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[Dict]]) -> Dict[str, Any]:
+    return {"_intent": INTENT_GENERAL, "_question": q}
+
+
+def _plan_education(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[Dict]]) -> Dict[str, Any]:
+    return {"_intent": INTENT_EDUCATION, "_question": q}
+
+
 # Each entry: (keywords that must ALL appear, tool-call plan builder)
 def _plan_market_status(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[Dict]]) -> Dict[str, Any]:
     symbol = _extract_symbol(q)
     candles = _get_candles(tools, symbol, candles_by_symbol)
-    ctx = {"market_status": tools.get_market_status()}
+    ctx = {"market_status": tools.get_market_status(), "gap_analysis": tools.get_gap_analysis(symbol)}
     if candles:
         ctx["indicators"] = tools.get_indicators(symbol, candles)
     return ctx
@@ -92,22 +113,47 @@ def _plan_health(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[
 
 
 _INTENTS = [
+    # GENERAL -- greetings/capability questions, checked FIRST so "Hi"
+    # never falls through to a market-data fetch.
+    (["hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+      "what can you do", "what do you do", "help", "who are you", "thanks", "thank you"], _plan_general),
+    # EDUCATION -- definition/concept questions, also NO tool calls.
+    (["what is", "what's a", "what does", "define ", "explain what", "meaning of"], _plan_education),
     (["diagnos"], _plan_diagnostics),
     (["something is wrong", "check the bot", "check the complete bot"], _plan_diagnostics),
     (["today's errors", "todays errors", "check today's errors", "recent errors"], _plan_errors),
     (["premium not updating", "live premium", "not updating", "stale"], _plan_health),
+    (["why is websocket", "why is the websocket", "websocket disconnected", "why is scanner"], _plan_health),
     (["how much am i risking", "how much risk", "risking"], _plan_risk),
     (["current tradeplan", "current trade plan", "give me the current"], _plan_trade_opportunity),
     (["premium", "what is the current"], _plan_premium),
     (["open position", "continue holding", "should we hold", "should we continue"], _plan_positions),
     (["today's trades", "todays trades", "trades today", "show me today"], _plan_trades_today),
     (["why did we take", "why did it take", "why did the bot take", "why did it skip", "why did we skip"], _plan_trades_today),
-    (["which side", "ce or pe", "which strike"], _plan_trade_opportunity),
+    (["should i buy ce", "should i buy pe", "find a trade", "is there a trade",
+      "which side", "ce or pe", "which strike"], _plan_trade_opportunity),
     (["trade opportunity", "any trade", "which ce", "which pe", "watch"], _plan_trade_opportunity),
+    (["gap up", "gap down", "gap %", "gap percent", "how much did it gap"], _plan_market_status),
     (["bullish", "bearish", "direction", "trend"], _plan_direction),
     (["why are we not trading", "why aren't we trading", "why not trading", "why are we waiting"], _plan_trade_opportunity),
     (["how is the market", "market status", "market update", "how is nifty", "how is banknifty"], _plan_market_status),
 ]
+
+
+def _classify_intent(question: str) -> str:
+    q = question.lower()
+    for keywords, plan_fn in _INTENTS:
+        if any(kw in q for kw in keywords):
+            if plan_fn is _plan_general:
+                return INTENT_GENERAL
+            if plan_fn is _plan_education:
+                return INTENT_EDUCATION
+            if plan_fn is _plan_diagnostics or plan_fn is _plan_errors or plan_fn is _plan_health:
+                return INTENT_DIAGNOSTICS
+            if plan_fn in (_plan_trade_opportunity, _plan_premium, _plan_risk, _plan_positions, _plan_trades_today):
+                return INTENT_TRADING
+            return INTENT_MARKET
+    return INTENT_GENERAL
 
 
 def route_question(question: str) -> Any:
@@ -115,7 +161,11 @@ def route_question(question: str) -> Any:
     for keywords, plan_fn in _INTENTS:
         if any(kw in q for kw in keywords):
             return plan_fn
-    return _plan_market_status  # sensible default rather than refusing
+    # A genuinely unrecognized message defaults to GENERAL (a capability
+    # explanation), NOT a market-data fetch — this is the actual fix for
+    # "Hi returns a stale-data warning": no keyword match should never
+    # mean "assume they want market data."
+    return _plan_general
 
 
 def chat(

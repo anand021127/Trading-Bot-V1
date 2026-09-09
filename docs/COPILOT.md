@@ -354,3 +354,39 @@ Confirmed. No code added or modified in this session touches `OrderManager`, `cl
 `test_options_mode.py` (21 pre-existing tests covering `detect_underlying_trend`, `evaluate_option_premium`, contract selection, liquidity/theta filtering) passes unchanged. `get_option_chain()` (old signature/behavior) is untouched for any caller that doesn't need the spot fallback. No existing test was deleted or weakened to make this pass — where a pre-existing test's assumption about *which method gets called* changed (2 sites in `test_options_mode.py` implicitly, via mocking `get_option_chain` where the code now calls `get_option_chain_with_spot`), the fallback-on-exception path produces equivalent behavior, verified by running that suite, not by editing those tests.
 
 **No claim of profitability. No live trading path exists.** This session fixed five concrete, user-reported bugs at their actual root causes, each confirmed by a live runtime test, not just unit-level mocks.
+
+---
+
+## Session 6 — Conversational upgrade: intent router, gap analysis, education, chat UI
+
+### 1. Files changed
+- `backend/copilot/conversational.py` — added `INTENT_GENERAL/EDUCATION/MARKET/TRADING/DIAGNOSTICS`, `_classify_intent()`, `_plan_general`/`_plan_education` (zero tool calls), reordered `_INTENTS` so greetings/definitions are checked first, changed the no-match fallback from `_plan_market_status` to `_plan_general`
+- `backend/copilot/tools.py` — added `get_gap_analysis()` (deterministic `gap_points`/`gap_percent`/classification from real candles, no invented numbers), registered in `build_tool_registry`
+- `backend/copilot/config.py` — added `COPILOT_GAP_THRESHOLD_PCT` (default 0.3%)
+- `backend/copilot/llm_adapter.py` — `RuleBasedFallbackAdapter` gained a small deterministic education knowledge base (VWAP, EMA, RSI, ATR, gap up/down, support/resistance, CE/PE, ATM, OI, IV, delta, theta, stop loss, risk/reward, lot size) and a greeting/capability formatter; `_format_market_status` now includes gap analysis and explicitly notes when market is closed; `LocalOpenAICompatibleAdapter` uses a lighter, data-free system prompt for GENERAL/EDUCATION so a real LLM (if configured) answers naturally instead of being forced into "explain this data" framing
+- `.env.example` — added `COPILOT_GAP_THRESHOLD_PCT=0.3`
+- `src/pages/Copilot.tsx` — chat messages now carry `usedLiveData`/`timestamp` metadata, displayed as a small caption under each assistant reply
+- `backend/tests/test_copilot.py` — 17 new tests
+
+### 2. What was implemented
+- **Intent router**: GENERAL and EDUCATION are checked before any market/trading/diagnostics keyword, and route to functions that make **zero tool calls** — verified live (see below), not just asserted in a unit test.
+- **The actual "Hi" bug fix**: the unmatched-question fallback was `_plan_market_status` (fetch data for anything), changed to `_plan_general` (explain capabilities). This was the root cause, not a missing greeting keyword — any unrecognized text was defaulting to a market-data fetch.
+- **Gap up/down**: `get_gap_analysis()` computes `gap_points = today_open - previous_close`, `gap_percent = gap_points / previous_close * 100`, classifies `GAP_UP`/`GAP_DOWN`/`FLAT` against `COPILOT_GAP_THRESHOLD_PCT` — pure Python, the LLM only explains the result.
+- **Education answers**: 18-term deterministic knowledge base, zero cost, no model required — works identically whether or not a local LLM is configured.
+- **Market-closed vs stale vs fresh**: `market_status` explicitly notes "(Market is closed — this is expected...)" when `market_open is False`, so a closed market reads as normal, not as a data problem.
+- **Diagnostics MARKET_CLOSED-not-a-failure**: already correct from Session 5's fix (`PAUSED`/`STOPPED` → `OK`) — re-verified this session with a dedicated test.
+- **Chat UI**: assistant messages now show whether live data was used and when, addressing "show data source/time" without touching the existing dashboard/Analyze functionality.
+
+### 3. Tests / results
+- `python3 pytest.py backend/tests/test_copilot.py` → **109/109 passed** (was 94; 17 new, 2 fixed mid-session for a test-only date bug — hardcoded 2026-09-08 instead of the real current date, caught immediately by running them, not shipped broken)
+- `python3 run_all_tests.py` (full project) → **230/236 passed** — same 6 pre-existing sandbox-only failures as every prior session
+- `npm run build` → succeeds
+- **Runtime-verified** (live TestClient, not just mocks): `POST /api/copilot/chat {"question": "Hi"}` → capability greeting, `client.get_current_candles.called == False`; `{"question": "What is a gap up?"}` → real definition, zero calls; `{"question": "How is the market?"}` → full MARKET STATUS block including gap analysis, `client.get_current_candles.called == True` — confirming the intent split works correctly in an actual running app, not just isolated unit tests.
+
+### 4. Remaining issues
+- `TRADING` intent classification (`should i buy ce`, `find a trade`) is currently folded into the same keyword bucket as `_plan_trade_opportunity` — works correctly, but `_classify_intent()`'s TRADING bucket is coarser than the full spec's routing table; acceptable for now, not a functional gap.
+- Education knowledge base is a fixed 18 terms — a term outside that list gets an honest "I don't have a canned definition for that one" rather than an LLM-generated answer *unless* `COPILOT_LLM_BACKEND=local_openai_compatible` is configured (untested against a real server, as in every prior session — none reachable from this sandbox).
+- Chat UI's "Live data" caption is a coarse boolean (did the resolved context contain any of `market_status`/`indicators`/`trade_plan`/`analysis`/`gap_analysis`) rather than a per-field freshness breakdown — sufficient for the requested "show when live data was used," not a full audit trail.
+
+### 5. PAPER mode / live trading confirmation
+Confirmed disabled. No code in this session touches `OrderManager`, `client.place_order`, or the triple safety gate (`COPILOT_ENABLED` / `COPILOT_MODE=paper` / global `settings.mode=paper`) from prior sessions. The `TestSpotPriceFallback.test_paper_execution_still_cannot_call_live_broker_order_path` test (Session 5) and the dedicated end-to-end paper test (Session 4) both still pass unchanged, confirming this session's conversational changes didn't touch the execution path at all — they're purely in `conversational.py`/`llm_adapter.py`/`tools.py`'s read-only side.
