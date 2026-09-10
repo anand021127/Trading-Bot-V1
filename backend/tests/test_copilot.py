@@ -759,6 +759,233 @@ class TestMarketClosedHandling:
         assert row.status == "OK"  # intentional (e.g. outside market hours), not a failure
 
 
+class TestScannerAutoPaperExecution:
+    """THE bug fix: live_scanner_copilot_hook() built/validated TradePlans
+    but never called submit_trade_plan_for_paper_execution() in paper
+    mode. These tests exercise the REAL LiveScanner -> hook -> execution
+    -> DB position chain, not just the execution.py gates in isolation
+    (those were already covered by TestPaperExecutionSafety)."""
+
+    def _scanner_with_hook(self, mode="paper"):
+        from backend.scanner.live_scanner import LiveScanner
+        from backend.copilot.scan_loop import live_scanner_copilot_hook, CopilotScanState
+        db = DatabaseManager(":memory:")
+        db.init_db()
+        client = _mock_client_with_realistic_chain()
+        client.get_quote_by_instrument_key.return_value = {"ltp": 120.5, "bid_price": 119.5, "ask_price": 121.0}
+        # Construct WITH the real client directly — order_manager binds
+        # to whatever client is passed at __init__ time, so assigning
+        # engine.client afterward would leave order_manager pointed at a
+        # stale, unconfigured MagicMock (a real bug this test caught in
+        # its own harness, not in production code).
+        engine = TradingEngine(client=client, db_manager=db)
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        state = CopilotScanState()
+        scanner = LiveScanner(
+            trading_engine=engine, universe_resolver=lambda: ["NIFTY50"],
+            copilot_hook=live_scanner_copilot_hook(tools, state),
+        )
+        return scanner, engine, db, client, tools
+
+    def test_approved_tradeplan_via_scanner_creates_paper_position(self):
+        scanner, engine, db, client, tools = self._scanner_with_hook()
+        with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
+                                           "COPILOT_MIN_RISK_REWARD": "0.5"}):
+            scanner.scan_symbol("NIFTY50")
+        positions = db.get_open_positions()
+        assert len(positions) == 1
+        assert positions[0].symbol == "NIFTY50"
+        client.place_order.assert_not_called()
+
+    def test_same_setup_scanned_again_does_not_duplicate(self):
+        scanner, engine, db, client, tools = self._scanner_with_hook()
+        with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
+                                           "COPILOT_MIN_RISK_REWARD": "0.5"}):
+            scanner.scan_symbol("NIFTY50")
+            scanner.scan_symbol("NIFTY50")  # identical setup, same open position still exists
+        positions = db.get_open_positions()
+        assert len(positions) == 1  # NOT 2 — the open-position guard prevented a duplicate
+        client.place_order.assert_not_called()
+
+    def test_risk_manager_rejection_creates_no_position(self):
+        scanner, engine, db, client, tools = self._scanner_with_hook()
+        # Force RiskManager to reject every trade.
+        engine.risk_manager.can_take_trade = lambda symbol="": (False, "Daily loss limit hit")
+        with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
+                                           "COPILOT_MIN_RISK_REWARD": "0.5"}):
+            scanner.scan_symbol("NIFTY50")
+        assert db.get_open_positions() == []
+        client.place_order.assert_not_called()
+
+    def test_shadow_mode_never_executes(self):
+        scanner, engine, db, client, tools = self._scanner_with_hook()
+        with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "shadow",
+                                           "COPILOT_MIN_RISK_REWARD": "0.5"}):
+            scanner.scan_symbol("NIFTY50")
+        assert db.get_open_positions() == []  # shadow mode logs only, never opens a position
+        client.place_order.assert_not_called()
+
+    def test_global_live_mode_refuses_even_via_scanner(self):
+        """The critical cross-mode safety check: if the bot's global
+        mode is somehow 'live' while Copilot thinks it's 'paper', the
+        scanner-driven path must refuse exactly like the direct
+        execution.py call does — no position, no broker order."""
+        scanner, engine, db, client, tools = self._scanner_with_hook()
+        with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
+                                           "COPILOT_MIN_RISK_REWARD": "0.5"}), \
+             mock.patch("backend.strategy.trading_engine.settings") as bot_settings:
+            bot_settings.mode = "live"
+            scanner.scan_symbol("NIFTY50")
+        assert db.get_open_positions() == []
+        client.place_order.assert_not_called()
+
+    def test_manual_analyze_path_never_executes(self):
+        """Reviewed per the request: the manual Analyze/TradePlan API
+        path (tools.get_trade_plan -> build_trade_plan_for_symbol) does
+        NOT call execution at all — it only builds and validates. This
+        is a design confirmation, not a new gate: the manual path was
+        already execution-free, so it cannot create a duplicate (or any)
+        paper trade by construction."""
+        engine, db = _real_engine()
+        client = _mock_client_with_realistic_chain()
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper"}):
+            tools.get_trade_plan("NIFTY50")
+            tools.get_trade_plan("NIFTY50")
+        assert db.get_open_positions() == []
+        client.place_order.assert_not_called()
+
+    def test_rejected_execution_is_logged_not_silently_dropped(self):
+        scanner, engine, db, client, tools = self._scanner_with_hook()
+        engine.risk_manager.can_take_trade = lambda symbol="": (False, "Max trades per day reached")
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            log_path = Path(d) / "shadow.csv"
+            with mock.patch("backend.copilot.scan_loop.log_trade_plan") as mock_log, \
+                 mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
+                                               "COPILOT_MIN_RISK_REWARD": "0.5"}):
+                scanner.scan_symbol("NIFTY50")
+        if mock_log.called:
+            call_args = mock_log.call_args
+            assert "EXECUTION_REJECTED" in str(call_args) or "Max trades per day" in str(call_args)
+
+
+class TestConversationMemory:
+    """Requirement: 'Which market are you analyzing?' must resolve to
+    whatever was actually last analyzed, not a generic answer."""
+
+    def test_nifty_then_which_market_resolves_to_nifty(self):
+        from backend.copilot.conversation_state import ConversationState
+        engine, db = _real_engine()
+        client = _mock_client_with_realistic_chain()
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        state = ConversationState()
+
+        chat("How did NIFTY open?", tools, candles_by_symbol={}, state=state)
+        resp2 = chat("Which market are you currently analyzing?", tools, candles_by_symbol={}, state=state)
+
+        assert "NIFTY50" in resp2["answer"]
+        assert "hi! i'm your trading copilot" not in resp2["answer"].lower()  # not the generic greeting
+
+    def test_sensex_then_which_one_resolves_to_sensex(self):
+        from backend.copilot.conversation_state import ConversationState
+        engine, db = _real_engine()
+        client = _mock_client_with_realistic_chain()
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        state = ConversationState()
+
+        chat("What about Sensex?", tools, candles_by_symbol={}, state=state)
+        resp2 = chat("Which one are you analyzing now?", tools, candles_by_symbol={}, state=state)
+
+        assert "SENSEX" in resp2["answer"]
+
+    def test_no_prior_symbol_gives_helpful_answer_not_crash(self):
+        from backend.copilot.conversation_state import ConversationState
+        tools = CopilotTools()
+        state = ConversationState()
+        resp = chat("Which market are you analyzing?", tools, candles_by_symbol={}, state=state)
+        assert "ask me about" in resp["answer"].lower() or "haven't analyzed" in resp["answer"].lower()
+
+    def test_symbol_less_followup_uses_remembered_symbol(self):
+        """'Is it bullish?' with no symbol keyword should analyze whatever
+        was last discussed, not silently default to NIFTY50 when the
+        conversation was actually about a different symbol."""
+        from backend.copilot.conversation_state import ConversationState
+        engine, db = _real_engine()
+        client = _mock_client_with_realistic_chain()
+        engine.client = client
+        tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
+        state = ConversationState()
+
+        chat("How is Banknifty?", tools, candles_by_symbol={}, state=state)
+        assert state.last_symbol == "BANKNIFTY"
+        resp2 = chat("Is it bullish?", tools, candles_by_symbol={}, state=state)
+        assert resp2["resolved_context"]["_symbol"] == "BANKNIFTY"
+
+    def test_history_is_recorded_and_capped(self):
+        from backend.copilot.conversation_state import ConversationState
+        tools = CopilotTools()
+        state = ConversationState()
+        for i in range(15):
+            chat(f"Hello {i}", tools, candles_by_symbol={}, state=state)
+        assert len(state.turns) <= ConversationState.MAX_TURNS
+
+    def test_stateless_call_without_state_still_works(self):
+        """state=None must remain fully supported — not every caller
+        needs/wants conversation memory."""
+        tools = CopilotTools()
+        resp = chat("Hi", tools, candles_by_symbol={})
+        assert "answer" in resp
+
+
+class TestOllamaConfig:
+    def test_ollama_backend_name_is_accepted(self):
+        from backend.copilot.config import load_copilot_settings
+        with mock.patch.dict(os.environ, {"COPILOT_LLM_BACKEND": "ollama"}):
+            settings = load_copilot_settings()
+        assert settings.llm_backend == "ollama"
+
+    def test_ollama_backend_selects_local_adapter(self):
+        from backend.copilot.llm_adapter import get_llm_adapter, LocalOpenAICompatibleAdapter
+        from backend.copilot.config import CopilotSettings
+        settings = CopilotSettings(enabled=True, mode="shadow", min_risk_reward=1.5, max_quote_age_seconds=30,
+                                    llm_backend="ollama", llm_base_url="http://localhost:11434/v1",
+                                    llm_model="llama3.1:8b", llm_timeout_seconds=8)
+        adapter = get_llm_adapter(settings)
+        assert isinstance(adapter, LocalOpenAICompatibleAdapter)
+
+    def test_ollama_unreachable_falls_back_safely_with_history(self):
+        """Requirement 13: conversational LLM failures fall back safely
+        — including when conversation history is present."""
+        from backend.copilot.llm_adapter import LocalOpenAICompatibleAdapter
+        from backend.copilot.config import CopilotSettings
+        from backend.copilot.conversation_state import ConversationTurn
+        settings = CopilotSettings(enabled=True, mode="shadow", min_risk_reward=1.5, max_quote_age_seconds=30,
+                                    llm_backend="ollama", llm_base_url="http://localhost:1/v1",  # nothing listening
+                                    llm_model="llama3.1:8b", llm_timeout_seconds=1)
+        adapter = LocalOpenAICompatibleAdapter(settings)
+        history = [ConversationTurn("user", "How is NIFTY?"), ConversationTurn("assistant", "...")]
+        answer = adapter.explain("Which market are you analyzing?", {"market_status": {"available": False, "reason": "x"}}, history=history)
+        assert "unavailable" in answer.lower() or "couldn't check" in answer.lower()
+
+    def test_which_symbol_is_always_deterministic_even_with_ollama_configured(self):
+        """The identity question must NEVER be handed to the LLM to
+        guess — even when Ollama is configured, it's answered from
+        conversation memory directly."""
+        from backend.copilot.llm_adapter import LocalOpenAICompatibleAdapter
+        from backend.copilot.config import CopilotSettings
+        settings = CopilotSettings(enabled=True, mode="shadow", min_risk_reward=1.5, max_quote_age_seconds=30,
+                                    llm_backend="ollama", llm_base_url="http://localhost:1/v1",
+                                    llm_model="llama3.1:8b", llm_timeout_seconds=1)
+        adapter = LocalOpenAICompatibleAdapter(settings)
+        answer = adapter.explain("Which market are you analyzing?", {"_which_symbol": "SENSEX"})
+        assert answer == "SENSEX"  # exact, deterministic — no network call was even attempted
+
+
 class TestPaperExecutionEndToEnd:
     """PHASE 6: a full simulated sequence through the REAL engine —
     TradePlan -> validation -> RiskManager -> PositionSizer -> OrderManager

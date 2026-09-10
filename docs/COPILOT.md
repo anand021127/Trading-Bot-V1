@@ -390,3 +390,127 @@ Confirmed. No code added or modified in this session touches `OrderManager`, `cl
 
 ### 5. PAPER mode / live trading confirmation
 Confirmed disabled. No code in this session touches `OrderManager`, `client.place_order`, or the triple safety gate (`COPILOT_ENABLED` / `COPILOT_MODE=paper` / global `settings.mode=paper`) from prior sessions. The `TestSpotPriceFallback.test_paper_execution_still_cannot_call_live_broker_order_path` test (Session 5) and the dedicated end-to-end paper test (Session 4) both still pass unchanged, confirming this session's conversational changes didn't touch the execution path at all — they're purely in `conversational.py`/`llm_adapter.py`/`tools.py`'s read-only side.
+
+---
+
+## Session 7 — Bugfix: automatic paper execution was never wired into the scanner hook
+
+### Exact root cause
+`live_scanner_copilot_hook()` in `backend/copilot/scan_loop.py` built and validated a `TradePlan` on every scan pass, but its only action was: log to the shadow log, and **only when `COPILOT_MODE=shadow`**. There was no branch at all for `COPILOT_MODE=paper` — an approved, `decision=TRADE` TradePlan in paper mode simply did nothing. `submit_trade_plan_for_paper_execution()` (added in an earlier session, and already correctly triple-gated and tested in isolation) was never called from the automatic scanner path — only from manual/test code that called it directly.
+
+### Files changed
+- `backend/copilot/scan_loop.py` — added the missing paper-execution branch; refactored the shared "what happens to a TradePlan result" logic into `_process_trade_plan_result()`, used by BOTH `live_scanner_copilot_hook()` and `run_copilot_scan_pass()` (one implementation, not two); added `_has_open_position_for_symbol()` as the duplicate-execution guard
+- `backend/tests/test_copilot.py` — 7 new tests exercising the real `LiveScanner` → hook → execution → DB chain
+
+### Files added/deleted
+None.
+
+### Exact fix
+In `COPILOT_MODE=paper`, when a scan produces `decision=TRADE` with an approved `TradePlan`, the hook now calls the EXISTING `submit_trade_plan_for_paper_execution()` — which is the same function that already goes through `TradingEngine.execute_multi_signal()` → `RiskManager` → `PositionSizer` → `OrderManager` → paper fill. No second execution engine was created; the fix is entirely "call the function that already existed but was never invoked from this path." Shadow mode's behavior (log only, never execute) is unchanged.
+
+### Duplicate-prevention method
+Before submitting, the hook checks `tools.get_open_positions()` — the real, database-backed position list (the same source `RiskManager`/the dashboard use) — for an existing open position matching the symbol. If one exists, execution is skipped entirely (not even attempted); a still-open position is treated as "the same setup," not a new opportunity. This is authoritative and DB-backed rather than in-process memory, so it's correct across restarts and consistent with how positions are already identified elsewhere in the codebase (by underlying `symbol`, which is what `OrderManager`'s paper fill records).
+
+### Cross-mode audit (as required before touching shared logic)
+No shared component was modified. `TradingEngine`, `StrategySignal`, `TradePlan`, `PositionSizer`, `RiskManager`, `OrderManager`, exit logic, quantity/lot calculations, option selection, market-data handling, and strategy evaluation are **byte-for-byte unchanged this session** — the fix is entirely inside `backend/copilot/scan_loop.py`, a Copilot-only orchestration file that wasn't calling an already-existing, already-safety-gated function. Because nothing shared changed, Backtest and Live needed no corresponding change:
+- **PAPER**: verified — see tests below. A qualifying automatic TradePlan now creates a real paper position via the unmodified existing pipeline.
+- **BACKTEST**: `test_options_backtest_contract.py`, `test_options_backtest_architecture.py`, `test_multi_symbol_backtest.py`, `test_backtest_task_manager.py` — **40 + 21 = 61 tests, all pass, unchanged** (none of these import or touch `backend/copilot/`).
+- **LIVE**: no live-order code path exists in this codebase to begin with (confirmed again this session — `client.place_order` is only reachable via `OrderManager._place_live_order`, never called by Copilot code); nothing here changes that.
+
+### Paper verification
+- `test_approved_tradeplan_via_scanner_creates_paper_position` — real `LiveScanner.scan_symbol()` → hook → position created, `place_order` never called.
+- `test_same_setup_scanned_again_does_not_duplicate` — two scan cycles, one position (not two).
+- `test_risk_manager_rejection_creates_no_position` — RiskManager veto → no position, no order call.
+- `test_shadow_mode_never_executes` — shadow mode with a qualifying setup → no position.
+- `test_global_live_mode_refuses_even_via_scanner` — global `settings.mode="live"` while Copilot thinks "paper" → refused, confirmed via the scanner-driven path (not just the direct `execution.py` call tested in an earlier session).
+- `test_manual_analyze_path_never_executes` — confirmed by design: `POST /api/copilot/trade-plan` (the frontend Analyze button, and chat) calls `tools.get_trade_plan()` → `build_trade_plan_for_symbol()` only — it never calls `_process_trade_plan_result` or execution. Reviewed, not modified — it was already execution-free.
+- `test_rejected_execution_is_logged_not_silently_dropped` — a RiskManager rejection at execution time is recorded (`EXECUTION_REJECTED: <real reason>`), not dropped.
+
+### Tests / results
+- `python3 pytest.py backend/tests/test_copilot.py` → **116/116 passed** (was 109; 7 new)
+- Backtest suites (`test_backtest_task_manager.py`, `test_options_backtest_contract.py`, `test_options_backtest_architecture.py`, `test_multi_symbol_backtest.py`) → **61/61 passed**, confirming Backtest is untouched
+- `python3 run_all_tests.py` (full project) → **230/236 passed** — same 6 pre-existing sandbox-only failures as every prior session
+- `npm run build` → succeeds (no frontend changes needed for this fix — the bug was entirely backend orchestration)
+
+### Any remaining issues
+- The duplicate-execution guard checks by underlying `symbol` only, matching how positions are already tracked system-wide — it does not additionally distinguish "same symbol, different strike/expiry" as a would-be-second position, because the existing `Position` model doesn't track strike/expiry as separate identity fields. If the underlying system is ever changed to allow multiple simultaneous positions per symbol (e.g. one CE + one PE), this guard would need to be revisited alongside that change — not needed today, since one-position-per-symbol is the existing behavior this guard matches.
+- `run_copilot_scan_pass()` (the on-demand/manual batch path, distinct from the automatic scanner hook and from the single-symbol Analyze endpoint) now ALSO executes in paper mode via the same shared function, for consistency — this wasn't explicitly called out as broken in the bug report, but leaving it silently divergent (log-only in paper mode, when the primary scanner path executes) would have been an inconsistency. Flagged here rather than silently changed without mention.
+
+### Confirm LIVE trading remains disabled
+Confirmed. No code added or modified in this session touches `OrderManager.place_order`'s live branch, and the triple safety gate (`COPILOT_ENABLED` / `COPILOT_MODE=paper` / global `settings.mode=paper`) — including the specific "Copilot thinks paper, global bot is live" refusal — was re-verified working through the actual scanner-driven path this session, not just the direct-call path tested previously.
+
+---
+
+## Session 8 — Real Ollama conversational layer + conversation memory
+
+### Architecture
+```
+User question
+  → conversational.chat(question, tools, state=ConversationState)
+      → route_question(question) — deterministic keyword routing (unchanged design)
+      → plan_fn(tools, question, candles_by_symbol, state) — resolves via
+        EXISTING tools (get_market_status, get_gap_analysis, get_indicators,
+        get_trade_plan, run_full_diagnostics, get_open_positions, ...)
+      → state.last_symbol updated IF this turn resolved one (deterministic,
+        not an LLM guess)
+      → get_llm_adapter().explain(question, context, history=state.recent_history())
+          - RuleBasedFallbackAdapter (default, zero cost) — unchanged templates,
+            plus a new deterministic "_which_symbol" formatter
+          - LocalOpenAICompatibleAdapter (COPILOT_LLM_BACKEND=ollama or
+            local_openai_compatible) — sends system instructions + recent
+            history + resolved context to a real local Ollama server
+      → state.add_turn("user", ...); state.add_turn("assistant", ...)
+```
+No architecture was replaced — this is the same deterministic-routing-then-explain
+design from prior sessions, with conversation memory added around it and a
+real Ollama wire-up in the adapter that was already scaffolded (but never
+actually used with real history/system instructions) in an earlier pass.
+
+### Files changed
+- `backend/copilot/config.py` — `COPILOT_LLM_BACKEND=ollama` now an accepted alias for `local_openai_compatible` (same adapter)
+- `backend/copilot/llm_adapter.py` — `explain()` signature gained `history`; `LocalOpenAICompatibleAdapter` now sends the full conversation history plus the explicit system instructions from the spec (never invent prices/positions/trade results, distinguish live vs historical, say when unavailable, never claim execution unless confirmed); `_which_symbol` is answered deterministically by BOTH adapters — never handed to the LLM to guess, even when Ollama is configured
+- `backend/copilot/conversational.py` — `_extract_symbol()` now falls back to `state.last_symbol`; added `_plan_which_symbol` intent; `chat()` accepts/updates a `ConversationState`; unrecognized messages that explicitly name a known symbol route to MARKET instead of GENERAL
+- `backend/api/routers/copilot.py` — `ChatRequest` gained `session_id`; the endpoint creates one if absent and returns it, backed by `conversation_state.get_session()`
+- `src/pages/Copilot.tsx` — persists `session_id` in `sessionStorage` and sends it with every chat request
+- `backend/tests/test_copilot.py` — 14 new tests
+
+### Files added
+- `backend/copilot/conversation_state.py` — `ConversationState`/`ConversationTurn` + an in-memory `session_id -> state` store
+
+### How conversation memory works
+Purely in-process, in-memory (a plain dict keyed by `session_id`) — not durable, doesn't survive a backend restart, doesn't work across multiple backend instances. This is an accepted, explicitly-documented limitation for a local single-process bot; if it ever needs to survive restarts, it should move into the existing `DatabaseManager` rather than growing a second persistence layer. Each `ConversationState` tracks: (1) `last_symbol` — the symbol the last MARKET/TRADING turn actually resolved to, set deterministically by `chat()` itself, never guessed by the LLM; (2) `turns` — a capped (20) list of recent (role, text) pairs, passed to the LLM adapter as real conversation history.
+
+### How live tools are selected
+Unchanged from prior sessions: deterministic keyword routing in `conversational.py`, not LLM function-calling. This session's addition is that a symbol-less question ("Is it bullish?", "What about the premium?") now resolves against `state.last_symbol` if the question itself names no symbol — still 100% deterministic, still zero risk of the LLM inventing which market it's talking about.
+
+### Ollama configuration
+```
+COPILOT_LLM_BACKEND=ollama          # or local_openai_compatible — same adapter, "ollama" is now a first-class name
+COPILOT_LLM_BASE_URL=http://localhost:11434/v1
+COPILOT_LLM_MODEL=llama3.1:8b       # whatever model you've pulled with `ollama pull`
+COPILOT_LLM_TIMEOUT_SECONDS=8
+```
+Default remains `COPILOT_LLM_BACKEND=none` — the Copilot works fully out of the box with zero model download, exactly as before.
+
+### Fallback behavior
+Unchanged and re-verified this session: if the configured Ollama server is unreachable, times out, or returns something unparseable, `LocalOpenAICompatibleAdapter` catches the failure and falls back to the same deterministic `RuleBasedFallbackAdapter` templates, prefixed with `[local LLM unavailable (...) — showing raw verified data instead]`. Trading functionality is never affected either way — `explain()` only produces prose from already-resolved tool output; it cannot call a tool, place an order, or change a number.
+
+### Safety guarantees (re-verified, not re-designed)
+- Ollama never calls tools itself — `conversational.py` resolves every tool call deterministically BEFORE the adapter runs, unchanged from prior sessions.
+- Ollama cannot place orders, bypass `RiskManager`, modify SL/target/risk rules, or approve a rejected trade — it has no code path to any of `execution.py`, `RiskManager`, `PositionSizer`, or `OrderManager`. Confirmed by re-running the full backtest + options-mode + Copilot execution-safety test suites (82 + 126 tests) with zero changes to any of those modules.
+- The explicit system instructions (item 9 of the spec) are now literally sent to the model on every non-GENERAL/EDUCATION call, in addition to being structurally enforced by the tool-resolution-before-explanation design — belt and suspenders, not either/or.
+- This task explicitly did NOT implement automatic paper execution changes — `backend/copilot/scan_loop.py` and `execution.py` are untouched this session.
+
+### Cross-mode check (required before touching anything shared)
+No shared trading component was modified. `TradingEngine`, `RiskManager`, `PositionSizer`, `OrderManager`, `StrategySignal`, `TradePlan`, `decision_engine.py`, and `scan_loop.py` are byte-for-byte unchanged this session — every change is inside `backend/copilot/conversational.py`, `llm_adapter.py`, `config.py`, the new `conversation_state.py`, the chat API route, and the frontend chat component. Verified: full Backtest suite (`test_options_backtest_contract.py`, `test_options_backtest_architecture.py`, `test_multi_symbol_backtest.py`, `test_backtest_task_manager.py`) and `test_options_mode.py` (Paper/Live-shared strategy code) — **82/82 passed, unchanged**.
+
+### Test results
+- `python3 pytest.py backend/tests/test_copilot.py` → **126/126 passed** (was 116; 14 new — conversation memory ×5, Ollama config/fallback ×4, plus routing fixes needed to make "What about Sensex?" and "Which one are you analyzing now?" resolve correctly, caught by actually running the exact example conversations from the spec, not assumed)
+- Backtest + options-mode suites → **82/82 passed**
+- `python3 run_all_tests.py` (full project) → **230/236 passed** — same 6 pre-existing sandbox-only failures as every prior session
+- `npm run build` → succeeds
+
+### Remaining issues
+- The local Ollama backend is still untested against a real running Ollama server — no such server exists in this sandbox (same caveat as every prior session). The fallback-on-unreachable path IS tested and passes.
+- Conversation memory is in-process only; a multi-instance or restart-heavy deployment would lose it. Acceptable for the current single-process architecture, flagged for future reference.
+- Symbol-mention-only fallback routing (an unmatched message that names a known symbol routes to MARKET) is a small, deliberate router change beyond just "add memory" — needed to make the spec's own SENSEX example actually work, called out explicitly rather than silently bundled in.

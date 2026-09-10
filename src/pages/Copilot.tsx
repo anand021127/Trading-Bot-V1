@@ -81,6 +81,11 @@ export default function Copilot() {
   const [input, setInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Conversation memory session id — persisted across chat turns (and
+  // across page remounts, within the same tab) so follow-ups like
+  // "Which market are you analyzing?" resolve correctly. A fresh one is
+  // requested from the backend on first use if none is stored yet.
+  const sessionIdRef = useRef<string | null>(sessionStorage.getItem('copilot_session_id'))
 
   // ISSUE 4 fix: both the manual "Analyze" button and the 10s poll call
   // the same trade-plan endpoint independently. Without sequencing, a
@@ -154,7 +159,11 @@ export default function Copilot() {
     setInput('')
     setChatLoading(true)
     try {
-      const r = await api.post('/api/copilot/chat', { question })
+      const r = await api.post('/api/copilot/chat', { question, session_id: sessionIdRef.current })
+      if (r.data.session_id) {
+        sessionIdRef.current = r.data.session_id
+        sessionStorage.setItem('copilot_session_id', r.data.session_id)
+      }
       const ctx = r.data.resolved_context || {}
       const usedLiveData = !!(ctx.market_status || ctx.indicators || ctx.trade_plan || ctx.analysis || ctx.gap_analysis)
       setMessages(m => [...m, {

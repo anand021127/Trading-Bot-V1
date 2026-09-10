@@ -15,7 +15,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+import uuid
+
 from backend.copilot.config import load_copilot_settings
+from backend.copilot.conversation_state import get_session
 from backend.copilot.conversational import chat as copilot_chat
 from backend.copilot.tools import CopilotTools
 
@@ -25,6 +28,7 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     question: str
     symbols: Optional[List[str]] = None  # which symbols to pull candles for, if the caller has them cached
+    session_id: Optional[str] = None  # carries conversation memory across turns — see conversation_state.py
 
 
 class TradePlanRequest(BaseModel):
@@ -59,13 +63,21 @@ def copilot_chat_endpoint(body: ChatRequest, request: Request) -> Dict[str, Any]
     if not settings.enabled:
         return {"question": body.question,
                 "answer": "The Copilot is disabled (COPILOT_ENABLED=false). Diagnostics/status endpoints still work.",
-                "resolved_context": {}, "adapter": None}
+                "resolved_context": {}, "adapter": None, "session_id": body.session_id}
     tools = _build_tools(request)
+    # session_id carries conversation memory (last-analyzed symbol,
+    # recent turn history) across HTTP calls — in-memory only, per
+    # backend/copilot/conversation_state.py. A caller with no session_id
+    # gets a fresh one back so the frontend can persist and reuse it.
+    session_id = body.session_id or str(uuid.uuid4())
+    state = get_session(session_id)
     # Live candles are fetched internally by conversational.py's plan
     # functions via tools.get_live_candles() when not supplied here — an
     # explicit candles_by_symbol is only needed if the caller has a
     # fresher in-memory window than a fresh REST fetch would give.
-    return copilot_chat(body.question, tools, candles_by_symbol={})
+    result = copilot_chat(body.question, tools, candles_by_symbol={}, state=state)
+    result["session_id"] = session_id
+    return result
 
 
 @router.get("/diagnostics")

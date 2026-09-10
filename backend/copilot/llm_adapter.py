@@ -25,17 +25,21 @@ import json
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from backend.copilot.config import CopilotSettings, load_copilot_settings
+from backend.copilot.conversation_state import ConversationTurn
 
 
 class LLMAdapter(ABC):
     @abstractmethod
-    def explain(self, question: str, context: Dict[str, Any]) -> str:
+    def explain(self, question: str, context: Dict[str, Any], history: Optional[List[ConversationTurn]] = None) -> str:
         """Turn already-resolved tool output (`context`) into a natural-
         language answer to `question`. Must never introduce a number,
-        price, or state that isn't present in `context`."""
+        price, or state that isn't present in `context`. `history`, when
+        given, is recent (role, text) conversation turns — used for
+        continuity on GENERAL/EDUCATION follow-ups; it is NOT a source of
+        live data and must not be treated as one."""
         raise NotImplementedError
 
 
@@ -92,8 +96,10 @@ class RuleBasedFallbackAdapter(LLMAdapter):
                     "you can only trade in whole multiples of it.",
     }
 
-    def explain(self, question: str, context: Dict[str, Any]) -> str:
+    def explain(self, question: str, context: Dict[str, Any], history: Optional[List[ConversationTurn]] = None) -> str:
         intent = context.get("_intent")
+        if "_which_symbol" in context:
+            return self._format_which_symbol(context["_which_symbol"])
         if intent == "GENERAL":
             return self._format_general(context.get("_question", question))
         if intent == "EDUCATION":
@@ -115,6 +121,12 @@ class RuleBasedFallbackAdapter(LLMAdapter):
         if "bot_health" in context:
             return self._format_health(context)
         return self._generic(context)
+
+    def _format_which_symbol(self, last_symbol: Optional[str]) -> str:
+        if not last_symbol:
+            return ("I haven't analyzed a specific market yet in this conversation — ask me about "
+                    "NIFTY50, BANKNIFTY, SENSEX, or another supported symbol.")
+        return last_symbol
 
     def _format_general(self, question: str) -> str:
         q = question.lower()
@@ -323,36 +335,57 @@ class LocalOpenAICompatibleAdapter(LLMAdapter):
         self.settings = settings
         self._fallback = RuleBasedFallbackAdapter()
 
-    def explain(self, question: str, context: Dict[str, Any]) -> str:
+    def explain(self, question: str, context: Dict[str, Any], history: Optional[List[ConversationTurn]] = None) -> str:
+        # "Which market are you analyzing?" is answered deterministically
+        # regardless of backend — this is conversation MEMORY, not
+        # something to hand to the model to (possibly wrongly) infer.
+        if "_which_symbol" in context:
+            return self._fallback._format_which_symbol(context["_which_symbol"])
+
         intent = context.get("_intent")
+        history_messages = [{"role": t.role, "content": t.text} for t in (history or [])]
+
+        base_system = (
+            "You are the conversational interface for a trading bot's Copilot. "
+            "Follow these rules strictly:\n"
+            "1. Never invent market prices, indicators, option premiums, positions, "
+            "quantities, or trade results — only state what is explicitly given to you.\n"
+            "2. Use the structured data provided for any current-state question; you are "
+            "not given tools to call yourself, so if data isn't in what you're given, "
+            "say plainly that you don't have it.\n"
+            "3. Clearly distinguish live/current data from historical or backtest data "
+            "when the context indicates which one it is.\n"
+            "4. If something is marked unavailable or stale in the data, say so — never "
+            "paper over a gap with a guess.\n"
+            "5. Never claim a trade was executed, a paper position was opened, or an "
+            "order was placed unless the data explicitly confirms it — you have no "
+            "ability to place, modify, or cancel any order yourself.\n"
+            "6. You may use the recent conversation history for context (e.g. resolving "
+            "\"it\"/\"that\" to whatever was discussed), but never invent new facts from it."
+        )
+
         if intent in ("GENERAL", "EDUCATION"):
             # Conversational/educational — no live data involved, so the
             # LLM can just answer naturally. Still deterministic-safe: if
             # it's unreachable, falls back to the same canned responses.
-            system_prompt = (
-                "You are a friendly trading-bot assistant. Answer briefly and naturally. "
-                "You are NEVER given live market data for this kind of question, so do not "
-                "invent any price, indicator, or trade detail — if asked about the market, "
-                "say you'd need to check current data for that."
+            system_prompt = base_system + (
+                "\n\nThis particular message is general conversation or an educational "
+                "question — you were NOT given any live market data for it. If asked "
+                "about current market state, say you'd need to check current data."
             )
             user_prompt = question
         else:
-            system_prompt = (
-                "You are a trading bot's explanation assistant. You are given "
-                "ALREADY-COMPUTED structured data below. Explain it in plain "
-                "language, in at most 6 sentences. Do NOT invent any price, "
-                "percentage, or status that is not present in the data. If the "
-                "data says something is unavailable, say so plainly instead of "
-                "guessing."
+            system_prompt = base_system + (
+                "\n\nBelow is ALREADY-COMPUTED structured data resolved by real tools for "
+                "this question. Explain it in plain language, in at most 6 sentences."
             )
             user_prompt = f"Question: {question}\n\nData:\n{json.dumps(context, indent=2, default=str)}"
 
+        messages = [{"role": "system", "content": system_prompt}] + history_messages + \
+                   [{"role": "user", "content": user_prompt}]
         payload = {
             "model": self.settings.llm_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            "messages": messages,
             "temperature": 0.1,
             "max_tokens": 400,
         }
@@ -372,6 +405,6 @@ class LocalOpenAICompatibleAdapter(LLMAdapter):
 
 def get_llm_adapter(settings: CopilotSettings = None) -> LLMAdapter:
     settings = settings or load_copilot_settings()
-    if settings.llm_backend == "local_openai_compatible":
+    if settings.llm_backend in ("local_openai_compatible", "ollama"):
         return LocalOpenAICompatibleAdapter(settings)
     return RuleBasedFallbackAdapter()

@@ -26,7 +26,7 @@ class CopilotSettings:
     mode: str                  # "shadow" | "paper" | "live"
     min_risk_reward: float     # deterministic floor a TradePlan must clear
     max_quote_age_seconds: float
-    llm_backend: str           # "none" | "local_openai_compatible"
+    llm_backend: str           # "none" | "local_openai_compatible" | "ollama" (alias for local_openai_compatible)
     llm_base_url: str          # e.g. http://localhost:11434/v1 for Ollama
     llm_model: str
     llm_timeout_seconds: float
@@ -40,7 +40,7 @@ def load_copilot_settings() -> CopilotSettings:
         mode = "shadow"  # unrecognized -> fail safe to shadow, never to live
 
     backend = os.getenv("COPILOT_LLM_BACKEND", "none").strip().lower()
-    if backend not in ("none", "local_openai_compatible"):
+    if backend not in ("none", "local_openai_compatible", "ollama"):
         backend = "none"  # unrecognized -> fail safe to the rule-based fallback
 
     return CopilotSettings(
