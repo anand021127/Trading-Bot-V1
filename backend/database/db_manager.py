@@ -203,7 +203,12 @@ class DatabaseManager:
     # ─── Trades ───────────────────────────────────────────────────────────────
 
     def insert_trade(self, trade: Trade) -> None:
-        """Insert a trade record."""
+        """Insert a trade record at ENTRY time. Only writes the legacy
+        columns (id, symbol, side, quantity, price, timestamp, strategy,
+        status, pnl, notes) — extended forensic fields (entry_price,
+        indicators-at-entry, and everything exit-related) are populated
+        separately by record_trade_entry_details() and update_trade_exit()
+        below."""
         with self._connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO trades
@@ -213,6 +218,96 @@ class DatabaseManager:
                     trade.id, trade.symbol, trade.side, trade.quantity,
                     trade.price, trade.timestamp.isoformat(),
                     trade.strategy, trade.status, trade.pnl, trade.notes,
+                ),
+            )
+            conn.commit()
+
+    def record_trade_entry_details(
+        self,
+        trade_id: str,
+        entry_time: str,
+        entry_price: float,
+        initial_stop: Optional[float] = None,
+        atr_at_entry: Optional[float] = None,
+        rsi_at_entry: Optional[float] = None,
+        choppiness_at_entry: Optional[float] = None,
+        volume_ratio: Optional[float] = None,
+        ema20_at_entry: Optional[float] = None,
+        ema50_at_entry: Optional[float] = None,
+        trend_bias: Optional[str] = None,
+        orb_high: Optional[float] = None,
+        orb_low: Optional[float] = None,
+        conditions_checked: Optional[str] = None,
+    ) -> None:
+        """Fills in the extended entry-side forensic columns that
+        insert_trade() structurally cannot write. Call this right after
+        insert_trade() at fill time, with whatever the signal's
+        indicators actually had — never fabricate a value for a field
+        the caller doesn't have; pass None and it stays NULL, which is
+        honest, not a display bug."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE trades SET
+                       entry_time = ?, entry_price = ?, initial_stop = ?,
+                       atr_at_entry = ?, rsi_at_entry = ?, choppiness_at_entry = ?,
+                       volume_ratio = ?, ema20_at_entry = ?, ema50_at_entry = ?,
+                       trend_bias = ?, orb_high = ?, orb_low = ?,
+                       conditions_checked = ?, created_at = COALESCE(created_at, ?)
+                   WHERE id = ?""",
+                (
+                    entry_time, entry_price, initial_stop,
+                    atr_at_entry, rsi_at_entry, choppiness_at_entry,
+                    volume_ratio, ema20_at_entry, ema50_at_entry,
+                    trend_bias, orb_high, orb_low,
+                    conditions_checked, entry_time,
+                    trade_id,
+                ),
+            )
+            conn.commit()
+
+    def update_trade_exit(
+        self,
+        trade_id: str,
+        exit_time: str,
+        exit_price: float,
+        exit_reason: str,
+        gross_pnl: float,
+        net_pnl: float,
+        brokerage: Optional[float] = None,
+        stt: Optional[float] = None,
+        pnl_r: Optional[float] = None,
+        trade_duration_min: Optional[int] = None,
+        final_stop: Optional[float] = None,
+        stage_at_exit: Optional[int] = None,
+        max_favorable: Optional[float] = None,
+        max_adverse: Optional[float] = None,
+    ) -> None:
+        """ROOT CAUSE FIX (see docs/COPILOT.md, forensic audit session):
+        this method did not exist at all before — the exit code computed
+        gross_pnl/net_pnl/pnl_r correctly and sent them to RiskManager
+        and TradeLogger's file log, but NEVER persisted them back to the
+        `trades` row created at entry, leaving every trade's extended
+        columns (entry_price, exit_price, gross_pnl, net_pnl, ...)
+        permanently NULL regardless of how many real round-trip trades
+        occurred. This also updates the legacy `pnl` and `status`
+        columns so `_get_today_stats()`-style aggregation (which reads
+        `pnl`/`net_pnl` and falls back between them) works correctly
+        without needing its own changes."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE trades SET
+                       exit_time = ?, exit_price = ?, exit_reason = ?,
+                       gross_pnl = ?, net_pnl = ?, brokerage = ?, stt = ?, pnl_r = ?,
+                       trade_duration_min = ?, final_stop = ?, stage_at_exit = ?,
+                       max_favorable = ?, max_adverse = ?,
+                       pnl = ?, status = 'closed'
+                   WHERE id = ?""",
+                (
+                    exit_time, exit_price, exit_reason,
+                    gross_pnl, net_pnl, brokerage, stt, pnl_r,
+                    trade_duration_min, final_stop, stage_at_exit,
+                    max_favorable, max_adverse,
+                    net_pnl, trade_id,
                 ),
             )
             conn.commit()

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from ..websocket import manager as websocket_manager
 from backend.config.settings import load_settings
@@ -16,7 +16,14 @@ router = APIRouter()
 settings = load_settings()
 db_manager = DatabaseManager(db_path=settings.database.path)
 
-# Singleton risk manager (shared state across requests)
+# Fallback risk manager — used ONLY when no live engine is attached to
+# this process (e.g. an isolated test context). When a real engine is
+# running, get_overview() below reads ITS risk_manager instead — see the
+# root-cause note there: this module-level instance used to be read
+# unconditionally, meaning the dashboard's Risk Meter was tracking a
+# phantom RiskManager that never received a single record_trade_result()
+# call from the actual trading loop, regardless of how many real trades
+# executed.
 _risk_manager = RiskManager(
     capital=settings.capital.total,
     daily_loss_limit=settings.risk.max_daily_loss_pct,
@@ -74,9 +81,21 @@ def _get_today_stats() -> Dict[str, Any]:
 
 
 @router.get("/overview")
-async def get_overview() -> Dict[str, Any]:
+async def get_overview(request: Request) -> Dict[str, Any]:
     today_stats = _get_today_stats()
-    risk_status = _risk_manager.get_status()
+    # ROOT CAUSE FIX: previously always read the module-level
+    # `_risk_manager` above, a completely separate instance from the one
+    # TradingEngine actually calls record_trade_result()/
+    # record_exposure_closed() on during real trading — so the dashboard's
+    # Risk Meter ("0/4 trades", "0 consecutive losses") was structurally
+    # incapable of reflecting real risk state no matter what happened in
+    # the live engine. Now reads the REAL engine's risk_manager when one
+    # is attached to this process (the normal running-bot case), and only
+    # falls back to the phantom local instance when none is (e.g. a bare
+    # test harness with no engine wired up).
+    engine = getattr(request.app.state, "engine", None)
+    active_risk_manager = getattr(engine, "risk_manager", None) or _risk_manager
+    risk_status = active_risk_manager.get_status()
 
     positions: List[Dict[str, Any]] = []
     try:

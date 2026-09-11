@@ -15,6 +15,7 @@ V21-FINAL changes:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -838,6 +839,37 @@ class TradingEngine:
                       f"instrument={contract_instrument_key}",
             )
             self.db_manager.insert_trade(trade)
+            # ROOT CAUSE FIX: previously nothing ever populated the
+            # extended entry-side columns (entry_price, indicators-at-
+            # entry, initial_stop) — they stayed NULL forever. Captured
+            # here from the same `signal` already used to build the
+            # position above; nothing here is fabricated, only what the
+            # signal actually carried is written (missing indicators are
+            # passed as None, not guessed).
+            ind = signal.indicators or {}
+            try:
+                self.db_manager.record_trade_entry_details(
+                    trade_id=trade_id,
+                    entry_time=datetime.now(timezone.utc).isoformat(),
+                    entry_price=actual_price,
+                    initial_stop=signal.stop_loss,
+                    atr_at_entry=ind.get("atr"),
+                    rsi_at_entry=ind.get("rsi"),
+                    choppiness_at_entry=ind.get("choppiness_index"),
+                    volume_ratio=ind.get("volume_ratio"),
+                    ema20_at_entry=ind.get("ema20"),
+                    ema50_at_entry=ind.get("ema50"),
+                    trend_bias=ind.get("underlying_trend") or ind.get("trend_bias"),
+                    orb_high=ind.get("orb_high"),
+                    orb_low=ind.get("orb_low"),
+                    conditions_checked=json.dumps(signal.conditions) if signal.conditions else None,
+                )
+            except Exception as e:
+                # Entry-detail persistence must never block the trade
+                # itself — the core Trade row (and the position) are
+                # already committed above; a logging-layer failure here
+                # is a data-completeness issue, not a trading-safety one.
+                TradeLogger.log_error("TradingEngine.record_trade_entry_details", e, {"trade_id": trade_id})
 
             self._open_positions[signal.symbol] = {
                 "trade_id": trade_id,
@@ -1192,10 +1224,46 @@ class TradingEngine:
             else:
                 del self._open_positions[symbol]
 
+            trade_duration_min = 0
+            try:
+                entry_dt = datetime.fromisoformat(pos["entry_time"])
+                trade_duration_min = int((datetime.now(timezone.utc) - entry_dt).total_seconds() / 60)
+            except Exception:
+                pass  # duration stays 0 rather than a guessed value
+
             TradeLogger.log_exit(
                 pos["trade_id"], symbol, exit_price, reason,
-                gross_pnl, net_pnl, pnl_r, 0, 1, settings.mode,
+                gross_pnl, net_pnl, pnl_r, trade_duration_min, 1, settings.mode,
             )
+            # ROOT CAUSE FIX: this DB write did not exist before — P&L
+            # was computed correctly (above) and sent to RiskManager and
+            # the file-based TradeLogger, but never persisted back to the
+            # `trades` row created at entry, so every trade's extended
+            # columns (exit_price, gross_pnl, net_pnl, ...) stayed NULL
+            # forever regardless of how many real trades closed. This is
+            # what made the Overview dashboard show 0 trades / ₹0 P&L
+            # despite real paper trades having genuinely executed.
+            try:
+                self.db_manager.update_trade_exit(
+                    trade_id=pos["trade_id"],
+                    exit_time=datetime.now(timezone.utc).isoformat(),
+                    exit_price=exit_price,
+                    exit_reason=reason,
+                    gross_pnl=gross_pnl,
+                    net_pnl=net_pnl,
+                    brokerage=brokerage,
+                    stt=stt,
+                    pnl_r=pnl_r,
+                    trade_duration_min=trade_duration_min,
+                    final_stop=pos.get("trailing_stop", pos.get("stop_loss")),
+                    stage_at_exit=1,
+                )
+            except Exception as e:
+                # Same principle as entry-detail persistence: a logging
+                # gap must never block or reverse an already-executed
+                # exit — the position is already closed and RiskManager
+                # already has the real P&L by this point.
+                TradeLogger.log_error("TradingEngine.update_trade_exit", e, {"trade_id": pos.get("trade_id")})
             pnl_icon = "✅" if net_pnl >= 0 else "❌"
             self.notify(
                 f"{pnl_icon} EXIT: {symbol} @ ₹{exit_price:.2f} | "
