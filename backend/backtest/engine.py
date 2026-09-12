@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import bisect
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import Enum
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -333,6 +333,20 @@ class BacktestResult:
     portfolio_summary: Dict[str, Any] = field(default_factory=dict)
     max_simultaneous_positions: int = 0
     total_portfolio_risk: float = 0.0
+    # ── Coverage validation (this session's fix — see docs) ──────────
+    # A backtest must never silently present partial data as if the
+    # full requested period were tested. These fields make the gap
+    # explicit and machine-checkable, not just visible in a chart.
+    requested_start_date: Optional[str] = None
+    requested_end_date: Optional[str] = None
+    actual_data_start_date: Optional[str] = None
+    actual_data_end_date: Optional[str] = None
+    trading_days_requested: int = 0
+    trading_days_with_data: int = 0
+    trading_days_missing: int = 0
+    data_coverage_pct: float = 0.0
+    coverage_status: str = "UNKNOWN"  # "COMPLETE" | "INCOMPLETE" | "FAILED" | "UNKNOWN"
+    coverage_notes: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -438,6 +452,9 @@ class BacktestEngine:
         option_contexts: Optional[Dict[str, Dict[str, Any]]] = None,
         options_data_loader: Optional[HistoricalOptionsDataLoader] = None,
         require_real_options: bool = False,
+        requested_start_date: Optional[str] = None,
+        requested_end_date: Optional[str] = None,
+        min_coverage_pct: float = 80.0,
     ) -> BacktestResult:
         """Chronological multi-symbol event-driven backtest simulation.
         
@@ -1360,6 +1377,78 @@ class BacktestEngine:
             dq.contracts_resolved = len(all_trades)
             dq.contracts_unavailable = 0
         result.data_quality = dq
+
+        # ── 10. Coverage validation — the actual fix for "backtest
+        # claims a full year but only tested a fraction of it" ──
+        result.requested_start_date = requested_start_date
+        result.requested_end_date = requested_end_date
+
+        all_timestamps: List[str] = []
+        for candles in symbol_candles.values():
+            for c in candles:
+                ts = c.get("timestamp")
+                if ts:
+                    all_timestamps.append(str(ts)[:10])  # date part only
+
+        if all_timestamps:
+            result.actual_data_start_date = min(all_timestamps)
+            result.actual_data_end_date = max(all_timestamps)
+            trading_days_with_data = len(set(all_timestamps))
+            result.trading_days_with_data = trading_days_with_data
+        else:
+            trading_days_with_data = 0
+
+        if requested_start_date and requested_end_date:
+            try:
+                req_start = datetime.fromisoformat(requested_start_date).date()
+                req_end = datetime.fromisoformat(requested_end_date).date()
+                # Approximate trading days as weekdays in the requested
+                # range (a simple, honest floor — it doesn't subtract
+                # exchange holidays, so real coverage % will read
+                # slightly LOW rather than ever appearing artificially
+                # high; never rounds in the favorable direction).
+                requested_trading_days = 0
+                d = req_start
+                while d <= req_end:
+                    if d.weekday() < 5:
+                        requested_trading_days += 1
+                    d += timedelta(days=1)
+                result.trading_days_requested = requested_trading_days
+
+                if requested_trading_days > 0:
+                    coverage_pct = min(100.0, trading_days_with_data / requested_trading_days * 100.0)
+                    result.data_coverage_pct = round(coverage_pct, 2)
+                    result.trading_days_missing = max(0, requested_trading_days - trading_days_with_data)
+
+                    if coverage_pct >= min_coverage_pct:
+                        result.coverage_status = "COMPLETE"
+                        result.coverage_notes = (
+                            f"{trading_days_with_data}/{requested_trading_days} requested trading days "
+                            f"had data ({coverage_pct:.1f}%) — meets the {min_coverage_pct:.0f}% threshold."
+                        )
+                    else:
+                        result.coverage_status = "FAILED_INCOMPLETE_COVERAGE"
+                        result.coverage_notes = (
+                            f"Only {trading_days_with_data}/{requested_trading_days} requested trading days "
+                            f"({coverage_pct:.1f}%) actually had candle data — below the {min_coverage_pct:.0f}% "
+                            f"threshold. This backtest does NOT represent the full requested "
+                            f"{requested_start_date} to {requested_end_date} period and must not be reported "
+                            f"as if it does. Actual data coverage: {result.actual_data_start_date} to "
+                            f"{result.actual_data_end_date}."
+                        )
+            except (ValueError, TypeError) as e:
+                result.coverage_status = "UNKNOWN"
+                result.coverage_notes = f"Could not parse requested date range: {e}"
+        else:
+            # No requested range was given — we can report what data was
+            # actually used, but cannot judge whether it's "complete"
+            # relative to anything, so this is honestly UNKNOWN, not
+            # COMPLETE by default.
+            result.coverage_status = "UNKNOWN"
+            result.coverage_notes = (
+                "No requested_start_date/requested_end_date was supplied to run() — coverage "
+                "cannot be assessed. Pass both to get a COMPLETE/FAILED_INCOMPLETE_COVERAGE verdict."
+            )
 
         return result
 
