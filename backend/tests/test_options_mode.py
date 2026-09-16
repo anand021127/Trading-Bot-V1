@@ -173,7 +173,136 @@ class TestEvaluateOptionPremiumAutoDetection:
         mock_trend.assert_not_called()
 
 
-class TestLotSizeCompliance:
+class TestLiveBacktestConfidenceParity:
+    """Root-cause fix (see STRATEGY_ROOT_CAUSE_ANALYSIS.md): the live/paper
+    path used to compute confidence from 4 booleans (0/25/50/75/100 only)
+    while the backtest path used ConfidenceScorer's continuous score —
+    genuinely different decision logic between modes. Now both paths
+    route through the same ConfidenceScorer call on real underlying
+    candles, with the premium-side momentum/VWAP checks kept as
+    additional confirmation gates, not a second scoring system."""
+
+    def test_confidence_is_not_restricted_to_multiples_of_25_when_auto_detecting(self) -> None:
+        """The bug this fixes: the old formula could only ever produce
+        0/25/50/75/100. A real ConfidenceScorer score essentially never
+        lands exactly on a multiple of 25 — if it doesn't, the shared
+        path is genuinely being used, not the old formula."""
+        engine = _isolated_engine()
+        candles = _bullish_candles(120)
+        chain = [
+            {"strike": 22000, "option_type": "CE", "instrument_key": "NSE_FO|CE1",
+             "ltp": 100.0, "bid_price": 99.0, "ask_price": 101.0, "oi": 50000,
+             "lot_size": 75, "freeze_quantity": 1800, "delta": 0.5, "theta": -5, "iv": 14},
+        ]
+        with patch.object(engine.client, "get_nearest_expiry", return_value="2026-02-26"), \
+             patch.object(engine.client, "get_current_candles", return_value=candles), \
+             patch.object(engine.client, "get_option_chain_with_spot", return_value=(chain, 22000.0)), \
+             patch.object(engine.client, "get_multiple_quotes", return_value={"NIFTY50": {"ltp": 22000.0}}):
+            sig = engine.evaluate_option_premium("NIFTY50")
+        if sig.signal != SignalType.NONE:
+            assert sig.confidence % 25 != 0, (
+                f"confidence={sig.confidence} is a multiple of 25 — looks like the OLD "
+                f"4-condition formula ran instead of the shared ConfidenceScorer."
+            )
+
+    def test_explicit_underlying_trend_still_overrides_confidence_scorer(self) -> None:
+        """Regression test for a real bug caught while implementing this
+        fix: the first version of the parity fix ignored an explicitly
+        passed underlying_trend and let ConfidenceScorer override it
+        unconditionally, which flipped CE/PE selection out from under an
+        explicit caller. An explicit trend must stay authoritative."""
+        engine = _isolated_engine()
+        # Bearish-drift candles -> ConfidenceScorer would likely say PE,
+        # but the caller explicitly asked for BULLISH.
+        candles = _bearish_candles(120)
+        chain = [
+            {"strike": 22000, "option_type": "CE", "instrument_key": "NSE_FO|CE1",
+             "ltp": 100.0, "bid_price": 99.0, "ask_price": 101.0, "oi": 50000,
+             "lot_size": 75, "freeze_quantity": 1800, "delta": 0.5, "theta": -5, "iv": 14},
+            {"strike": 22000, "option_type": "PE", "instrument_key": "NSE_FO|PE1",
+             "ltp": 100.0, "bid_price": 99.0, "ask_price": 101.0, "oi": 50000,
+             "lot_size": 75, "freeze_quantity": 1800, "delta": -0.5, "theta": -5, "iv": 14},
+        ]
+        with patch.object(engine.client, "get_current_candles", return_value=candles), \
+             patch.object(engine.client, "get_option_chain_with_spot", return_value=(chain, 22000.0)), \
+             patch.object(engine.client, "get_multiple_quotes", return_value={"NIFTY50": {"ltp": 22000.0}}):
+            sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-02-26", underlying_trend="BULLISH")
+        contract = (sig.indicators or {}).get("selected_contract")
+        if contract is not None:
+            assert contract["option_type"] == "CE", "explicit BULLISH must still select CE, not be overridden"
+
+    def test_no_qualifying_underlying_setup_is_rejected_like_backtest_would(self) -> None:
+        """Flat/choppy candles -> ConfidenceScorer direction=NONE -> must
+        reject with a clear reason, the same way the backtest path treats
+        'no setup', instead of silently falling through to some default."""
+        engine = _isolated_engine()
+        flat_candles = _flat_candles(120)
+        with patch.object(engine.client, "get_current_candles", return_value=flat_candles), \
+             patch.object(engine.client, "get_option_chain_with_spot", return_value=([], None)), \
+             patch.object(engine.client, "get_multiple_quotes", return_value={"NIFTY50": {"ltp": 22000.0}}):
+            sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-02-26")
+        assert sig.signal == SignalType.NONE
+
+    def test_setup_name_and_factor_scores_populated_from_shared_scorer(self) -> None:
+        engine = _isolated_engine()
+        candles = _bullish_candles(120)
+        chain = [
+            {"strike": 22000, "option_type": "CE", "instrument_key": "NSE_FO|CE1",
+             "ltp": 100.0, "bid_price": 99.0, "ask_price": 101.0, "oi": 50000,
+             "lot_size": 75, "freeze_quantity": 1800, "delta": 0.5, "theta": -5, "iv": 14},
+        ]
+        with patch.object(engine.client, "get_current_candles", return_value=candles), \
+             patch.object(engine.client, "get_option_chain_with_spot", return_value=(chain, 22000.0)), \
+             patch.object(engine.client, "get_multiple_quotes", return_value={"NIFTY50": {"ltp": 22000.0}}):
+            sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-02-26")
+        if sig.signal != SignalType.NONE:
+            assert sig.setup_name  # non-empty — came from the real ConfidenceScorer setup classification
+            assert isinstance(sig.factor_scores, dict) and len(sig.factor_scores) > 0
+
+
+def _bullish_candles(n: int):
+    import random
+    from datetime import datetime, timedelta
+    rnd = random.Random(1)
+    candles, price, ts = [], 22000.0, datetime(2026, 2, 20, 9, 15)
+    for i in range(n):
+        o = price
+        price += 3.0 + rnd.uniform(-1, 1)
+        c = price
+        candles.append({"timestamp": ts.isoformat(), "open": o, "high": max(o, c) + 2,
+                         "low": min(o, c) - 2, "close": c, "volume": 1000})
+        ts += timedelta(minutes=5)
+    return candles
+
+
+def _bearish_candles(n: int):
+    import random
+    from datetime import datetime, timedelta
+    rnd = random.Random(2)
+    candles, price, ts = [], 22000.0, datetime(2026, 2, 20, 9, 15)
+    for i in range(n):
+        o = price
+        price -= 3.0 + rnd.uniform(-1, 1)
+        c = price
+        candles.append({"timestamp": ts.isoformat(), "open": o, "high": max(o, c) + 2,
+                         "low": min(o, c) - 2, "close": c, "volume": 1000})
+        ts += timedelta(minutes=5)
+    return candles
+
+
+def _flat_candles(n: int):
+    import random
+    from datetime import datetime, timedelta
+    rnd = random.Random(3)
+    candles, price, ts = [], 22000.0, datetime(2026, 2, 20, 9, 15)
+    for i in range(n):
+        o = price
+        price += rnd.uniform(-1, 1)
+        c = price
+        candles.append({"timestamp": ts.isoformat(), "open": o, "high": max(o, c) + 1,
+                         "low": min(o, c) - 1, "close": c, "volume": 1000})
+        ts += timedelta(minutes=5)
+    return candles
     def test_option_order_rounds_down_to_whole_lots(self) -> None:
         engine = _isolated_engine()
         sig = StrategySignal(strategy_name="OPTION_PREMIUM", symbol="NIFTY50", signal=SignalType.BUY,

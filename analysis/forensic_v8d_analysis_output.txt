@@ -1,0 +1,69 @@
+====================================================================================================
+SECTION 1: BY VARIANT, VALIDATION (out-of-sample) PERIOD ONLY
+====================================================================================================
+label  trades  win_rate_pct   avg_win  avg_loss  profit_factor  expectancy     net_pnl   gross_pnl  total_cost  max_drawdown
+ V8-E     246          72.4 2634501.5 -826289.8          8.346   1677860.0 412753563.0 432229309.0  19475746.0   -10946778.0
+ V8-D     245          73.5    4595.2   -2201.6          5.780      2791.9    684026.0    717232.0     33206.0      -16374.0
+ V8-A     245          73.5    3668.5   -1816.1          5.594      2213.4    542292.0    569346.0     27054.0      -13323.0
+ V8-F     256          48.8     756.3    -291.1          2.479       220.3     56400.0     62433.0      6033.0       -3811.0
+ V8-G     256          48.8     756.3    -291.1          2.479       220.3     56400.0     62433.0      6033.0       -3811.0
+ V8-B     245          55.9     746.6    -946.5          1.001         0.2        57.0      5180.0      5123.0      -17542.0
+ V8-C     228          55.3     883.5   -1208.4          0.903       -52.3    -11934.0     -6104.0      5830.0      -22642.0
+
+====================================================================================================
+SECTION 2: V8-D (current production variant) DEEP DIVE — VALIDATION PERIOD
+====================================================================================================
+n=245
+{'label': 'V8-D VALIDATION overall', 'trades': 245, 'win_rate_pct': 73.5, 'avg_win': np.float64(4595.2), 'avg_loss': np.float64(-2201.6), 'profit_factor': np.float64(5.78), 'expectancy': np.float64(2791.9), 'net_pnl': np.float64(684026.0), 'gross_pnl': np.float64(717232.0), 'total_cost': np.float64(33206.0), 'max_drawdown': np.float64(-16374.0)}
+
+--- By exit_reason ---
+{'label': 'INTRADAY_SQUARE_OFF', 'trades': 62, 'win_rate_pct': 6.5, 'avg_win': np.float64(1959.0), 'avg_loss': np.float64(-1591.2), 'profit_factor': np.float64(0.085), 'expectancy': np.float64(-1362.2), 'net_pnl': np.float64(-84454.0), 'gross_pnl': np.float64(-76981.0), 'total_cost': np.float64(7473.0), 'max_drawdown': np.float64(-84365.0)}
+{'label': 'STOP_LOSS', 'trades': 7, 'win_rate_pct': 0.0, 'avg_win': 0.0, 'avg_loss': np.float64(-7258.8), 'profit_factor': np.float64(0.0), 'expectancy': np.float64(-7258.8), 'net_pnl': np.float64(-50811.0), 'gross_pnl': np.float64(-49936.0), 'total_cost': np.float64(875.0), 'max_drawdown': np.float64(-45992.0)}
+{'label': 'TARGET', 'trades': 176, 'win_rate_pct': 100.0, 'avg_win': np.float64(4655.1), 'avg_loss': 0.0, 'profit_factor': None, 'expectancy': np.float64(4655.1), 'net_pnl': np.float64(819292.0), 'gross_pnl': np.float64(844150.0), 'total_cost': np.float64(24858.0), 'max_drawdown': np.float64(0.0)}
+
+--- By option_type (CE vs PE) ---
+{'label': 'CE', 'trades': 129, 'win_rate_pct': 73.6, 'avg_win': np.float64(4609.6), 'avg_loss': np.float64(-2371.1), 'profit_factor': np.float64(5.432), 'expectancy': np.float64(2769.7), 'net_pnl': np.float64(357297.0), 'gross_pnl': np.float64(374889.0), 'total_cost': np.float64(17592.0), 'max_drawdown': np.float64(-17263.0)}
+{'label': 'PE', 'trades': 116, 'win_rate_pct': 73.3, 'avg_win': np.float64(4579.0), 'avg_loss': np.float64(-2015.6), 'profit_factor': np.float64(6.229), 'expectancy': np.float64(2816.6), 'net_pnl': np.float64(326729.0), 'gross_pnl': np.float64(342343.0), 'total_cost': np.float64(15614.0), 'max_drawdown': np.float64(-10056.0)}
+
+--- By underlying ---
+{'label': 'BANKNIFTY', 'trades': 121, 'win_rate_pct': 77.7, 'avg_win': np.float64(4539.2), 'avg_loss': np.float64(-2049.9), 'profit_factor': np.float64(7.709), 'expectancy': np.float64(3068.9), 'net_pnl': np.float64(371337.0), 'gross_pnl': np.float64(387659.0), 'total_cost': np.float64(16322.0), 'max_drawdown': np.float64(-9696.0)}
+{'label': 'NIFTY50', 'trades': 124, 'win_rate_pct': 69.4, 'avg_win': np.float64(4656.3), 'avg_loss': np.float64(-2309.3), 'profit_factor': np.float64(4.563), 'expectancy': np.float64(2521.7), 'net_pnl': np.float64(312689.0), 'gross_pnl': np.float64(329573.0), 'total_cost': np.float64(16884.0), 'max_drawdown': np.float64(-10594.0)}
+
+--- By setup_score bucket ---
+{'label': '(79.0, 89.0]', 'trades': 245, 'win_rate_pct': 73.5, 'avg_win': np.float64(4595.2), 'avg_loss': np.float64(-2201.6), 'profit_factor': np.float64(5.78), 'expectancy': np.float64(2791.9), 'net_pnl': np.float64(684026.0), 'gross_pnl': np.float64(717232.0), 'total_cost': np.float64(33206.0), 'max_drawdown': np.float64(-16374.0)}
+
+--- By entry_hour ---
+{'label': 'hour=09:00', 'trades': 10, 'win_rate_pct': 100.0, 'avg_win': np.float64(4894.7), 'avg_loss': 0.0, 'profit_factor': None, 'expectancy': np.float64(4894.7), 'net_pnl': np.float64(48947.0), 'gross_pnl': np.float64(50419.0), 'total_cost': np.float64(1472.0), 'max_drawdown': np.float64(0.0)}
+{'label': 'hour=10:00', 'trades': 80, 'win_rate_pct': 76.2, 'avg_win': np.float64(4628.4), 'avg_loss': np.float64(-2126.3), 'profit_factor': np.float64(6.989), 'expectancy': np.float64(3024.2), 'net_pnl': np.float64(241934.0), 'gross_pnl': np.float64(252792.0), 'total_cost': np.float64(10858.0), 'max_drawdown': np.float64(-16374.0)}
+{'label': 'hour=11:00', 'trades': 77, 'win_rate_pct': 75.3, 'avg_win': np.float64(4624.5), 'avg_loss': np.float64(-2254.3), 'profit_factor': np.float64(6.262), 'expectancy': np.float64(2927.1), 'net_pnl': np.float64(225388.0), 'gross_pnl': np.float64(235882.0), 'total_cost': np.float64(10494.0), 'max_drawdown': np.float64(-10056.0)}
+{'label': 'hour=12:00', 'trades': 46, 'win_rate_pct': 67.4, 'avg_win': np.float64(4506.0), 'avg_loss': np.float64(-2583.9), 'profit_factor': np.float64(3.604), 'expectancy': np.float64(2194.1), 'net_pnl': np.float64(100928.0), 'gross_pnl': np.float64(107121.0), 'total_cost': np.float64(6193.0), 'max_drawdown': np.float64(-12340.0)}
+{'label': 'hour=13:00', 'trades': 18, 'win_rate_pct': 61.1, 'avg_win': np.float64(4966.9), 'avg_loss': np.float64(-1713.2), 'profit_factor': np.float64(4.556), 'expectancy': np.float64(2369.0), 'net_pnl': np.float64(42643.0), 'gross_pnl': np.float64(45044.0), 'total_cost': np.float64(2402.0), 'max_drawdown': np.float64(-5066.0)}
+{'label': 'hour=14:00', 'trades': 12, 'win_rate_pct': 58.3, 'avg_win': np.float64(3734.5), 'avg_loss': np.float64(-1823.5), 'profit_factor': np.float64(2.867), 'expectancy': np.float64(1418.7), 'net_pnl': np.float64(17024.0), 'gross_pnl': np.float64(18510.0), 'total_cost': np.float64(1486.0), 'max_drawdown': np.float64(-4819.0)}
+{'label': 'hour=15:00', 'trades': 2, 'win_rate_pct': 100.0, 'avg_win': np.float64(3581.5), 'avg_loss': 0.0, 'profit_factor': None, 'expectancy': np.float64(3581.5), 'net_pnl': np.float64(7163.0), 'gross_pnl': np.float64(7464.0), 'total_cost': np.float64(301.0), 'max_drawdown': np.float64(0.0)}
+
+--- By is_expiry_day ---
+{'label': 'expiry_day=False', 'trades': 199, 'win_rate_pct': 72.4, 'avg_win': np.float64(4552.0), 'avg_loss': np.float64(-1764.5), 'profit_factor': np.float64(6.754), 'expectancy': np.float64(2806.2), 'net_pnl': np.float64(558434.0), 'gross_pnl': np.float64(585271.0), 'total_cost': np.float64(26838.0), 'max_drawdown': np.float64(-10159.0)}
+{'label': 'expiry_day=True', 'trades': 46, 'win_rate_pct': 78.3, 'avg_win': np.float64(4767.9), 'avg_loss': np.float64(-4605.1), 'profit_factor': np.float64(3.727), 'expectancy': np.float64(2730.3), 'net_pnl': np.float64(125593.0), 'gross_pnl': np.float64(131961.0), 'total_cost': np.float64(6369.0), 'max_drawdown': np.float64(-10953.0)}
+
+--- MFE/MAE analysis for STOP_LOSS-exited trades ---
+n=7
+mean MFE% (favorable move reached before stop): 57.25
+mean MAE% (adverse move / should equal near -SL): -25.78
+fraction of SL-hit trades where MFE% > 0 (i.e. was in profit before reversing to stop): 100.0 %
+fraction where MFE%% was already > target distance implied (would have hit target if held longer)
+avg option_return_pct on TARGET-hit trades: 15.0%
+SL-hit trades whose MFE reached >=80% of typical target return before reversing: 4 (57.1% of SL trades)
+
+--- Consecutive losses (chronological, V8-D validation) ---
+max consecutive losses: 5
+
+--- Transaction cost impact ---
+gross_pnl sum: 717232.0
+total_cost sum: 33206.0
+net_pnl sum: 684026.0
+cost as % of gross profit (wins only):
+3.0 %
+
+--- gap_through_stop / same_candle_conflict frequency ---
+gap_through_stop count: 0 / 245
+same_candle_conflict count: 0 / 245

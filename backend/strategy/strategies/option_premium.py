@@ -239,10 +239,28 @@ class OptionPremiumStrategy(Strategy):
                 "momentum_ok": momentum_pct >= self.min_momentum_pct,
                 "vwap_confirmed": closes[-1] > current_vwap,
             }
-            confidence = 100.0 * sum(conditions.values()) / len(conditions)
+            # PARITY FIX: confidence now comes from the SAME ConfidenceScorer
+            # call the backtest path uses (passed in via context by
+            # TradingEngine.evaluate_option_premium — see that method's
+            # docstring note), giving a real continuous 0-100 score instead
+            # of this branch's old 0/25/50/75/100-only formula. The
+            # momentum/VWAP conditions above remain as real-time PREMIUM
+            # confirmation GATES on top of that shared score — legitimate
+            # extra information live/paper has that backtest's underlying-only
+            # evaluation doesn't, used to reject a trade, never to inflate it.
+            shared_confidence = context.get("shared_setup_confidence")
+            if shared_confidence is not None:
+                confidence = float(shared_confidence)
+            else:
+                # No shared score was supplied (e.g. an older/direct caller
+                # or a test that builds context by hand) — fall back to the
+                # original formula rather than break that caller.
+                confidence = 100.0 * sum(conditions.values()) / len(conditions)
 
             sig.confidence = confidence
             sig.conditions = conditions
+            sig.setup_name = context.get("shared_setup_name", "") or ""
+            sig.factor_scores = dict(context.get("shared_factor_scores") or {})
             sig.indicators = {
                 "selected_contract": contract,
                 "directional_intent": contract.get("option_type", "CE"),

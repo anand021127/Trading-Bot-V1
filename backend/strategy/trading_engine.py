@@ -559,6 +559,14 @@ class TradingEngine:
         from backend.strategy.strategies.option_premium import OptionPremiumStrategy
         from backend.strategy.signal import StrategySignal
 
+        # Captured BEFORE the auto-detect fallback below overwrites
+        # `underlying_trend` — an explicitly-supplied direction (e.g. from
+        # a test, or a future caller that wants to force a side) must stay
+        # authoritative and skip BOTH the old detect_underlying_trend()
+        # auto-fill AND the new ConfidenceScorer auto-fill below, exactly
+        # like the pre-existing behavior for detect_underlying_trend().
+        trend_was_explicit = bool(underlying_trend)
+
         if not expiry_date:
             try:
                 expiry_date = self.client.get_nearest_expiry(underlying_symbol)
@@ -574,6 +582,22 @@ class TradingEngine:
 
         if not underlying_trend:
             underlying_trend = self.detect_underlying_trend(underlying_symbol)
+
+        # PARITY FIX (root-cause analysis session): fetch the real
+        # underlying candles so OptionPremiumStrategy.evaluate() can run
+        # the SAME ConfidenceScorer-based decision (direction + score)
+        # that the backtest path already uses, instead of a second,
+        # divergent 4-condition premium-only formula that could only
+        # ever produce scores of 0/25/50/75/100. `underlying_trend`
+        # above is kept only as a fallback/logging value now — the
+        # authoritative CE/PE decision comes from ConfidenceScorer inside
+        # evaluate() once real underlying_candles are supplied below.
+        underlying_candles = None
+        try:
+            underlying_candles = self.client.get_current_candles(underlying_symbol, "5minute", limit=100)
+        except Exception as e:
+            TradeLogger.log_error("TradingEngine.evaluate_option_premium.underlying_candles", e,
+                                   {"symbol": underlying_symbol})
 
         try:
             chain, chain_underlying_spot = self.client.get_option_chain_with_spot(underlying_symbol, expiry_date)
@@ -613,11 +637,48 @@ class TradingEngine:
         if strat is None:
             strat = OptionPremiumStrategy()
 
+        # PARITY FIX continued: run the SAME ConfidenceScorer the backtest
+        # path uses, on the real underlying candles fetched above, and let
+        # ITS direction/confidence be authoritative — replacing the old
+        # separate classify_underlying_trend()-based CE/PE pick and the
+        # old 4-condition-only confidence formula. If the scorer can't
+        # reach a directional verdict, this is now a genuine rejection
+        # (matching how the backtest path already treats "no setup"),
+        # not a silent fall-through to whatever classify_underlying_trend
+        # guessed.
+        shared_setup_confidence = None
+        shared_setup_name = ""
+        shared_factor_scores: Dict[str, float] = {}
+        if underlying_candles and not trend_was_explicit:
+            try:
+                from backend.strategy.confidence_scoring import ConfidenceScorer
+                setup_res = ConfidenceScorer().evaluate(underlying_candles)
+                if setup_res.direction in ("CE", "PE"):
+                    underlying_trend = "BULLISH" if setup_res.direction == "CE" else "BEARISH"
+                    shared_setup_confidence = setup_res.confidence
+                    shared_setup_name = setup_res.setup_name
+                    shared_factor_scores = dict(setup_res.factor_scores or {})
+                else:
+                    sig = StrategySignal(strategy_name="OPTION_PREMIUM", symbol=underlying_symbol)
+                    reason = "No qualifying underlying setup (ConfidenceScorer direction=NONE) — same rejection the backtest path would apply."
+                    sig.rejected_reasons = [reason]
+                    sig.entry_reason = "NO TRADE — " + reason
+                    return sig
+            except Exception as e:
+                TradeLogger.log_error("TradingEngine.evaluate_option_premium.ConfidenceScorer", e,
+                                       {"symbol": underlying_symbol})
+                # Scorer itself failed (not "no setup") — fail safe to the
+                # old trend classifier rather than block all trading on a
+                # transient error in this one component.
+
         context = {
             "spot_price": spot,
             "underlying_trend": underlying_trend,
             "option_chain": chain,
             "expiry_date": expiry_date,
+            "shared_setup_confidence": shared_setup_confidence,
+            "shared_setup_name": shared_setup_name,
+            "shared_factor_scores": shared_factor_scores,
         }
         contract = strat.select_contract(context)
         if contract is None or not contract.get("instrument_key"):
