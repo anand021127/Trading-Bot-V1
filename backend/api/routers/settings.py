@@ -483,7 +483,11 @@ async def disconnect_token() -> Dict[str, Any]:
     from backend.broker.token_resolver import update_dotenv_file, DEFAULT_REPO_DOTENV_PATHS, DEFAULT_TOKEN_JSON_PATHS
     os.environ["UPSTOX_ACCESS_TOKEN"] = ""
     try:
-        _db.save_token("")
+        # save_token("") is a no-op by design — must explicitly clear.
+        if hasattr(_db, "clear_token"):
+            _db.clear_token()
+        else:
+            _db.save_setting("upstox_access_token", "")
     except Exception:
         pass
 

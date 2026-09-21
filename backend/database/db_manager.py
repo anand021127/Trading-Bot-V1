@@ -262,6 +262,20 @@ class DatabaseManager:
             self.save_setting("upstox_token_exp", str(exp))
         return True
 
+    def clear_token(self) -> None:
+        """Remove persisted Upstox access token and verification metadata."""
+        for key in (
+            "upstox_access_token",
+            "upstox_token_verified",
+            "upstox_token_source",
+            "upstox_token_verified_at",
+            "upstox_token_exp",
+        ):
+            try:
+                self.save_setting(key, "")
+            except Exception:
+                pass
+
     def load_token(self, require_valid: bool = False) -> Optional[str]:
         token = self.get_setting("upstox_access_token", "")
         if not token:

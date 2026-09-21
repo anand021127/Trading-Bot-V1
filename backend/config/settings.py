@@ -30,9 +30,26 @@ class DatabaseSettings:
 
 
 @dataclass
+class BrokerSettings:
+    """Upstox REST / WebSocket endpoints (no secrets here)."""
+
+    base_url: str = field(
+        default_factory=lambda: _s("UPSTOX_BASE_URL", "https://api.upstox.com/v2")
+    )
+    websocket_url: str = field(
+        default_factory=lambda: _s(
+            "UPSTOX_WEBSOCKET_URL",
+            "wss://api.upstox.com/v3/feed/market-data-feed",
+        )
+    )
+
+
+@dataclass
 class CapitalSettings:
     total: float = field(default_factory=lambda: _f("TRADING_CAPITAL", 100000.0))
     max_allocation_per_trade: float = field(default_factory=lambda: _f("MAX_ALLOCATION_PCT", 0.18))
+    # Fraction of capital held as cash buffer (overview / settings API).
+    cash_buffer: float = field(default_factory=lambda: _f("CASH_BUFFER_PCT", 0.40))
 
 
 @dataclass
@@ -42,7 +59,6 @@ class RiskSettings:
     max_concurrent_positions: int = field(default_factory=lambda: _i("MAX_CONCURRENT_POSITIONS", 1))
     max_consecutive_losses: int = field(default_factory=lambda: _i("MAX_CONSECUTIVE_LOSSES", 3))
     # Cooldown after max consecutive losses (RiskManager.pause_minutes_after_losses).
-    # Default 30 matches RiskManager and historical overview/test config.
     pause_after_losses_minutes: int = field(
         default_factory=lambda: _i("PAUSE_AFTER_LOSSES_MINUTES", 30)
     )
@@ -52,8 +68,26 @@ class RiskSettings:
 @dataclass
 class StrategySettings:
     name: str = field(default_factory=lambda: _s("TRADING_STRATEGY", ""))
+    orb_window_start: str = "09:15"
+    orb_window_end: str = "09:30"
+    entry_window_start: str = "09:30"
     entry_window_end: str = "12:30"
-    exit_all_by: str = "15:15"
+    exit_all_by: str = field(default_factory=lambda: _s("EOD_SQUARE_OFF", "15:15"))
+
+
+@dataclass
+class IndicatorSettings:
+    """Display/defaults for settings API — V8-D strategy keeps its own constants."""
+
+    ema_fast: int = 20
+    ema_slow: int = 50
+    ema_trend: int = 200
+    rsi_period: int = 14
+    rsi_min: int = 55
+    rsi_max: int = 75
+    atr_period: int = 14
+    choppiness_max: float = 61.8
+    volume_multiplier: float = 1.5
 
 
 @dataclass
@@ -66,6 +100,8 @@ class OrderSettings:
 class NotificationSettings:
     telegram_enabled: bool = False
     email_enabled: bool = False
+    sender_email: str = field(default_factory=lambda: _s("SENDER_EMAIL", ""))
+    recipient_email: str = field(default_factory=lambda: _s("RECIPIENT_EMAIL", ""))
 
 
 @dataclass
@@ -74,7 +110,9 @@ class Settings:
     capital: CapitalSettings = field(default_factory=CapitalSettings)
     risk: RiskSettings = field(default_factory=RiskSettings)
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
+    broker: BrokerSettings = field(default_factory=BrokerSettings)
     strategy: StrategySettings = field(default_factory=StrategySettings)
+    indicators: IndicatorSettings = field(default_factory=IndicatorSettings)
     order: OrderSettings = field(default_factory=OrderSettings)
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
 

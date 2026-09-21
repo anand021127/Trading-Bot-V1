@@ -35,9 +35,12 @@ function StatusBadge({ status, isMarketOpen, onFixAuth }: { status: ConnectionSt
   switch (status) {
     case 'CONNECTED':
       return (
-        <div className="flex items-center gap-1.5 text-[11px] sm:text-xs px-2 sm:px-2.5 py-1 rounded-full bg-emerald-950/60 text-emerald-400 border border-emerald-800/40 whitespace-nowrap">
+        <div
+          className="flex items-center gap-1.5 text-[11px] sm:text-xs px-2 sm:px-2.5 py-1 rounded-full bg-emerald-950/60 text-emerald-400 border border-emerald-800/40 whitespace-nowrap"
+          title="Backend / market-data connection is online — not Live trading mode"
+        >
           <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="font-medium">Live</span>
+          <span className="font-medium">Connected</span>
         </div>
       )
     case 'MARKET_CLOSED':
