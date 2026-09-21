@@ -1,0 +1,37 @@
+{
+  "portfolio": {
+    "starting_capital": 100000.0,
+    "ending_equity": 73934.71,
+    "net_profit": -26065.29,
+    "net_profit_pct": -26.07,
+    "total_trades": 62,
+    "total_charges": 2146.29,
+    "max_drawdown_pct": 40.12,
+    "winning_trades": 19,
+    "losing_trades": 43,
+    "win_rate": 30.65,
+    "profit_factor": 0.61,
+    "max_simultaneous_positions": 1,
+    "total_portfolio_risk": 1000.0
+  },
+  "symbol": {
+    "NIFTY50": {
+      "candles": 4650,
+      "signals": 192,
+      "trades": 62,
+      "wins": 19,
+      "losses": 43,
+      "net_pnl": -26065.29,
+      "charges": 2146.29,
+      "win_rate": 30.65,
+      "profit_factor": 0.61,
+      "gross_profit": 41077.25,
+      "gross_loss": 67142.54,
+      "risk_rejections": 0,
+      "data_unavailable": 0,
+      "skipped": false
+    }
+  },
+  "data_mode": "REAL_HISTORICAL_OPTIONS",
+  "n_log": 62
+}

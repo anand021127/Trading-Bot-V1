@@ -1,171 +1,78 @@
-"""Typed application settings loaded from YAML and environment."""
-
+"""Typed application settings."""
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+import os
+from dataclasses import dataclass, field
+from typing import Any
 
-try:
-    from pydantic import BaseModel, Field
-except ImportError:
-    class BaseModel:
-        def __init__(self, **data: Any) -> None:
-            for k, v in data.items():
-                if isinstance(v, dict):
-                    setattr(self, k, BaseModel(**v))
-                else:
-                    setattr(self, k, v)
-        def dict(self) -> Dict[str, Any]:
-            res: Dict[str, Any] = {}
-            for k, v in self.__dict__.items():
-                if isinstance(v, BaseModel):
-                    res[k] = v.dict()
-                else:
-                    res[k] = v
-            return res
-        def __getattr__(self, name: str) -> Any:
-            return None
-    def Field(default: Any = None, default_factory: Any = None, **kwargs: Any) -> Any:
-        if default_factory is not None:
-            return default_factory()
+
+def _f(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
         return default
-
-from backend.config.loader import load_config
-
-
-class BrokerSettings(BaseModel):
-    base_url: str
-    websocket_url: str
+    return float(raw)
 
 
-class CapitalSettings(BaseModel):
-    total: float
-    max_allocation_per_trade: float
-    cash_buffer: float
+def _i(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
 
 
-class RiskSettings(BaseModel):
-    max_risk_per_trade_pct: float
-    max_daily_loss_pct: float
-    max_trades_per_day: int
-    max_concurrent_positions: int
-    max_consecutive_losses: int
-    pause_after_losses_minutes: int
-    max_position_exposure: float = 0.60
-    max_option_tick_age_seconds: int = 30
+def _s(name: str, default: str) -> str:
+    return os.environ.get(name, default)
 
 
-class StrategySettings(BaseModel):
-    name: str
-    timeframe_entry: str
-    timeframe_trend: str
-    orb_window_start: str
-    orb_window_end: str
-    entry_window_start: str
-    entry_window_end: str
-    exit_all_by: str
-    no_new_trades_after: str
+@dataclass
+class DatabaseSettings:
+    path: str = field(default_factory=lambda: _s("DATABASE_PATH", "data/trading_bot.db"))
 
 
-class IndicatorSettings(BaseModel):
-    ema_fast: int
-    ema_slow: int
-    ema_trend: int
-    rsi_period: int
-    rsi_min: int
-    rsi_max: int
-    atr_period: int
-    choppiness_period: int
-    choppiness_max: float
-    volume_lookback: int
-    volume_multiplier: float
+@dataclass
+class CapitalSettings:
+    total: float = field(default_factory=lambda: _f("TRADING_CAPITAL", 100000.0))
+    max_allocation_per_trade: float = field(default_factory=lambda: _f("MAX_ALLOCATION_PCT", 0.18))
 
 
-class FilterSettings(BaseModel):
-    orb_min_width_atr_multiplier: float
-    orb_max_width_atr_multiplier: float
-    max_gap_up_pct: float
-    avoid_round_numbers_pct: float
-    min_body_pct_of_range: float
-    adx_min: float
+@dataclass
+class RiskSettings:
+    max_daily_loss_pct: float = field(default_factory=lambda: _f("MAX_DAILY_LOSS_PCT", 0.02))
+    max_trades_per_day: int = field(default_factory=lambda: _i("MAX_TRADES_PER_DAY", 3))
+    max_concurrent_positions: int = field(default_factory=lambda: _i("MAX_CONCURRENT_POSITIONS", 1))
+    max_consecutive_losses: int = field(default_factory=lambda: _i("MAX_CONSECUTIVE_LOSSES", 3))
+    max_risk_per_trade_pct: float = field(default_factory=lambda: _f("RISK_PER_TRADE_PCT", 0.025))
 
 
-class StopLossSettings(BaseModel):
-    atr_multiplier: float
+@dataclass
+class StrategySettings:
+    name: str = field(default_factory=lambda: _s("TRADING_STRATEGY", ""))
+    entry_window_end: str = "12:30"
+    exit_all_by: str = "15:15"
 
 
-class TrailingStopSettings(BaseModel):
-    stage2_trigger_r: float
-    stage3_trigger_r: float
-    stage3_atr_multiplier: float
-    stage4_trigger_r: float
-    stage4_atr_multiplier: float
+@dataclass
+class OrderSettings:
+    product: str = field(default_factory=lambda: _s("UPSTOX_ORDER_PRODUCT", ""))
+    variety: str = "DAY"
 
 
-class UniverseSettings(BaseModel):
-    option_indices: List[str]
+@dataclass
+class NotificationSettings:
+    telegram_enabled: bool = False
+    email_enabled: bool = False
 
 
-class LoggingSettings(BaseModel):
-    level: str
-    log_dir: str
-    max_file_size_mb: int
-    backup_count: int
+@dataclass
+class Settings:
+    mode: str = field(default_factory=lambda: _s("TRADING_MODE", "paper").lower())
+    capital: CapitalSettings = field(default_factory=CapitalSettings)
+    risk: RiskSettings = field(default_factory=RiskSettings)
+    database: DatabaseSettings = field(default_factory=DatabaseSettings)
+    strategy: StrategySettings = field(default_factory=StrategySettings)
+    order: OrderSettings = field(default_factory=OrderSettings)
+    notifications: NotificationSettings = field(default_factory=NotificationSettings)
 
 
-class DatabaseSettings(BaseModel):
-    path: str
-
-
-class NotificationSettings(BaseModel):
-    email_enabled: bool = True
-    telegram_enabled: bool = True
-    smtp_server: str = "smtp.gmail.com"
-    smtp_port: int = 587
-    sender_email: str = ""
-    recipient_email: str = ""
-
-
-class BacktestSettings(BaseModel):
-    start_date: str
-    end_date: str
-    commission_pct: float
-    slippage_pct: float
-    stt_pct: float
-
-
-class APISettings(BaseModel):
-    host: str
-    port: int
-    cors_origins: List[str]
-
-
-class PaperExecutionSettings(BaseModel):
-    slippage_pct: float = 0.05
-    latency_ms: int = 0
-    use_ltp_when_no_quote: bool = True
-
-
-class AppSettings(BaseModel):
-    mode: str
-    broker: BrokerSettings
-    capital: CapitalSettings
-    risk: RiskSettings
-    strategy: StrategySettings
-    indicators: IndicatorSettings
-    filters: FilterSettings
-    stop_loss: StopLossSettings
-    trailing_stop: TrailingStopSettings
-    universe: UniverseSettings
-    logging: LoggingSettings
-    database: DatabaseSettings
-    notifications: NotificationSettings
-    backtest: BacktestSettings
-    api: APISettings
-    paper_execution: PaperExecutionSettings = PaperExecutionSettings()
-    env: Dict[str, str] = Field(default_factory=dict)
-
-
-def load_settings(settings_path: Optional[Path] = None, dotenv_path: Optional[Path] = None) -> AppSettings:
-    raw = load_config(settings_path=settings_path, dotenv_path=dotenv_path)
-    return AppSettings(**raw)
+def load_settings() -> Settings:
+    return Settings()

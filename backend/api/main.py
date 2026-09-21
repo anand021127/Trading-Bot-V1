@@ -215,12 +215,15 @@ async def lifespan(app: FastAPI):
     # for the bot to function correctly on a single Render service.
     app.state.trading_task = None
     try:
-        if app.state.engine is not None and s.mode in ("paper", "live"):
-            supervisor.register(
-                "trading_engine",
-                factory=app.state.engine.run_forever,
-                max_restarts=100,
-            )
+        if s.mode == "paper":
+            from backend.paper.paper_runtime import PaperTradingRuntime
+            from backend.api.routers.bot_control import set_paper_runtime
+            app.state.paper_runtime = PaperTradingRuntime()
+            set_paper_runtime(app.state.paper_runtime)
+            print("[INFO] PaperTradingRuntime attached — TradingEngine loop not auto-started in paper mode")
+        elif s.mode == "live":
+            print("[WARN] Live mode supervisor registration disabled — live trading is not enabled")
+        # Live TradingEngine.run_forever is intentionally NOT registered.
     except Exception as e:
         print(f"[WARN] Could not start in-process trading loop: {e}")
 

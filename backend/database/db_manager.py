@@ -1,484 +1,112 @@
-"""Production SQLite database manager for the Upstox trading bot."""
+"""SQLite persistence for settings, trades, positions, tokens, and intents."""
 from __future__ import annotations
 
-import logging
-import os
+import json
 import sqlite3
+import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
-
-from backend.database.models import PerformanceSnapshot, Position, Trade
-
-
-class AttributeRow(sqlite3.Row):
-    """SQLite row that supports both mapping and legacy attribute access."""
-
-    def __getattr__(self, name: str) -> Any:
-        try:
-            return self[name]
-        except IndexError as exc:
-            raise AttributeError(name) from exc
+from backend.database.models import Position, Trade
 
 
 class DatabaseManager:
-    """Handle all storage for trades, positions, and performance data."""
-
-    def __init__(self, db_path: Optional[str] = None) -> None:
-        self.db_path = db_path or str(Path("/data") / "trading_bot.db")
-        self._mem_conn: Optional[sqlite3.Connection] = None
-        if self.db_path == ":memory:":
-            self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False)
-            self._mem_conn.row_factory = AttributeRow
-            self._mem_conn.execute("PRAGMA foreign_keys = ON")
-
-    @staticmethod
-    def _now() -> datetime:
-        return datetime.now(timezone.utc)
-
-    # ─── Connection ───────────────────────────────────────────────────────────
+    def __init__(self, db_path: str = "data/trading_bot.db") -> None:
+        self.db_path = db_path
+        self._conn: Optional[sqlite3.Connection] = None
+        if db_path != ":memory:":
+            import os
+            parent = os.path.dirname(db_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        self.init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        if self.db_path == ":memory:" and self._mem_conn is not None:
-            return self._mem_conn
-        else:
-            db_path = Path(self.db_path)
-            if not db_path.is_absolute():
-                db_path = Path.cwd() / db_path
-            parent = db_path.parent
-            try:
-                parent.mkdir(parents=True, exist_ok=True)
-            except (PermissionError, OSError):
-                db_path = Path.cwd() / db_path.name
-                db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
-            conn.row_factory = AttributeRow
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute("PRAGMA journal_mode = WAL")
-            return conn
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+        return self._conn
 
-    # ─── Schema ───────────────────────────────────────────────────────────────
+    def _now(self) -> datetime:
+        return datetime.now(timezone.utc)
 
     def init_db(self) -> None:
-        """Create all tables if they do not already exist."""
-        with self._connect() as conn:
-            # Legacy trades table (simple — used by original tests)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS trades (
-                    id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    quantity INTEGER NOT NULL,
-                    price REAL NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    strategy TEXT NOT NULL DEFAULT '',
-                    status TEXT NOT NULL DEFAULT 'filled',
-                    pnl REAL,
-                    notes TEXT NOT NULL DEFAULT '',
-                    mode TEXT DEFAULT 'paper',
-                    entry_time TEXT,
-                    exit_time TEXT,
-                    entry_price REAL,
-                    exit_price REAL,
-                    initial_stop REAL,
-                    final_stop REAL,
-                    exit_reason TEXT,
-                    gross_pnl REAL,
-                    net_pnl REAL,
-                    brokerage REAL,
-                    stt REAL,
-                    pnl_r REAL,
-                    trade_duration_min INTEGER,
-                    stage_at_exit INTEGER,
-                    orb_high REAL,
-                    orb_low REAL,
-                    atr_at_entry REAL,
-                    rsi_at_entry REAL,
-                    choppiness_at_entry REAL,
-                    volume_ratio REAL,
-                    ema20_at_entry REAL,
-                    ema50_at_entry REAL,
-                    trend_bias TEXT,
-                    max_favorable REAL,
-                    max_adverse REAL,
-                    conditions_checked TEXT,
-                    created_at TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS positions (
-                    symbol TEXT PRIMARY KEY,
-                    quantity INTEGER NOT NULL,
-                    average_price REAL NOT NULL,
-                    entry_time TEXT NOT NULL,
-                    side TEXT NOT NULL DEFAULT 'long',
-                    unrealized_pnl REAL NOT NULL DEFAULT 0.0,
-                    initial_stop REAL,
-                    trailing_stop REAL,
-                    stage INTEGER DEFAULT 1,
-                    trade_id TEXT,
-                    mode TEXT DEFAULT 'paper'
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS performance_snapshots (
-                    date TEXT PRIMARY KEY,
-                    net_pnl REAL NOT NULL,
-                    trades_count INTEGER NOT NULL,
-                    win_rate REAL NOT NULL,
-                    equity REAL NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS api_test_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    test_name TEXT,
-                    status TEXT,
-                    response_time_ms REAL,
-                    error_message TEXT,
-                    tested_at TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS option_chain_snapshots (
-                    id TEXT PRIMARY KEY,
-                    underlying TEXT NOT NULL,
-                    expiry TEXT NOT NULL,
-                    captured_at TEXT NOT NULL,
-                    spot REAL,
-                    pcr REAL,
-                    max_pain REAL,
-                    payload TEXT NOT NULL DEFAULT '{}'
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS strategies (
-                    name TEXT PRIMARY KEY,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    parameters TEXT NOT NULL DEFAULT '{}'
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS backtests (
-                    id TEXT PRIMARY KEY,
-                    strategy TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'queued',
-                    result TEXT NOT NULL DEFAULT '{}'
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS logs (
-                    id TEXT PRIMARY KEY,
-                    level TEXT NOT NULL,
-                    logger TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-            """)
-            # Existing deployments may have been created by an earlier schema
-            # version. SQLite CREATE TABLE IF NOT EXISTS does not add columns,
-            # so migrate the small set of fields used by current option trades.
-            existing = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
-            migrations = {
-                "mode": "TEXT DEFAULT 'paper'",
-                "entry_time": "TEXT",
-                "exit_time": "TEXT",
-                "entry_price": "REAL",
-                "exit_price": "REAL",
-                "net_pnl": "REAL",
-                "exit_reason": "TEXT",
-            }
-            for column, definition in migrations.items():
-                if column not in existing:
-                    conn.execute(f"ALTER TABLE trades ADD COLUMN {column} {definition}")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_mode ON trades(mode)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
-            conn.commit()
-
-    # ─── Trades ───────────────────────────────────────────────────────────────
-
-    def insert_trade(self, trade: Trade) -> None:
-        """Insert a trade record at ENTRY time. Only writes the legacy
-        columns (id, symbol, side, quantity, price, timestamp, strategy,
-        status, pnl, notes) — extended forensic fields (entry_price,
-        indicators-at-entry, and everything exit-related) are populated
-        separately by record_trade_entry_details() and update_trade_exit()
-        below."""
-        with self._connect() as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO trades
-                   (id, symbol, side, quantity, price, timestamp, strategy, status, pnl, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    trade.id, trade.symbol, trade.side, trade.quantity,
-                    trade.price, trade.timestamp.isoformat(),
-                    trade.strategy, trade.status, trade.pnl, trade.notes,
-                ),
-            )
-            conn.commit()
-
-    def record_trade_entry_details(
-        self,
-        trade_id: str,
-        entry_time: str,
-        entry_price: float,
-        initial_stop: Optional[float] = None,
-        atr_at_entry: Optional[float] = None,
-        rsi_at_entry: Optional[float] = None,
-        choppiness_at_entry: Optional[float] = None,
-        volume_ratio: Optional[float] = None,
-        ema20_at_entry: Optional[float] = None,
-        ema50_at_entry: Optional[float] = None,
-        trend_bias: Optional[str] = None,
-        orb_high: Optional[float] = None,
-        orb_low: Optional[float] = None,
-        conditions_checked: Optional[str] = None,
-    ) -> None:
-        """Fills in the extended entry-side forensic columns that
-        insert_trade() structurally cannot write. Call this right after
-        insert_trade() at fill time, with whatever the signal's
-        indicators actually had — never fabricate a value for a field
-        the caller doesn't have; pass None and it stays NULL, which is
-        honest, not a display bug."""
-        with self._connect() as conn:
-            conn.execute(
-                """UPDATE trades SET
-                       entry_time = ?, entry_price = ?, initial_stop = ?,
-                       atr_at_entry = ?, rsi_at_entry = ?, choppiness_at_entry = ?,
-                       volume_ratio = ?, ema20_at_entry = ?, ema50_at_entry = ?,
-                       trend_bias = ?, orb_high = ?, orb_low = ?,
-                       conditions_checked = ?, created_at = COALESCE(created_at, ?)
-                   WHERE id = ?""",
-                (
-                    entry_time, entry_price, initial_stop,
-                    atr_at_entry, rsi_at_entry, choppiness_at_entry,
-                    volume_ratio, ema20_at_entry, ema50_at_entry,
-                    trend_bias, orb_high, orb_low,
-                    conditions_checked, entry_time,
-                    trade_id,
-                ),
-            )
-            conn.commit()
-
-    def update_trade_exit(
-        self,
-        trade_id: str,
-        exit_time: str,
-        exit_price: float,
-        exit_reason: str,
-        gross_pnl: float,
-        net_pnl: float,
-        brokerage: Optional[float] = None,
-        stt: Optional[float] = None,
-        pnl_r: Optional[float] = None,
-        trade_duration_min: Optional[int] = None,
-        final_stop: Optional[float] = None,
-        stage_at_exit: Optional[int] = None,
-        max_favorable: Optional[float] = None,
-        max_adverse: Optional[float] = None,
-    ) -> None:
-        """ROOT CAUSE FIX (see docs/COPILOT.md, forensic audit session):
-        this method did not exist at all before — the exit code computed
-        gross_pnl/net_pnl/pnl_r correctly and sent them to RiskManager
-        and TradeLogger's file log, but NEVER persisted them back to the
-        `trades` row created at entry, leaving every trade's extended
-        columns (entry_price, exit_price, gross_pnl, net_pnl, ...)
-        permanently NULL regardless of how many real round-trip trades
-        occurred. This also updates the legacy `pnl` and `status`
-        columns so `_get_today_stats()`-style aggregation (which reads
-        `pnl`/`net_pnl` and falls back between them) works correctly
-        without needing its own changes."""
-        with self._connect() as conn:
-            conn.execute(
-                """UPDATE trades SET
-                       exit_time = ?, exit_price = ?, exit_reason = ?,
-                       gross_pnl = ?, net_pnl = ?, brokerage = ?, stt = ?, pnl_r = ?,
-                       trade_duration_min = ?, final_stop = ?, stage_at_exit = ?,
-                       max_favorable = ?, max_adverse = ?,
-                       pnl = ?, status = 'closed'
-                   WHERE id = ?""",
-                (
-                    exit_time, exit_price, exit_reason,
-                    gross_pnl, net_pnl, brokerage, stt, pnl_r,
-                    trade_duration_min, final_stop, stage_at_exit,
-                    max_favorable, max_adverse,
-                    net_pnl, trade_id,
-                ),
-            )
-            conn.commit()
-
-    def list_trades(
-        self,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        symbol: Optional[str] = None,
-        mode: Optional[str] = None,
-        exit_reason: Optional[str] = None,
-    ) -> List[Any]:
-        """List trades with optional filters. Returns sqlite3.Row objects."""
-        clauses = []
-        params: List[Any] = []
-
-        if date_from:
-            clauses.append("(entry_time >= ? OR timestamp >= ?)")
-            params.extend([date_from, date_from])
-        if date_to:
-            clauses.append("(entry_time <= ? OR timestamp <= ?)")
-            params.extend([date_to + "T23:59:59", date_to + "T23:59:59"])
-        if symbol:
-            clauses.append("symbol = ?")
-            params.append(symbol.upper())
-        if mode:
-            clauses.append("mode = ?")
-            params.append(mode)
-        if exit_reason:
-            clauses.append("exit_reason = ?")
-            params.append(exit_reason)
-
-        where = "WHERE " + " AND ".join(clauses) if clauses else ""
-        sql = f"SELECT * FROM trades {where} ORDER BY COALESCE(entry_time, timestamp) DESC"
-
-        with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return rows
-
-    def get_trade(self, trade_id: str) -> Optional[Any]:
-        """Get a single trade by ID."""
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
-        return row
-
-    # ─── Positions ────────────────────────────────────────────────────────────
-
-    def upsert_position(self, position: Position) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """INSERT INTO positions
-                   (symbol, quantity, average_price, entry_time, side, unrealized_pnl)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(symbol) DO UPDATE SET
-                       quantity=excluded.quantity,
-                       average_price=excluded.average_price,
-                       entry_time=excluded.entry_time,
-                       side=excluded.side,
-                       unrealized_pnl=excluded.unrealized_pnl""",
-                (
-                    position.symbol, position.quantity, position.average_price,
-                    position.entry_time.isoformat(), position.side, position.unrealized_pnl,
-                ),
-            )
-            conn.commit()
-
-    def list_positions(self) -> List[Any]:
-        with self._connect() as conn:
-            return conn.execute("SELECT * FROM positions ORDER BY symbol").fetchall()
-
-    def get_open_positions(self) -> List[Position]:
-        """Fetch all currently open positions as Position model instances."""
-        rows = self.list_positions()
-        positions: List[Position] = []
-        for r in rows:
-            entry_time = r["entry_time"]
-            if isinstance(entry_time, str):
-                try:
-                    entry_time = datetime.fromisoformat(entry_time)
-                except Exception:
-                    entry_time = self._now()
-            positions.append(
-                Position(
-                    symbol=r["symbol"],
-                    quantity=r["quantity"],
-                    average_price=r["average_price"],
-                    entry_time=entry_time,
-                    side=r["side"] if "side" in r.keys() else "long",
-                    unrealized_pnl=r["unrealized_pnl"] if "unrealized_pnl" in r.keys() else 0.0,
-                )
-            )
-        return positions
-
-    def delete_position(self, symbol: str) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
-            conn.commit()
-
-    # ─── Performance ──────────────────────────────────────────────────────────
-
-    def save_performance_snapshot(self, snapshot: PerformanceSnapshot) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """INSERT INTO performance_snapshots
-                   (date, net_pnl, trades_count, win_rate, equity, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(date) DO UPDATE SET
-                       net_pnl=excluded.net_pnl, trades_count=excluded.trades_count,
-                       win_rate=excluded.win_rate, equity=excluded.equity,
-                       created_at=excluded.created_at""",
-                (
-                    snapshot.date, snapshot.net_pnl, snapshot.trades_count,
-                    snapshot.win_rate, snapshot.equity, snapshot.created_at.isoformat(),
-                ),
-            )
-            conn.commit()
-
-    def list_performance_snapshots(self) -> List[Any]:
-        with self._connect() as conn:
-            return conn.execute(
-                "SELECT * FROM performance_snapshots ORDER BY date"
-            ).fetchall()
-
-    # ─── App settings (persistent across restarts) ────────────────────────────
+        c = self._connect()
+        c.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            CREATE TABLE IF NOT EXISTS trades (
+                id TEXT PRIMARY KEY,
+                symbol TEXT,
+                side TEXT,
+                quantity INTEGER,
+                price REAL,
+                timestamp TEXT,
+                strategy TEXT,
+                status TEXT,
+                pnl REAL,
+                notes TEXT,
+                entry_time TEXT,
+                entry_price REAL,
+                exit_time TEXT,
+                exit_price REAL,
+                initial_stop REAL,
+                final_stop REAL,
+                atr_at_entry REAL,
+                rsi_at_entry REAL,
+                choppiness_at_entry REAL,
+                volume_ratio REAL,
+                ema20_at_entry REAL,
+                ema50_at_entry REAL,
+                trend_bias TEXT,
+                conditions_checked TEXT,
+                exit_reason TEXT,
+                gross_pnl REAL,
+                net_pnl REAL,
+                brokerage REAL,
+                stt REAL,
+                pnl_r REAL,
+                trade_duration_min REAL
+            );
+            CREATE TABLE IF NOT EXISTS positions (
+                symbol TEXT PRIMARY KEY,
+                quantity INTEGER,
+                average_price REAL,
+                entry_time TEXT,
+                instrument_key TEXT
+            );
+            CREATE TABLE IF NOT EXISTS order_intents (
+                signal_id TEXT PRIMARY KEY,
+                payload TEXT,
+                broker_order_id TEXT,
+                status TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS performance_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                captured_at TEXT,
+                payload TEXT
+            );
+            """
+        )
+        c.commit()
 
     def save_setting(self, key: str, value: str) -> None:
-        """Persist a key-value setting to SQLite."""
-        with self._connect() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-            conn.execute(
-                """INSERT INTO app_settings (key, value, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(key) DO UPDATE SET
-                       value=excluded.value, updated_at=excluded.updated_at""",
-                (key, value, datetime.now(timezone.utc).isoformat()),
-            )
-            conn.commit()
+        self._connect().execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
+        self._connect().commit()
 
     def get_setting(self, key: str, default: str = "") -> str:
-        """Read a persisted setting value."""
-        try:
-            with self._connect() as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS app_settings (
-                        key TEXT PRIMARY KEY,
-                        value TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                """)
-                row = conn.execute(
-                    "SELECT value FROM app_settings WHERE key = ?", (key,)
-                ).fetchone()
-                return row[0] if row else default
-        except Exception:
-            return default
+        row = self._connect().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
 
-    def save_settings_blob(self, settings_dict: dict) -> None:
-        """Save entire settings dict as JSON blob."""
-        import json
-        self.save_setting("__settings_blob__", json.dumps(settings_dict))
-
-    def load_settings_blob(self) -> Optional[dict]:
-        """Load settings dict from DB. Returns None if not saved yet."""
-        import json
-        raw = self.get_setting("__settings_blob__", "")
+    def load_settings_blob(self) -> Optional[Dict[str, Any]]:
+        raw = self.get_setting("settings_blob", "")
         if not raw:
             return None
         try:
@@ -486,161 +114,182 @@ class DatabaseManager:
         except Exception:
             return None
 
+    def save_settings_blob(self, blob: Dict[str, Any]) -> None:
+        self.save_setting("settings_blob", json.dumps(blob))
+
+    def insert_trade(self, trade: Trade) -> None:
+        ts = trade.timestamp.isoformat() if isinstance(trade.timestamp, datetime) else str(trade.timestamp)
+        self._connect().execute(
+            """INSERT OR REPLACE INTO trades
+               (id, symbol, side, quantity, price, timestamp, strategy, status, pnl, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                trade.id, trade.symbol, trade.side, trade.quantity, trade.price, ts,
+                trade.strategy, trade.status, trade.pnl, trade.notes,
+            ),
+        )
+        self._connect().commit()
+
+    def list_trades(self) -> List[Trade]:
+        rows = self._connect().execute("SELECT * FROM trades ORDER BY timestamp").fetchall()
+        out: List[Trade] = []
+        for r in rows:
+            ts = r["timestamp"]
+            try:
+                tsv = datetime.fromisoformat(ts) if ts else self._now()
+            except Exception:
+                tsv = self._now()
+            out.append(Trade(
+                id=r["id"], symbol=r["symbol"], side=r["side"], quantity=r["quantity"],
+                price=r["price"], timestamp=tsv, strategy=r["strategy"] or "",
+                status=r["status"] or "", pnl=r["pnl"], notes=r["notes"] or "",
+            ))
+        return out
+
+    def get_trade(self, trade_id: str) -> Optional[Dict[str, Any]]:
+        row = self._connect().execute("SELECT * FROM trades WHERE id=?", (trade_id,)).fetchone()
+        return dict(row) if row else None
+
+    def record_trade_entry_details(self, trade_id: str, **fields: Any) -> None:
+        allowed = {
+            "entry_time", "entry_price", "initial_stop", "atr_at_entry", "rsi_at_entry",
+            "choppiness_at_entry", "volume_ratio", "ema20_at_entry", "ema50_at_entry",
+            "trend_bias", "conditions_checked",
+        }
+        cols = {k: v for k, v in fields.items() if k in allowed}
+        if not cols:
+            return
+        sets = ", ".join(f"{k}=?" for k in cols)
+        vals = list(cols.values()) + [trade_id]
+        self._connect().execute(f"UPDATE trades SET {sets} WHERE id=?", vals)
+        self._connect().commit()
+
+    def update_trade_exit(self, trade_id: str, **fields: Any) -> None:
+        allowed = {
+            "exit_time", "exit_price", "exit_reason", "gross_pnl", "net_pnl",
+            "brokerage", "stt", "pnl_r", "trade_duration_min", "final_stop",
+        }
+        cols = {k: v for k, v in fields.items() if k in allowed}
+        if "net_pnl" in cols:
+            cols["pnl"] = cols["net_pnl"]
+            cols["status"] = "closed"
+        if not cols:
+            return
+        sets = ", ".join(f"{k}=?" for k in cols)
+        vals = list(cols.values()) + [trade_id]
+        self._connect().execute(f"UPDATE trades SET {sets} WHERE id=?", vals)
+        self._connect().commit()
+
+    def upsert_position(self, position: Position) -> None:
+        ts = position.entry_time.isoformat() if isinstance(position.entry_time, datetime) else str(position.entry_time)
+        self._connect().execute(
+            """INSERT INTO positions(symbol, quantity, average_price, entry_time, instrument_key)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(symbol) DO UPDATE SET
+                 quantity=excluded.quantity,
+                 average_price=excluded.average_price,
+                 entry_time=excluded.entry_time,
+                 instrument_key=excluded.instrument_key""",
+            (position.symbol, position.quantity, position.average_price, ts, position.instrument_key),
+        )
+        self._connect().commit()
+
+    def list_positions(self) -> List[Position]:
+        rows = self._connect().execute("SELECT * FROM positions").fetchall()
+        out: List[Position] = []
+        for r in rows:
+            ts = r["entry_time"]
+            try:
+                tsv = datetime.fromisoformat(ts) if ts else self._now()
+            except Exception:
+                tsv = self._now()
+            out.append(Position(
+                symbol=r["symbol"], quantity=r["quantity"], average_price=r["average_price"],
+                entry_time=tsv, instrument_key=r["instrument_key"] or "",
+            ))
+        return out
+
+    def get_open_positions(self) -> List[Position]:
+        return [p for p in self.list_positions() if p.quantity != 0]
+
+    def delete_position(self, symbol: str) -> None:
+        self._connect().execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        self._connect().commit()
+
+    def list_performance_snapshots(self) -> List[Dict[str, Any]]:
+        rows = self._connect().execute("SELECT * FROM performance_snapshots ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    # ── tokens ──────────────────────────────────────────────
+    def _decode_jwt_claims(self, token: str) -> Dict[str, Any]:
+        try:
+            from backend.broker.token_resolver import decode_jwt_safe
+            return decode_jwt_safe(token)
+        except Exception:
+            return {}
+
     def save_token(
         self,
         token: str,
         verified: bool = False,
+        source: str = "",
         verified_at: Optional[str] = None,
-        source: Optional[str] = None,
-        force: bool = False,
     ) -> bool:
-        """Persist access token to SQLite DB, JSON files, repository .env files, and os.environ.
-        
-        Strictly prevents stale-token resurrection:
-        - Never overwrites an unexpired/newer verified token with an expired or older token.
-        - Persists verification state, verification timestamp, and token fingerprint.
-        """
-        from backend.broker.token_resolver import decode_jwt_safe, token_fingerprint
-
-        clean_token = (token or "").strip().strip('"\'').strip()
-
-        # Handle clearing token (explicit deletion/logout)
-        if not clean_token:
-            self.save_setting("upstox_access_token", "")
-            self.save_setting("upstox_token_verified", "false")
-            self.save_setting("upstox_token_verified_at", "")
-            self.save_setting("upstox_token_source", "none")
-            self.save_setting("upstox_token_fingerprint", "NONE")
-            os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
-            return True
-
-        is_mock = clean_token.startswith(("mock-", "test-", "leftover-")) or (0 < len(clean_token) < 30)
-
-        # For unit test mock strings, save directly to isolated DB setting without clobbering disk/env
-        if is_mock:
-            self.save_setting("upstox_access_token", clean_token)
-            self.save_setting("upstox_token_verified", "false")
-            return True
-
-        new_jwt = decode_jwt_safe(clean_token)
-        new_fp = token_fingerprint(clean_token)
-
-        # Check existing token in database for stale-token protection
-        existing_token = self.get_setting("upstox_access_token", "")
-        if existing_token and not force:
-            existing_jwt = decode_jwt_safe(existing_token)
-            existing_fp = token_fingerprint(existing_token)
-
-            # Prevent stale token overwrite:
-            # 1. New token is expired while existing is NOT expired
-            if new_jwt.get("is_expired") is True and existing_jwt.get("is_expired") is not True:
-                logger.warning(
-                    "[DatabaseManager] Prevented overwriting active token (%s) with expired token (%s)",
-                    existing_fp, new_fp
-                )
+        token = (token or "").strip().strip('"').strip("'")
+        if not token:
+            return False
+        claims = self._decode_jwt_claims(token)
+        exp = float(claims.get("expires_at") or 0)
+        iat = float(claims.get("issued_at") or 0)
+        now = time.time()
+        existing = self.get_setting("upstox_access_token", "")
+        if existing:
+            old = self._decode_jwt_claims(existing)
+            old_exp = float(old.get("expires_at") or 0)
+            old_iat = float(old.get("issued_at") or 0)
+            old_valid = old_exp == 0 or old_exp > now
+            new_expired = exp and exp <= now
+            if old_valid and new_expired:
                 return False
-
-            # 2. Both are JWTs and existing is not expired: check if new token is strictly older
-            if existing_jwt.get("is_jwt") and new_jwt.get("is_jwt") and existing_jwt.get("is_expired") is not True:
-                existing_iat = float(existing_jwt.get("issued_at") or 0.0)
-                new_iat = float(new_jwt.get("issued_at") or 0.0)
-                existing_exp = float(existing_jwt.get("expires_at") or 0.0)
-                new_exp = float(new_jwt.get("expires_at") or 0.0)
-                if new_iat < existing_iat and new_exp <= existing_exp:
-                    logger.warning(
-                        "[DatabaseManager] Prevented overwriting newer token (%s, iat=%s) with older token (%s, iat=%s)",
-                        existing_fp, existing_iat, new_fp, new_iat
-                    )
-                    return False
-
-        # Save authoritative token & metadata to SQLite
-        v_at = verified_at or datetime.now(timezone.utc).isoformat()
-        src = source or ("oauth_verified" if verified else "database")
-        self.save_setting("upstox_access_token", clean_token)
+            if not verified and old_iat and iat and iat < old_iat:
+                return False
+        self.save_setting("upstox_access_token", token)
         self.save_setting("upstox_token_verified", "true" if verified else "false")
-        self.save_setting("upstox_token_verified_at", v_at)
-        self.save_setting("upstox_token_source", src)
-        self.save_setting("upstox_token_fingerprint", new_fp)
-
-        # Update environment variable
-        os.environ["UPSTOX_ACCESS_TOKEN"] = clean_token
-
-        # Update JSON files
-        import json
-        payload = {
-            "access_token": clean_token,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            "verified": bool(verified),
-            "verified_at": v_at,
-            "source": src,
-            "fingerprint": new_fp,
-            "is_jwt": new_jwt.get("is_jwt", False),
-            "expires_at": new_jwt.get("expires_at"),
-            "issued_at": new_jwt.get("issued_at"),
-            "is_plus_plan": new_jwt.get("isPlusPlan", False),
-        }
-        paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
-        if self.db_path and self.db_path != ":memory:":
-            custom_dir = Path(self.db_path).parent
-            if custom_dir != Path.cwd() and custom_dir != Path("/data"):
-                paths = [str(custom_dir / "upstox_token.json")]
-        for p in paths:
-            try:
-                parent = Path(p).parent
-                parent.mkdir(parents=True, exist_ok=True)
-                with open(p, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=2)
-            except Exception:
-                pass
-
-        # Also atomically update repository .env files (only for production / default db instances)
-        try:
-            is_default_db = (not self.db_path) or (str(self.db_path) in ("/data/trading_bot.db", str(Path.cwd() / "data" / "trading_bot.db")))
-            if is_default_db:
-                from backend.broker.token_resolver import update_dotenv_file, DEFAULT_REPO_DOTENV_PATHS
-                for env_p in DEFAULT_REPO_DOTENV_PATHS:
-                    if os.path.exists(os.path.dirname(os.path.abspath(env_p))):
-                        update_dotenv_file(env_p, {"UPSTOX_ACCESS_TOKEN": clean_token})
-        except Exception:
-            pass
-
+        self.save_setting("upstox_token_source", source or "")
+        if verified_at:
+            self.save_setting("upstox_token_verified_at", verified_at)
+        if exp:
+            self.save_setting("upstox_token_exp", str(exp))
         return True
 
-    def load_token(self, require_valid: bool = False) -> str:
-        """Load access token from DB or fallback JSON file.
-        
-        If require_valid=True, rejects any expired token.
-        """
-        val = self.get_setting("upstox_access_token", "")
-        if val and val.strip():
-            clean = val.strip().strip('"\'').strip()
-            if require_valid:
-                from backend.broker.token_resolver import decode_jwt_safe
-                jwt = decode_jwt_safe(clean)
-                if jwt.get("is_expired") is True:
-                    return ""
-            return clean
+    def load_token(self, require_valid: bool = False) -> Optional[str]:
+        token = self.get_setting("upstox_access_token", "")
+        if not token:
+            return None
+        if require_valid:
+            claims = self._decode_jwt_claims(token)
+            exp = float(claims.get("expires_at") or 0)
+            if exp and exp <= time.time():
+                return None
+        return token
 
-        import json
-        paths = ["/data/upstox_token.json", "data/upstox_token.json", "upstox_token.json"]
-        if self.db_path and self.db_path != ":memory:":
-            custom_dir = Path(self.db_path).parent
-            if custom_dir != Path.cwd() and custom_dir != Path("/data"):
-                paths = [str(custom_dir / "upstox_token.json")]
-        for p in paths:
-            try:
-                if os.path.exists(p):
-                    with open(p, "r", encoding="utf-8") as f:
-                        d = json.load(f)
-                        token = d.get("access_token", "")
-                        if token and token.strip():
-                            clean = token.strip().strip('"\'').strip()
-                            if require_valid:
-                                from backend.broker.token_resolver import decode_jwt_safe
-                                jwt = decode_jwt_safe(clean)
-                                if jwt.get("is_expired") is True:
-                                    continue
-                            return clean
-            except Exception:
-                pass
-        return ""
+    def save_order_intent(self, signal_id: str, payload: Dict[str, Any], status: str = "INTENT") -> None:
+        self._connect().execute(
+            """INSERT INTO order_intents(signal_id, payload, status, created_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(signal_id) DO UPDATE SET payload=excluded.payload""",
+            (signal_id, json.dumps(payload), status, self._now().isoformat()),
+        )
+        self._connect().commit()
+
+    def get_order_intent(self, signal_id: str) -> Optional[Dict[str, Any]]:
+        row = self._connect().execute("SELECT * FROM order_intents WHERE signal_id=?", (signal_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_order_intent(self, signal_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        vals = list(fields.values()) + [signal_id]
+        self._connect().execute(f"UPDATE order_intents SET {sets} WHERE signal_id=?", vals)
+        self._connect().commit()

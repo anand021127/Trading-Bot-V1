@@ -48,6 +48,14 @@ async def main() -> None:
         from backend.notifications.telegram_alerts import TelegramAlerts
         from backend.notifications.email_alerts import EmailAlerts
 
+        if settings.mode == "paper":
+            from backend.paper.paper_runtime import PaperStartupError, PaperTradingRuntime
+            runtime = PaperTradingRuntime(db=db)
+            logger.info("PaperTradingRuntime ready — ACTIVE STRATEGY: V8_D_PULLBACK_ATM MODE: PAPER")
+            while True:
+                runtime.run_eod()
+                await asyncio.sleep(30)
+
         engine = TradingEngine(
             telegram_alerts=TelegramAlerts() if settings.notifications.telegram_enabled else None,
             email_alerts=EmailAlerts()    if settings.notifications.email_enabled    else None,

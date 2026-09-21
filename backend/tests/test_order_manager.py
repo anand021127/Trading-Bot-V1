@@ -15,9 +15,9 @@ def test_place_order_builds_order_from_response() -> None:
         "order_id": "123", "status": "COMPLETE",
         "average_price": 100.0, "filled_quantity": 1, "quantity": 1,
     }
-    manager = OrderManager(client=client, paper_mode=False)
+    manager = OrderManager(client=client, paper_mode=False, default_product="I")
 
-    order = manager.place_order(OrderRequest(symbol="NSE_FO|OPTION", side="buy", quantity=1))
+    order = manager.place_order(OrderRequest(symbol="NSE_FO|OPTION", side="buy", quantity=1, product="I"))
 
     assert order.id == "123"
     assert order.status == OrderStatus.FILLED

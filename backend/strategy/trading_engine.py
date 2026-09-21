@@ -240,11 +240,21 @@ class TradingEngine:
         strategy_name: str = "ORB_TREND_FOLLOWING",
     ) -> None:
         self.client = client or UpstoxClient()
+        _mode = (settings.mode or "").lower()
+        if _mode not in ("paper", "live", "backtest"):
+            raise ValueError(f"Invalid TRADING_MODE={settings.mode!r}; expected paper|live|backtest")
         self.order_manager = order_manager or OrderManager(
             client=self.client,
-            paper_mode=(settings.mode == "paper"),
+            paper_mode=(_mode == "paper"),
+            default_product=(settings.order.product or None),
         )
+        if _mode == "paper" and not self.order_manager.paper_mode:
+            raise RuntimeError("Paper mode must use paper OrderManager; refusing LiveBroker path")
+        if _mode == "live" and self.order_manager.paper_mode:
+            raise RuntimeError("Live mode must not use paper OrderManager; refusing PaperBroker path")
         self.db_manager = db_manager or DatabaseManager(db_path=settings.database.path)
+        self._pipeline = None
+        self._init_execution_pipeline()
         self.risk_manager = risk_manager or RiskManager(
             capital=settings.capital.total,
             daily_loss_limit=settings.risk.max_daily_loss_pct,
@@ -261,9 +271,20 @@ class TradingEngine:
         )
         self.telegram_alerts = telegram_alerts
         self.email_alerts = email_alerts
-        self.strategy_name = strategy_name
-        # Modular option-premium strategy registry.
-        self.strategy_engine = MultiStrategyEngine()
+        configured = (getattr(settings.strategy, "name", "") or "").strip()
+        self.strategy_name = configured or strategy_name
+        if configured:
+            from backend.config.strategy_registry import load_strategy
+            loaded = load_strategy(configured)
+            self.strategy_engine = MultiStrategyEngine(strategies=[loaded])
+            logger.info("TradingEngine active_strategy=%s (explicit config)", loaded.name)
+        else:
+            # Legacy default kept for existing tests; production must set TRADING_STRATEGY.
+            logger.warning(
+                "TRADING_STRATEGY unset; MultiStrategyEngine defaulting to OPTION_PREMIUM. "
+                "Set TRADING_STRATEGY explicitly for paper/live."
+            )
+            self.strategy_engine = MultiStrategyEngine()
         self.trailing_stop_manager = TrailingStopManager()
         # Optional AI decision-filter layer — see backend/ai/. Disabled by
         # default; behaves as a pure pass-through when AI_ENABLED=false, so
@@ -708,6 +729,9 @@ class TradingEngine:
     def _subscribe_option_contract(self, instrument_key: str) -> None:
         """Subscribe to live ticks for an option contract via the broker WS."""
         try:
+            import importlib.util
+            if importlib.util.find_spec("fastapi") is None:
+                return  # FastAPI app not available (Node-hosted UI path)
             import backend.api.main as main_mod
             ws_client = getattr(getattr(main_mod, "app", None), "state", None)
             ws_client = getattr(ws_client, "ws_client", None)
@@ -749,6 +773,96 @@ class TradingEngine:
         return None
 
     # ─── Main run loop ────────────────────────────────────────────────────────
+
+
+    def _init_execution_pipeline(self) -> None:
+        """Build the single controlled ExecutionPipeline for entry/exit orders.
+
+        Production paper/live require explicit strategy + product. When config
+        is incomplete, pipeline stays None and order submission is refused.
+        """
+        from backend.execution.pipeline import ExecutionPipeline
+        from backend.risk.risk_config import RiskConfigError, build_authoritative_risk_config
+
+        product = (getattr(settings.order, "product", "") or "").strip().upper()
+        strategy_name = (getattr(settings.strategy, "name", "") or "").strip() or (
+            getattr(self, "strategy_name", "") or ""
+        )
+        if not product or not strategy_name:
+            logger.warning(
+                "ExecutionPipeline not armed (product=%r strategy=%r). "
+                "Orders via TradingEngine will be refused until configured.",
+                product, strategy_name,
+            )
+            self._pipeline = None
+            return
+        try:
+            risk = build_authoritative_risk_config(
+                capital=float(settings.capital.total),
+                strategy_risk_pct=float(settings.risk.max_risk_per_trade_pct),
+                engine_risk_pct=float(settings.risk.max_risk_per_trade_pct),
+                risk_manager_daily_loss_pct=float(settings.risk.max_daily_loss_pct),
+                configured_risk_pct=float(settings.risk.max_risk_per_trade_pct),
+                allocation_limit_pct=float(settings.capital.max_allocation_per_trade),
+                max_daily_trades=int(settings.risk.max_trades_per_day),
+                max_positions=int(settings.risk.max_concurrent_positions),
+                max_daily_loss_pct=float(settings.risk.max_daily_loss_pct),
+                lot_size_source="contract_metadata",
+                order_product=product,
+                strategy_name=strategy_name,
+                eod_square_off=getattr(settings.strategy, "exit_all_by", "15:15") or "15:15",
+            )
+        except RiskConfigError as exc:
+            logger.error("ExecutionPipeline risk config failed: %s", exc)
+            self._pipeline = None
+            return
+
+        def _place(signal: dict, signal_id: str):
+            from backend.orders.order_models import OrderRequest
+            req = OrderRequest(
+                symbol=str(signal.get("symbol") or signal.get("underlying") or ""),
+                instrument_key=str(signal.get("instrument_key") or "") or None,
+                side=str(signal.get("side") or "BUY").upper(),
+                quantity=int(signal.get("quantity") or 0),
+                price=float(signal.get("premium") or signal.get("price") or 0.0),
+                order_type=str(signal.get("order_type") or "MARKET"),
+                product=self.order_manager.default_product,
+                signal_id=signal_id,
+                tag=signal_id,
+                contract_metadata=signal.get("contract_metadata"),
+                underlying_symbol=str(signal.get("underlying") or signal.get("symbol") or ""),
+            )
+            return self.order_manager.place_order(req)
+
+        self._pipeline = ExecutionPipeline(
+            strategy_name=strategy_name,
+            risk=risk,
+            db=self.db_manager,
+            place_order_fn=_place,
+            client=self.client if not self.order_manager.paper_mode else None,
+            token=getattr(self.client, "access_token", None),
+            require_live_token=(settings.mode == "live"),
+        )
+        logger.info(
+            "ExecutionPipeline armed strategy=%s product=%s paper_mode=%s",
+            strategy_name, product, self.order_manager.paper_mode,
+        )
+
+    def _submit_entry_via_pipeline(self, payload: dict):
+        if self._pipeline is None:
+            raise RuntimeError(
+                "ExecutionPipeline not configured — refusing direct order placement. "
+                "Set TRADING_STRATEGY and UPSTOX_ORDER_PRODUCT."
+            )
+        return self._pipeline.submit_signal(payload)
+
+    def _submit_exit_via_pipeline(self, payload: dict):
+        if self._pipeline is None:
+            raise RuntimeError(
+                "ExecutionPipeline not configured — refusing direct exit placement. "
+                "Set TRADING_STRATEGY and UPSTOX_ORDER_PRODUCT."
+            )
+        return self._pipeline.submit_exit(payload)
 
     def execute_multi_signal(self, signal: Any) -> Optional[str]:
         """Execute an OPTION_PREMIUM `StrategySignal` through the full
@@ -867,22 +981,46 @@ class TradingEngine:
 
         trade_id = str(uuid.uuid4())
         try:
-            # V21-FINAL Item 1: OrderRequest carries instrument_key
-            req = OrderRequest(
-                symbol=signal.symbol,
-                instrument_key=contract_instrument_key,
-                side="BUY",
-                quantity=qty,
-                price=signal.entry_price,
-                order_type="MARKET",
-                contract_metadata=contract_metadata,
-                underlying_symbol=signal.symbol,
-            )
-            order = self.order_manager.place_order(req)
-
-            # V21-FINAL Items 15/16: Don't create filled position if order not filled
-            if order.status in (OrderStatus.REJECTED, OrderStatus.FAILED):
-                logger.warning("Order rejected/failed for %s: %s", signal.symbol, order.fill_details)
+            # Single controlled path: ExecutionPipeline → Guard → Idempotency → OrderManager
+            # TradingEngine must NEVER call order_manager.place_order() directly for entries.
+            pipeline_payload = {
+                "timestamp": signal.generated_at,
+                "symbol": signal.symbol,
+                "underlying": signal.symbol,
+                "instrument_key": contract_instrument_key,
+                "option_type": selected_contract.get("option_type") or "CE",
+                "strike": selected_contract.get("strike") or 0,
+                "expiry": contract_metadata.get("expiry") or "",
+                "lot_size": lot_size,
+                "premium": signal.entry_price,
+                "price": signal.entry_price,
+                "spot": (signal.indicators or {}).get("spot_price") or signal.entry_price,
+                "quantity": qty,
+                "stop_loss": signal.stop_loss,
+                "target": signal.target,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "quote_age_seconds": (signal.indicators or {}).get("quote_age_seconds") or 1,
+                "atr": (signal.indicators or {}).get("atr") or (signal.indicators or {}).get("option_atr") or 0,
+                "contract_metadata": contract_metadata,
+            }
+            try:
+                pipe_result = self._submit_entry_via_pipeline(pipeline_payload)
+            except RuntimeError as exc:
+                TradeLogger.log_risk_event("PIPELINE_NOT_ARMED", str(exc), signal.symbol)
+                logger.error("Trade blocked for %s: %s", signal.symbol, exc)
+                return None
+            if not pipe_result.accepted:
+                TradeLogger.log_risk_event("PIPELINE_REJECTED", pipe_result.reason, signal.symbol)
+                logger.info("Trade blocked by ExecutionPipeline for %s: %s", signal.symbol, pipe_result.reason)
+                return None
+            order = pipe_result.order
+            if order is None or order.status in (OrderStatus.REJECTED, OrderStatus.CANCELLED):
+                logger.warning(
+                    "Order rejected/failed for %s: %s",
+                    signal.symbol,
+                    getattr(order, "fill_details", None),
+                )
                 return None
 
             actual_qty = order.filled_quantity or order.quantity or qty
@@ -1252,17 +1390,29 @@ class TradingEngine:
                     "freeze_quantity": info.get("freeze_quantity"),
                 }
 
-            # V21-FINAL: Exit uses the same instrument_key as entry
-            req = OrderRequest(
-                symbol=symbol,
-                instrument_key=contract_key,
-                side="SELL",
-                quantity=pos["quantity"],
-                order_type="MARKET",
-                contract_metadata=contract_metadata,
-                underlying_symbol=symbol,
-            )
-            order = await asyncio.to_thread(self.order_manager.place_order, req)
+            # Controlled exit path via ExecutionPipeline (no direct place_order)
+            exit_payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,
+                "underlying": symbol,
+                "instrument_key": contract_key or symbol,
+                "option_type": (contract_metadata or {}).get("option_type") or "CE",
+                "strike": (contract_metadata or {}).get("strike") or 0,
+                "expiry": pos.get("expiry_date") or "",
+                "lot_size": (contract_metadata or {}).get("lot_size") or 1,
+                "premium": pos.get("entry_price") or 0,
+                "price": pos.get("entry_price") or 0,
+                "quantity": pos["quantity"],
+                "side": "SELL",
+                "order_type": "MARKET",
+                "reason": reason,
+                "contract_metadata": contract_metadata,
+            }
+            pipe_result = await asyncio.to_thread(self._submit_exit_via_pipeline, exit_payload)
+            if not pipe_result.accepted or pipe_result.order is None:
+                logger.error("Exit blocked by ExecutionPipeline for %s: %s", symbol, pipe_result.reason)
+                return
+            order = pipe_result.order
 
             # V21-FINAL Item 18: Use actual fill price for P&L
             actual_exit_qty = order.filled_quantity or order.quantity or pos["quantity"]

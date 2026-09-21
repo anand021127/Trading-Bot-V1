@@ -1,7 +1,8 @@
 """Bot control endpoints — start, stop, kill switch, and status."""
 from __future__ import annotations
 
-from typing import Any, Dict
+import logging
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter
 
@@ -10,9 +11,11 @@ from backend.strategy.trading_engine import BotState
 
 router = APIRouter()
 settings = load_settings()
+logger = logging.getLogger(__name__)
 
 # Shared engine reference — set by main.py at startup
 _engine_ref: Any = None
+_paper_runtime_ref: Any = None
 
 
 def set_engine(engine: Any) -> None:
@@ -23,6 +26,27 @@ def set_engine(engine: Any) -> None:
 def get_engine() -> Any:
     """Return the shared TradingEngine instance (if initialized)."""
     return _engine_ref
+
+
+def set_paper_runtime(runtime: Any) -> None:
+    global _paper_runtime_ref
+    _paper_runtime_ref = runtime
+
+
+def get_paper_runtime() -> Any:
+    return _paper_runtime_ref
+
+
+def _paper_runtime_from_app() -> Optional[Any]:
+    if _paper_runtime_ref is not None:
+        return _paper_runtime_ref
+    try:
+        import backend.api.main as main_mod
+        return getattr(getattr(main_mod, "app", None), "state", None) and getattr(
+            main_mod.app.state, "paper_runtime", None
+        )
+    except Exception:
+        return None
 
 
 @router.get("/status")
@@ -36,7 +60,6 @@ async def bot_status() -> Dict[str, Any]:
         except Exception:
             pass
 
-    # Health monitor snapshot (fast, in-memory)
     health_snapshot: Dict[str, Any] = {}
     scanner_health: Dict[str, Any] = {}
     ws_health: Dict[str, Any] = {}
@@ -70,6 +93,7 @@ async def bot_status() -> Dict[str, Any]:
     except Exception:
         pass
 
+    paper_rt = _paper_runtime_from_app()
     return {
         **state,
         "mode": settings.mode,
@@ -78,29 +102,69 @@ async def bot_status() -> Dict[str, Any]:
         "scanner_health": scanner_health,
         "websocket_health": ws_health,
         "supervisor": supervisor_status,
+        "paper_runtime_attached": paper_rt is not None,
+        "active_executor": "PaperTradingRuntime" if (settings.mode == "paper") else "TradingEngine",
     }
-
 
 
 @router.post("/start")
 async def start_bot() -> Dict[str, Any]:
-    """Start the trading bot."""
+    """Start the trading bot.
+
+    Paper mode starts ONLY PaperTradingRuntime (never TradingEngine.run_forever).
+    Live mode is not enabled from this task and remains blocked at the mode gate.
+    """
+    mode = (settings.mode or "").lower()
     if BotState.is_running():
         return {"success": False, "message": "Bot is already running"}
     if BotState.status()["kill_switch_active"]:
         return {"success": False, "message": "Kill switch is active. Reset it first via /bot/reset-kill"}
+
+    if mode == "paper":
+        paper_rt = _paper_runtime_from_app()
+        if paper_rt is None:
+            return {
+                "success": False,
+                "message": "PaperTradingRuntime not attached. Refusing to start TradingEngine in paper mode.",
+            }
+        # Paper runtime is already constructed at lifespan; mark BotState running only.
+        # Do NOT call TradingEngine.start()/run_forever in paper mode.
+        BotState.start()
+        logger.info("Paper START — PaperTradingRuntime only (TradingEngine loop not started)")
+        return {
+            "success": True,
+            "message": "Paper bot started (PaperTradingRuntime)",
+            "mode": "paper",
+            "executor": "PaperTradingRuntime",
+        }
+
+    if mode == "live":
+        return {
+            "success": False,
+            "message": "Live trading is not enabled. Refusing START in live mode.",
+        }
+
+    # backtest / unknown
     if _engine_ref is not None:
         _engine_ref.start()
     else:
         BotState.start()
-    return {"success": True, "message": "Bot started", "mode": settings.mode}
+    return {"success": True, "message": "Bot started", "mode": mode}
 
 
 @router.post("/stop")
 async def stop_bot() -> Dict[str, Any]:
     """Gracefully stop the trading bot."""
+    mode = (settings.mode or "").lower()
     if not BotState.is_running():
         return {"success": False, "message": "Bot is not running"}
+
+    if mode == "paper":
+        # Stop only the paper control flag; do not start/stop TradingEngine loop.
+        BotState.stop("Manual stop via dashboard (paper)")
+        logger.info("Paper STOP — PaperTradingRuntime control flag cleared")
+        return {"success": True, "message": "Paper bot stopped", "mode": "paper"}
+
     if _engine_ref is not None:
         _engine_ref.stop("Manual stop via dashboard")
     else:
@@ -111,6 +175,14 @@ async def stop_bot() -> Dict[str, Any]:
 @router.post("/kill")
 async def emergency_kill() -> Dict[str, Any]:
     """Emergency kill switch — immediately stops all trading."""
+    mode = (settings.mode or "").lower()
+    paper_rt = _paper_runtime_from_app()
+    if paper_rt is not None and hasattr(paper_rt, "kill"):
+        try:
+            paper_rt.kill.set_level("FULL_SYSTEM_STOP", "dashboard_kill")
+        except Exception as exc:
+            logger.error("paper kill set failed: %s", type(exc).__name__)
+
     if _engine_ref is not None:
         _engine_ref.kill("Emergency kill switch activated from dashboard")
     else:
@@ -119,6 +191,7 @@ async def emergency_kill() -> Dict[str, Any]:
         "success": True,
         "message": "EMERGENCY KILL ACTIVATED. All trading stopped immediately.",
         "warning": "You must manually reset the kill switch before trading can resume.",
+        "mode": mode,
     }
 
 
@@ -126,6 +199,12 @@ async def emergency_kill() -> Dict[str, Any]:
 async def reset_kill_switch() -> Dict[str, Any]:
     """Reset the kill switch after emergency stop."""
     BotState.reset_kill()
+    paper_rt = _paper_runtime_from_app()
+    if paper_rt is not None and hasattr(paper_rt, "kill"):
+        try:
+            paper_rt.kill.set_level("OFF", "dashboard_reset")
+        except Exception:
+            pass
     if _engine_ref is not None:
         try:
             _engine_ref.risk_manager.deactivate_kill_switch()

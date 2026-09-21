@@ -566,6 +566,68 @@ class UpstoxClient:
                 contracts.append(contract)
         return contracts
 
+    def enrich_option_chain_with_atr(
+        self,
+        contracts: List[Dict[str, Any]],
+        atr_period: int = 14,
+        interval: str = "5minute",
+        max_contracts: int = 12,
+    ) -> List[Dict[str, Any]]:
+        """Attach option_atr / atr to live option-chain contracts using real candles.
+
+        Uses only candles available up to now (intraday + recent historical via
+        get_intraday_candles / get_historical_candles path). Never synthesizes
+        prices. Caps work to max_contracts nearest-ATM rows to limit API load.
+        Calculation matches backtest: backend.indicators.atr.calculate_atr period 14.
+        """
+        if not contracts:
+            return contracts
+        from backend.indicators.atr import calculate_atr
+
+        # Prefer contracts that already look ATM-ish: sort by volume/oi presence then take max_contracts
+        ranked = sorted(
+            contracts,
+            key=lambda c: (
+                0 if c.get("ltp") else 1,
+                -(float(c.get("oi") or 0)),
+                -(float(c.get("volume") or 0)),
+            ),
+        )[: max(1, max_contracts)]
+        target_keys = {c.get("instrument_key") for c in ranked if c.get("instrument_key")}
+
+        for c in contracts:
+            ik = c.get("instrument_key")
+            if not ik or ik not in target_keys:
+                c.setdefault("option_atr", float(c.get("option_atr") or c.get("atr") or 0.0))
+                c.setdefault("atr", c["option_atr"])
+                continue
+            try:
+                candles = self.get_intraday_candles(ik, interval)
+                if not candles or len(candles) < atr_period + 1:
+                    # try a short historical window via instrument key
+                    from datetime import date, timedelta
+                    to_d = date.today().isoformat()
+                    from_d = (date.today() - timedelta(days=5)).isoformat()
+                    candles = self.get_historical_candles(
+                        ik, interval, from_date=from_d, to_date=to_d, limit=0,
+                    ) or candles
+                if not candles or len(candles) < atr_period + 1:
+                    c["option_atr"] = 0.0
+                    c["atr"] = 0.0
+                    continue
+                highs = [float(x["high"]) for x in candles]
+                lows = [float(x["low"]) for x in candles]
+                closes = [float(x["close"]) for x in candles]
+                atr_vals = calculate_atr(highs, lows, closes, atr_period)
+                val = float(atr_vals[-1]) if atr_vals else 0.0
+                c["option_atr"] = val
+                c["atr"] = val
+            except Exception as e:
+                logger.warning("option ATR enrich failed for %s: %s", ik, e)
+                c.setdefault("option_atr", 0.0)
+                c.setdefault("atr", 0.0)
+        return contracts
+
     @staticmethod
     def _extract_underlying_spot(raw_rows: List[Dict[str, Any]]) -> Optional[float]:
         """Upstox's `/option/chain` response repeats `underlying_spot_price`
@@ -605,7 +667,9 @@ class UpstoxClient:
             raise
         except Exception as e:
             raise UpstoxAPIError(500, str(e))
-        return self._parse_chain_contracts(raw_rows), self._extract_underlying_spot(raw_rows)
+        contracts = self._parse_chain_contracts(raw_rows)
+        contracts = self.enrich_option_chain_with_atr(contracts, atr_period=14)
+        return contracts, self._extract_underlying_spot(raw_rows)
 
     def get_option_chain(self, underlying_symbol: str, expiry_date: str) -> List[Dict[str, Any]]:
         """
@@ -631,7 +695,9 @@ class UpstoxClient:
         """
         try:
             raw_rows = self._fetch_option_chain_raw(underlying_symbol, expiry_date)
-            return self._parse_chain_contracts(raw_rows)
+            contracts = self._parse_chain_contracts(raw_rows)
+            # Same ATR formula as backtest (period=14) from real option candles only.
+            return self.enrich_option_chain_with_atr(contracts, atr_period=14)
         except UpstoxAPIError as e:
             logger.error("Option chain fetch failed for %s (%s): %s", underlying_symbol, expiry_date, e)
             raise

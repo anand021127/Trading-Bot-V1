@@ -1,17 +1,20 @@
-"""Strategy V8-D: Validated Production Strategy Specification.
+"""Strategy V8-D: Validated Production Strategy Specification (Improved).
 
 Specifications:
-- Underlying: NIFTY50, BANKNIFTY
+- Underlying: NIFTY50, BANKNIFTY (and other indices via config)
 - Entry Model: V7-G Pullback/Retest + Reversal Confirmation on Underlying Index
+  (strengthened: stricter RSI, trend separation, body strength, controlled pullback depth)
 - Strike Selection: Strict ATM (Nearest Round Strike)
 - Option Type: CE for Bullish Pullback, PE for Bearish Pullback
-- Stop Loss: Fixed -20% from Option Entry Premium
-- Target: Fixed +15% from Option Entry Premium
-- Risk Limit: Maximum 3% Account Risk
-- Capital Allocation: Maximum 20% Account Equity
+- Stop Loss: Dynamic — max(28% fixed, 1.8× option ATR), capped at 40% of premium
+  (widened vs original 20% to reduce premature SL hits especially on CE)
+- Target: Dynamic ~1.5R of actual SL distance or +42% (whichever larger) for positive expectancy
+- Risk Limit: Maximum 2.5% Account Risk
+- Capital Allocation: Maximum 18% Account Equity
 - Historical Lot Size: NIFTY 25, BANKNIFTY 15
 - Daily Portfolio Trade Limit: Max 3 trades per day
 - Next-Bar Execution Realism: Zero lookahead bias
+- Uses only real historical option OHLCV (no synthetic/Black-Scholes prices)
 """
 from __future__ import annotations
 
@@ -47,14 +50,16 @@ class V8DStrategy(Strategy):
 
     def __init__(
         self,
-        stop_loss_pct: float = 0.20,     # Fixed -20% Option Stop
-        target_pct: float = 0.15,        # Fixed +15% Option Target
-        max_account_risk_pct: float = 0.03,    # Max 3% risk
-        max_capital_alloc_pct: float = 0.20,   # Max 20% allocation
+        stop_loss_pct: float = 0.28,     # Widened to -28% to reduce premature SL hits on volatile CE premiums
+        target_pct: float = 0.42,        # Raised to +42% for positive expectancy (R:R ~ 1:1.5)
+        max_account_risk_pct: float = 0.025,   # Slightly tighter max 2.5% risk for safety
+        max_capital_alloc_pct: float = 0.18,   # Max 18% allocation
         max_daily_trades: int = 3,
         ema_fast: int = 20,
         ema_slow: int = 50,
         rsi_period: int = 14,
+        use_atr_stop: bool = True,       # Prefer ATR-based stop when option ATR available
+        atr_stop_mult: float = 1.8,      # SL distance = max(fixed%, atr_mult * option_atr)
     ) -> None:
         self.stop_loss_pct = stop_loss_pct
         self.target_pct = target_pct
@@ -64,6 +69,8 @@ class V8DStrategy(Strategy):
         self.ema_fast = ema_fast
         self.ema_slow = ema_slow
         self.rsi_period = rsi_period
+        self.use_atr_stop = use_atr_stop
+        self.atr_stop_mult = atr_stop_mult
 
     @staticmethod
     def get_atm_strike(spot_price: float, underlying: str) -> int:
@@ -126,11 +133,16 @@ class V8DStrategy(Strategy):
             "rsi": curr_rsi,
         }
 
-        # Bullish Pullback check
-        bull_trend = curr_ema20 > curr_ema50 and curr_close > curr_ema50
-        bull_pullback = curr_low <= curr_ema20 * 1.002
-        bull_rsi = 40.0 <= curr_rsi <= 60.0
-        bull_reversal = (curr_close > curr_open) and (curr_close >= curr_ema20 or curr_close > prev_high)
+        # Bullish Pullback check (stricter for CE to reduce false signals & SL hits)
+        # Require clear uptrend, EMA20 test, RSI not oversold/overbought, and decisive reversal
+        bull_trend = curr_ema20 > curr_ema50 and curr_close > curr_ema50 and (curr_ema20 - curr_ema50) / curr_ema50 > 0.0015
+        bull_pullback = curr_low <= curr_ema20 * 1.003 and curr_low >= curr_ema20 * 0.985  # controlled touch, not deep breakdown
+        bull_rsi = 45.0 <= curr_rsi <= 62.0  # tighter, higher zone for CE (avoid weak/oversold bounce)
+        bull_reversal = (
+            (curr_close > curr_open)
+            and (curr_close > prev_high or (curr_close >= curr_ema20 and (curr_close - curr_open) / max(curr_high - curr_low, 1e-6) > 0.55))
+        )
+        # Body strength: green candle body > 55% of range preferred
 
         if bull_trend and bull_pullback and bull_rsi and bull_reversal:
             conds = {
@@ -138,14 +150,18 @@ class V8DStrategy(Strategy):
                 "pullback_test": True,
                 "rsi_in_zone": True,
                 "reversal_confirmed": True,
+                "strong_body": True,
             }
             return "CE", conds, indicators
 
-        # Bearish Pullback check
-        bear_trend = curr_ema20 < curr_ema50 and curr_close < curr_ema50
-        bear_pullback = curr_high >= curr_ema20 * 0.998
-        bear_rsi = 40.0 <= curr_rsi <= 60.0
-        bear_reversal = (curr_close < curr_open) and (curr_close <= curr_ema20 or curr_close < prev_low)
+        # Bearish Pullback check (symmetric but slightly wider RSI for PE)
+        bear_trend = curr_ema20 < curr_ema50 and curr_close < curr_ema50 and (curr_ema50 - curr_ema20) / curr_ema50 > 0.0015
+        bear_pullback = curr_high >= curr_ema20 * 0.997 and curr_high <= curr_ema20 * 1.015
+        bear_rsi = 38.0 <= curr_rsi <= 55.0
+        bear_reversal = (
+            (curr_close < curr_open)
+            and (curr_close < prev_low or (curr_close <= curr_ema20 and (curr_open - curr_close) / max(curr_high - curr_low, 1e-6) > 0.55))
+        )
 
         if bear_trend and bear_pullback and bear_rsi and bear_reversal:
             conds = {
@@ -153,6 +169,7 @@ class V8DStrategy(Strategy):
                 "pullback_test": True,
                 "rsi_in_zone": True,
                 "reversal_confirmed": True,
+                "strong_body": True,
             }
             return "PE", conds, indicators
 
@@ -324,9 +341,21 @@ class V8DStrategy(Strategy):
         if abs(opt_ltp - spot_price) / spot_price < 0.01:
             rejection_reasons.append("CRITICAL: Option price equals underlying spot price (data corruption)")
 
-        # 4. Calculate V8-D Stop (-20%) and Target (+15%)
-        stop_loss = round(opt_ltp * (1.0 - self.stop_loss_pct), 2)
-        target = round(opt_ltp * (1.0 + self.target_pct), 2)
+        # 4. Calculate improved Stop / Target
+        # Prefer ATR-based distance when option ATR is supplied in contract (reduces CE SL noise)
+        option_atr = float(candidate_contract.get("option_atr") or candidate_contract.get("atr") or 0.0)
+        fixed_sl_dist = opt_ltp * self.stop_loss_pct
+        if self.use_atr_stop and option_atr > 0:
+            atr_sl_dist = self.atr_stop_mult * option_atr
+            sl_dist = max(fixed_sl_dist, atr_sl_dist)
+        else:
+            sl_dist = fixed_sl_dist
+        # Cap SL distance so we never risk more than ~40% of premium
+        sl_dist = min(sl_dist, opt_ltp * 0.40)
+        stop_loss = round(max(0.05, opt_ltp - sl_dist), 2)
+        # Target aims for ~1.5R of the final SL distance for positive expectancy
+        target_dist = max(opt_ltp * self.target_pct, 1.5 * sl_dist)
+        target = round(opt_ltp + target_dist, 2)
 
         # 5. Position Sizing
         qty, sizing = self.calculate_position_size(
@@ -359,9 +388,11 @@ class V8DStrategy(Strategy):
                 "lot_size": lot_size,
                 "sizing": sizing,
             }
+            sl_pct_actual = (opt_ltp - stop_loss) / opt_ltp * 100.0 if opt_ltp > 0 else 0
+            tp_pct_actual = (target - opt_ltp) / opt_ltp * 100.0 if opt_ltp > 0 else 0
             sig.entry_reason = (
                 f"V8-D VALIDATED ENTRY: {underlying_symbol} {opt_type} {atm_strike} @ ₹{opt_ltp:.2f} "
-                f"| SL: ₹{stop_loss:.2f} (-20%) | Target: ₹{target:.2f} (+15%) | Qty: {qty}"
+                f"| SL: ₹{stop_loss:.2f} (-{sl_pct_actual:.1f}%) | Target: ₹{target:.2f} (+{tp_pct_actual:.1f}%) | Qty: {qty}"
             )
             decision = "ACCEPTED"
 

@@ -402,17 +402,16 @@ class OptionPremiumStrategy(Strategy):
             sig.rejected_reasons.append(REASON_TEXT["not_expiry_day"])
 
         if current_atr > 0:
+            # Always long the option premium (BUY CE or BUY PE).
+            # Stop is ALWAYS below entry premium; target ALWAYS above.
+            # Previous PE branch incorrectly treated puts as short premium — that caused
+            # inverted SL/TP and systematic losses / wrong exits on PE (and could affect
+            # overall risk accounting when mixed with CE).
             sig.entry_price = closes[-1]
-            if opt_type == "CE":
-                sl_calc = round(max(0.05, closes[-1] - self.atr_multiplier * current_atr), 2)
-                risk = sig.entry_price - sl_calc
-                sig.stop_loss = sl_calc
-                sig.target = round(sig.entry_price + self.target_r_multiple * risk, 2) if risk > 0 else sig.entry_price
-            else:
-                sl_calc = round(closes[-1] + self.atr_multiplier * current_atr, 2)
-                risk = sl_calc - sig.entry_price
-                sig.stop_loss = sl_calc
-                sig.target = round(max(0.05, sig.entry_price - self.target_r_multiple * risk), 2) if risk > 0 else sig.entry_price
+            sl_calc = round(max(0.05, closes[-1] - self.atr_multiplier * current_atr), 2)
+            risk = sig.entry_price - sl_calc
+            sig.stop_loss = sl_calc
+            sig.target = round(sig.entry_price + self.target_r_multiple * risk, 2) if risk > 0 else sig.entry_price
 
         # Check confidence against threshold and expiry filter
         if expiry_ok and setup_res.confidence >= self.min_confidence_to_trade:

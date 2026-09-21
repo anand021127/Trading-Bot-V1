@@ -170,6 +170,36 @@ function loadTokenFromSQLite(): string {
   }
 }
 
+/** Call the Python node_bridge so dashboard state matches BotState + SQLite. */
+function callPythonBridge(command: string): Record<string, unknown> {
+  try {
+    const script = path.join(process.cwd(), 'backend', 'cli', 'node_bridge.py');
+    const out = execSync(`python3 "${script}" ${command}`, {
+      timeout: 8000,
+      encoding: 'utf-8',
+      env: { ...process.env, PYTHONPATH: process.cwd() },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const line = (out || '').trim().split('\n').filter(Boolean).pop() || '{}';
+    return JSON.parse(line);
+  } catch (err: any) {
+    const stderr = err?.stderr?.toString?.() || err?.message || 'bridge_failed';
+    return { success: false, message: String(stderr).slice(0, 300) };
+  }
+}
+
+function syncBotStateFromPython() {
+  const st = callPythonBridge('status');
+  if (st && st.success !== false) {
+    botState.isRunning = Boolean(st.running || st.is_running);
+    botState.killSwitchActive = Boolean(st.kill_switch_active);
+    if (typeof st.start_time === 'string' && st.start_time) {
+      botState.startedAt = st.start_time as string;
+    }
+  }
+  return st;
+}
+
 function loadPersistedToken(): StoredTokenData | null {
   // 1. Check JSON files
   for (const filePath of TOKEN_FILE_PATHS) {
@@ -468,19 +498,27 @@ let botState = {
   lastHeartbeat: new Date().toISOString(),
 };
 
+function _envPct(name: string, defaultFraction: number): number {
+  // Returns percent points for dashboard display (2.5 means 2.5%).
+  const raw = Number(process.env[name]);
+  if (!Number.isFinite(raw) || raw <= 0) return defaultFraction * 100;
+  return raw <= 1 ? raw * 100 : raw;
+}
+
 let settingsData = {
-  mode: 'paper',
+  // Prefer env so Node dashboard matches Python PaperTradingRuntime config
+  mode: (process.env.TRADING_MODE || 'paper').toLowerCase(),
   broker_base_url: 'https://api.upstox.com/v2',
   capital: {
-    total: 1000000,
-    max_allocation_per_trade: 0.1,
+    total: Number(process.env.TRADING_CAPITAL || 100000),
+    max_allocation_per_trade: Number(process.env.MAX_ALLOCATION_PCT || 0.18),
     cash_buffer: 0.2,
   },
   risk: {
-    max_risk_per_trade_pct: 1.0,
-    max_daily_loss_pct: 3.0,
-    max_trades_per_day: 10,
-    max_concurrent_positions: 3,
+    max_risk_per_trade_pct: _envPct('RISK_PER_TRADE_PCT', 0.025),
+    max_daily_loss_pct: _envPct('MAX_DAILY_LOSS_PCT', 0.02),
+    max_trades_per_day: Number(process.env.MAX_TRADES_PER_DAY || 3),
+    max_concurrent_positions: Number(process.env.MAX_CONCURRENT_POSITIONS || 1),
     max_consecutive_losses: 3,
   },
   strategy: {
@@ -788,17 +826,55 @@ app.get(['/health', '/api/health'], async (req, res) => {
 
   const uptime = Math.floor((Date.now() - new Date(botState.startedAt).getTime()) / 1000);
 
+  const pyHealth = callPythonBridge('health');
+  const pyWorker = (pyHealth.python_worker as Record<string, unknown>) || {};
+  const paperRt = (pyHealth.paper_runtime as Record<string, unknown>) || {};
+  const eng = (pyHealth.trading_engine as Record<string, unknown>) || {};
+  const workerOk = Boolean(pyWorker.ok);
+  const pipelineOk = Boolean(pyWorker.pipeline_ok);
+  const effectivelyRunning = Boolean(eng.bot_running) && workerOk;
+
   res.json({
-    status: brokerAuthenticated ? 'ok' : 'degraded',
+    status: effectivelyRunning || brokerAuthenticated ? 'ok' : 'degraded',
     mode: settingsData.mode,
-    version: '2.0.0',
+    version: '2.1.0',
     health: {
-      bot_status: botState.isRunning ? 'RUNNING' : 'STOPPED',
+      bot_status: effectivelyRunning ? 'RUNNING' : 'STOPPED',
       uptime_seconds: uptime,
       started_at: botState.startedAt,
       process_id: process.pid,
-      last_heartbeat_seconds_ago: 1,
+      last_heartbeat_seconds_ago: pyWorker.heartbeat_age_seconds ?? null,
       components: {
+        node: { name: 'node', status: 'RUNNING', process_id: process.pid },
+        python_worker: {
+          name: 'python_worker',
+          status: workerOk ? 'RUNNING' : 'STOPPED',
+          pid: pyWorker.pid ?? null,
+          worker_status: pyWorker.status ?? null,
+          last_error: pyWorker.last_error ?? null,
+        },
+        database: {
+          name: 'database',
+          status: (pyHealth.database as any)?.ok ? 'RUNNING' : 'FAILED',
+          path: (pyHealth.database as any)?.path ?? null,
+        },
+        market_data: {
+          name: 'market_data',
+          status: upstoxWsState.connected ? 'LIVE' : brokerAuthenticated ? 'REST_ONLY' : 'DISCONNECTED',
+          ticks_received: upstoxWsState.ticksReceived,
+          token_present: Boolean((pyHealth.market_data as any)?.token_present),
+        },
+        trading_engine: {
+          name: 'trading_engine',
+          status: pipelineOk ? (effectivelyRunning ? 'RUNNING' : 'ARMED') : 'NOT_ARMED',
+          executor: eng.executor ?? 'PaperTradingRuntime',
+        },
+        paper_runtime: {
+          name: 'paper_runtime',
+          status: paperRt.ok ? 'RUNNING' : 'STOPPED',
+          strategy: paperRt.strategy ?? null,
+          product: paperRt.product ?? null,
+        },
         broker_auth: {
           name: 'broker_auth',
           status: brokerAuthenticated ? 'CONNECTED' : 'AUTHENTICATION_FAILED',
@@ -811,19 +887,11 @@ app.get(['/health', '/api/health'], async (req, res) => {
           status: upstoxWsState.connected ? 'LIVE' : 'DISCONNECTED',
           ticks_received: upstoxWsState.ticksReceived,
         },
-        trading_engine: {
-          name: 'trading_engine',
-          status: botState.isRunning ? 'RUNNING' : 'PAUSED',
-        },
-        database: {
-          name: 'database',
-          status: 'RUNNING',
-        },
       },
       recent_events: [],
     },
     scanner: {
-      is_running: botState.isRunning && brokerAuthenticated,
+      is_running: effectivelyRunning && brokerAuthenticated,
       is_healthy: brokerAuthenticated,
       scanner_status: brokerAuthenticated ? 'RUNNING' : 'BLOCKED_NO_BROKER_AUTH',
       error: brokerError,
@@ -837,10 +905,11 @@ app.get(['/health', '/api/health'], async (req, res) => {
       error: upstoxWsState.error,
     },
     supervisor: {
-      status: 'healthy',
-      tasks_running: 1,
+      status: workerOk ? 'healthy' : 'degraded',
+      tasks_running: workerOk ? 1 : 0,
     },
   });
+
 });
 
 app.get('/api/version', (req, res) => {
@@ -970,34 +1039,46 @@ app.get(['/api/overview', '/overview'], async (req, res) => {
   });
 });
 
-// Bot Control Endpoints
+// Bot Control Endpoints — delegated to Python BotState (not in-memory only)
 app.get(['/api/bot/status', '/bot/status'], (req, res) => {
   const tokenMeta = resolveUpstoxToken();
+  const py = syncBotStateFromPython();
+  const running = Boolean(py.running || py.is_running || botState.isRunning);
+  const killed = Boolean(py.kill_switch_active || botState.killSwitchActive);
+  const startTime = (py.start_time as string) || botState.startedAt;
+  const uptime = startTime ? Math.floor((Date.now() - new Date(startTime).getTime()) / 1000) : 0;
   res.json({
-    running: botState.isRunning,
-    is_running: botState.isRunning,
-    kill_switch_active: botState.killSwitchActive,
-    start_time: botState.startedAt,
-    uptime_seconds: Math.floor((Date.now() - new Date(botState.startedAt).getTime()) / 1000),
-    stop_reason: botState.killSwitchActive ? 'Emergency kill switch active' : botState.isRunning ? '' : 'Bot stopped',
-    mode: settingsData.mode,
+    running,
+    is_running: running,
+    kill_switch_active: killed,
+    start_time: startTime,
+    uptime_seconds: running ? Math.max(0, uptime) : 0,
+    stop_reason: killed
+      ? 'Emergency kill switch active'
+      : running
+        ? ''
+        : (py.stop_reason as string) || 'Bot stopped',
+    mode: (py.mode as string) || settingsData.mode,
+    strategy: py.strategy || null,
+    executor: py.executor || null,
+    paper_runtime_ready: Boolean(py.paper_runtime_ready),
     token_present: tokenMeta.source !== 'none',
     risk: {
-      is_trading_allowed: botState.isRunning && !botState.killSwitchActive,
-      status: botState.killSwitchActive ? 'KILL_SWITCH_ACTIVE' : botState.isRunning ? 'ACTIVE' : 'STOPPED',
+      is_trading_allowed: running && !killed,
+      status: killed ? 'KILL_SWITCH_ACTIVE' : running ? 'ACTIVE' : 'STOPPED',
       consecutive_losses: 0,
       daily_loss_used_pct: 0,
       trades_used: tradeHistory.length,
       max_trades: settingsData.risk.max_trades_per_day,
     },
     health: {
-      bot_status: botState.isRunning ? 'RUNNING' : 'STOPPED',
-      uptime_seconds: Math.floor((Date.now() - new Date(botState.startedAt).getTime()) / 1000),
+      bot_status: running ? 'RUNNING' : 'STOPPED',
+      uptime_seconds: running ? Math.max(0, uptime) : 0,
     },
     scanner_health: {
-      is_running: botState.isRunning,
+      is_running: running,
       is_healthy: tokenMeta.source !== 'none',
-      scanner_status: botState.isRunning ? 'RUNNING' : 'STOPPED',
+      scanner_status: running ? 'RUNNING' : 'STOPPED',
     },
     websocket_health: {
       is_connected: upstoxWsState.connected,
@@ -1008,44 +1089,67 @@ app.get(['/api/bot/status', '/bot/status'], (req, res) => {
 });
 
 app.post('/api/bot/start', (req, res) => {
-  if (botState.killSwitchActive) {
-    return res.status(400).json({ success: false, message: 'Kill switch is active. Reset it first via /bot/reset-kill' });
+  // Spawns real Python paper worker; fails if worker/pipeline not healthy
+  const py = callPythonBridge('start');
+  if (py.success) {
+    botState.isRunning = true;
+    botState.startedAt = new Date().toISOString();
+    botState.killSwitchActive = false;
+    return res.json({
+      success: true,
+      message: (py.message as string) || 'Bot started',
+      mode: (py.mode as string) || settingsData.mode,
+      executor: py.executor || 'PaperTradingRuntime',
+      worker_pid: py.worker_pid ?? null,
+      pipeline_ok: Boolean(py.pipeline_ok),
+      log_path: py.log_path ?? null,
+    });
   }
-  botState.isRunning = true;
-  botState.startedAt = new Date().toISOString();
-  res.json({ success: true, message: 'Bot started', mode: settingsData.mode });
+  botState.isRunning = false;
+  const msg = (py.message as string) || 'Failed to start bot';
+  return res.status(400).json({ success: false, message: msg, details: py });
 });
 
 app.post('/api/bot/stop', (req, res) => {
+  const py = callPythonBridge('stop');
   botState.isRunning = false;
-  res.json({ success: true, message: 'Bot stopped' });
+  if (py.success === false && !(py.message as string)?.includes('not running')) {
+    return res.status(400).json({ success: false, message: py.message || 'Stop failed' });
+  }
+  res.json({ success: true, message: (py.message as string) || 'Bot stopped' });
 });
 
 app.post('/api/bot/kill', (req, res) => {
+  const py = callPythonBridge('kill');
   botState.isRunning = false;
   botState.killSwitchActive = true;
   res.json({
     success: true,
-    message: 'EMERGENCY KILL ACTIVATED. All trading stopped immediately.',
-    warning: 'You must manually reset the kill switch before trading can resume.',
+    message: (py.message as string) || 'EMERGENCY KILL ACTIVATED. All trading stopped immediately.',
+    warning:
+      (py.warning as string) ||
+      'You must manually reset the kill switch before trading can resume.',
   });
 });
 
 app.post('/api/bot/reset-kill', (req, res) => {
+  const py = callPythonBridge('reset_kill');
   botState.killSwitchActive = false;
-  res.json({ success: true, message: 'Kill switch reset.' });
+  res.json({ success: true, message: (py.message as string) || 'Kill switch reset.' });
 });
 
-// Trades Endpoints
+// Trades Endpoints — prefer SQLite via Python bridge, fall back to in-memory
 app.get('/api/trades', (req, res) => {
   const { date_from, date_to, symbol, mode, exit_reason, page = 1, page_size = 20 } = req.query;
-  let filtered = [...tradeHistory];
+  const pyTrades = callPythonBridge('trades');
+  const fromDb = Array.isArray(pyTrades.trades) ? (pyTrades.trades as any[]) : [];
+  let filtered = fromDb.length > 0 ? [...fromDb] : [...tradeHistory];
 
-  if (symbol) filtered = filtered.filter((t) => t.symbol.toLowerCase().includes(String(symbol).toLowerCase()));
+  if (symbol) filtered = filtered.filter((t) => String(t.symbol || '').toLowerCase().includes(String(symbol).toLowerCase()));
   if (mode) filtered = filtered.filter((t) => t.mode === mode);
   if (exit_reason) filtered = filtered.filter((t) => t.exit_reason === exit_reason);
-  if (date_from) filtered = filtered.filter((t) => t.entry_time >= String(date_from));
-  if (date_to) filtered = filtered.filter((t) => t.entry_time <= String(date_to) + 'T23:59:59');
+  if (date_from) filtered = filtered.filter((t) => String(t.entry_time || t.timestamp || '') >= String(date_from));
+  if (date_to) filtered = filtered.filter((t) => String(t.entry_time || t.timestamp || '') <= String(date_to) + 'T23:59:59');
 
   const total = filtered.length;
   const p = Math.max(1, Number(page));
@@ -1101,7 +1205,9 @@ app.get('/api/trades/:id', (req, res) => {
 
 // Positions Endpoints
 app.get('/api/positions', (req, res) => {
-  res.json(openPositions);
+  const py = callPythonBridge('positions');
+  const fromDb = Array.isArray(py.positions) ? (py.positions as any[]) : [];
+  res.json(fromDb.length > 0 ? fromDb : openPositions);
 });
 
 app.post('/api/positions/:symbol/exit', (req, res) => {

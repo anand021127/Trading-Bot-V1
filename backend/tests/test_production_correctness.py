@@ -31,7 +31,19 @@ def _isolated_engine() -> TradingEngine:
     path = f"{tempfile.gettempdir()}/test_prod_correctness_{uuid.uuid4().hex}.db"
     db = DatabaseManager(db_path=path)
     db.init_db()
-    return TradingEngine(db_manager=db)
+    import backend.strategy.trading_engine as te_mod
+    te_mod.settings.mode = "paper"
+    te_mod.settings.strategy.name = "V8_D_PULLBACK_ATM"
+    te_mod.settings.order.product = "I"
+    te_mod.settings.risk.max_risk_per_trade_pct = 0.025
+    te_mod.settings.capital.total = 100000.0
+    te_mod.settings.capital.max_allocation_per_trade = 0.18
+    client = MagicMock()
+    om = OrderManager(client=client, paper_mode=True, default_product="I")
+    engine = TradingEngine(db_manager=db, client=client, order_manager=om)
+    engine._init_execution_pipeline()
+    assert engine._pipeline is not None, "ExecutionPipeline must be armed for production tests"
+    return engine
 
 
 def _buy_signal_with_contract(symbol: str = "NIFTY50") -> StrategySignal:

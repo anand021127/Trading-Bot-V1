@@ -24,24 +24,23 @@ class ExitManager:
 
 
 class TrailingStopManager:
-    """4-stage ATR/R-multiple trailing stop for open (long) positions —
+    """4-stage R-multiple trailing stop for open (long) positions —
     item #7. The stop only ever ratchets in the profitable direction; it
     never loosens back toward the original risk.
 
-    Stages, based on how many "R" (initial risk = entry - initial_stop)
-    the position has moved in its favor:
-        R < 1.0   → stage 0: original stop untouched
-        R >= 1.0  → stage 1: move stop to breakeven (entry price)
-        R >= 1.5  → stage 2: lock in 0.5R of profit
-        R >= 2.0  → stage 3: lock in 1.0R of profit (this is usually `target`)
-        R >= 3.0  → stage 4: lock in 2.0R of profit, keeps trailing beyond
+    Stages (tuned for option premium volatility / CE noise reduction):
+        R < 0.7   → stage 0: original stop untouched
+        R >= 0.7  → stage 1: move stop to breakeven (entry price)
+        R >= 1.2  → stage 2: lock in 0.4R of profit
+        R >= 1.8  → stage 3: lock in 0.9R of profit
+        R >= 2.5  → stage 4: lock in 1.6R of profit, keeps trailing beyond
     """
 
     STAGE_THRESHOLDS: List[Tuple[float, float]] = [
-        (1.0, 0.0),   # move to breakeven
-        (1.5, 0.5),   # lock 0.5R
-        (2.0, 1.0),   # lock 1.0R
-        (3.0, 2.0),   # lock 2.0R, keeps trailing at this ratio beyond stage 4
+        (0.7, 0.0),   # earlier move to breakeven (was 1.0) — critical for option premium noise
+        (1.2, 0.4),   # lock 0.4R earlier
+        (1.8, 0.9),   # lock 0.9R
+        (2.5, 1.6),   # lock 1.6R, keeps trailing beyond
     ]
 
     def compute(
@@ -66,9 +65,9 @@ class TrailingStopManager:
                 stage = i
                 locked_r = lock_r
         if stage >= 4:
-            # Beyond stage 4, keep trailing at 2R behind current price's
-            # own R-multiple progress (never below the stage-4 floor).
-            locked_r = max(2.0, r_multiple - 1.0)
+            # Beyond stage 4, keep trailing ~1R behind current progress
+            # (never below the stage-4 floor of 1.6R).
+            locked_r = max(1.6, r_multiple - 1.0)
 
         if locked_r is None:
             return {"stop": floor, "stage": 0}

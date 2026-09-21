@@ -26,6 +26,7 @@ from backend.backtest.historical_contract_resolver import (
     _UNDERLYING_SYMBOL_MAP,
     _EXCHANGE_SEGMENT,
 )
+from backend.indicators.atr import calculate_atr
 
 logger = logging.getLogger(__name__)
 
@@ -430,3 +431,107 @@ class HistoricalOptionsDataLoader:
             return rec
         norm_ts = timestamp.replace(" ", "T")
         return self._timestamp_index.get((contract_key, norm_ts))
+
+    def build_option_chain_snapshot(
+        self,
+        underlying: str,
+        target_date: date,
+        spot_price: float,
+        timestamp: str,
+        exact_atm_only: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Build a real option_chain list from cached historical OHLCV only.
+
+        Used so strategies that expect context['option_chain'] (e.g. V8_D) receive
+        the same real-data contracts that resolve_contract / get_candle_at use.
+
+        Rules:
+        - Only contracts already loaded in the cache.
+        - Premium = historical candle close at the given timestamp (or same calendar
+          date if exact timestamp missing — still real data, not synthetic).
+        - If exact_atm_only: only the ATM CE and PE for the nearest loaded expiry
+          >= target_date with an exact strike match. No neighbouring-strike fallback.
+        - Never fabricates prices, Black-Scholes, or live quotes.
+
+        Returns a list of dicts with keys: strike, option_type, instrument_key,
+        expiry, ltp, close_price, open, high, low, volume, lot_size (when known).
+        Empty list if nothing can be resolved from real cache.
+        """
+        und_key = normalize_underlying(underlying)
+        step = INDEX_STRIKE_INTERVALS.get(und_key, 50.0)
+        atm_strike = float(round(spot_price / step) * step)
+        target_date_str = target_date.isoformat() if isinstance(target_date, date) else str(target_date)[:10]
+        chain: List[Dict[str, Any]] = []
+
+        for opt_type in ("CE", "PE"):
+            matching = [
+                k for k in self._lookup_index.keys()
+                if k[0] == und_key and k[3] == opt_type and k[1] >= target_date_str
+            ]
+            if exact_atm_only:
+                matching = [k for k in matching if abs(k[2] - atm_strike) < 0.01]
+            if not matching:
+                continue
+            matching.sort(key=lambda x: (x[1], abs(x[2] - atm_strike)))
+            best = matching[0]
+            contract_key = self._lookup_index[best]
+            expiry_str, strike_val = best[1], best[2]
+
+            rec = self.get_candle_at(contract_key, timestamp)
+            if rec is None:
+                # Same calendar day only — still real OHLCV, not interpolated
+                day_candidates = [
+                    r for r in self._contracts_data.get(contract_key, [])
+                    if (r.timestamp or "")[:10] == target_date_str
+                ]
+                if not day_candidates:
+                    continue
+                # Prefer last candle at or before timestamp on that day
+                day_candidates.sort(key=lambda r: r.timestamp)
+                rec = day_candidates[-1]
+                for r in day_candidates:
+                    if r.timestamp <= timestamp:
+                        rec = r
+                    else:
+                        break
+
+            if rec is None or float(rec.close) <= 0:
+                continue
+
+            meta = self._contracts_metadata.get(contract_key, {})
+
+            # Historical option ATR up to (and including) current timestamp only.
+            # Uses real option OHLCV; never future bars or synthetic prices.
+            option_atr = 0.0
+            atr_period = 14
+            hist = [
+                r for r in self._contracts_data.get(contract_key, [])
+                if (r.timestamp or "") <= timestamp
+            ]
+            hist.sort(key=lambda r: r.timestamp or "")
+            if len(hist) >= atr_period + 1:
+                highs = [float(r.high) for r in hist]
+                lows = [float(r.low) for r in hist]
+                closes = [float(r.close) for r in hist]
+                atr_vals = calculate_atr(highs, lows, closes, atr_period)
+                if atr_vals:
+                    option_atr = float(atr_vals[-1])
+
+            chain.append({
+                "strike": float(strike_val),
+                "option_type": opt_type,
+                "instrument_key": contract_key,
+                "expiry": expiry_str,
+                "ltp": float(rec.close),
+                "close_price": float(rec.close),
+                "open": float(rec.open),
+                "high": float(rec.high),
+                "low": float(rec.low),
+                "volume": float(rec.volume or 0),
+                "lot_size": meta.get("lot_size") or INDEX_LOT_SIZES.get(und_key, 25),
+                "timestamp": rec.timestamp,
+                "option_atr": option_atr,
+                "atr": option_atr,
+            })
+
+        return chain

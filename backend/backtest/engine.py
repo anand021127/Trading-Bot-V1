@@ -658,11 +658,11 @@ class BacktestEngine:
                 if exit_reason:
                     exit_price = self._exit_price_for(position, opt_bar, exit_reason)
                     qty = position["quantity"]
-                    is_opt = bool(position.get("is_real_option", False)) or (position["strategy"] == "OPTION_PREMIUM" and require_real_options)
+                    is_opt = bool(position.get("is_real_option", False)) or (position["strategy"] in ("OPTION_PREMIUM", "V8_D_PULLBACK_ATM") and require_real_options)
                     inst_type = InstrumentType.INDEX_OPTION if is_opt else InstrumentType.EQUITY
 
                     # HARD VALIDATION GATE: Assert all mandatory option fields before creating trade
-                    if require_real_options and position["strategy"] == "OPTION_PREMIUM":
+                    if require_real_options and position["strategy"] in ("OPTION_PREMIUM", "V8_D_PULLBACK_ATM"):
                         opt_t = position.get("option_type")
                         stk = position.get("strike")
                         exp = position.get("expiry")
@@ -785,6 +785,23 @@ class BacktestEngine:
                 else:
                     trend = "NEUTRAL"
                 bar_context["underlying_trend"] = trend
+
+                # Inject real historical option_chain (cache-backed ATM CE/PE only).
+                # Strategies such as V8_D_PULLBACK_ATM require context["option_chain"]
+                # with real LTP; without this they reject before the resolve_contract path.
+                if require_real_options and options_data_loader is not None:
+                    try:
+                        hist_date = datetime.fromisoformat(bar_date).date() if bar_date else None
+                        if hist_date is not None and hasattr(options_data_loader, "build_option_chain_snapshot"):
+                            bar_context["option_chain"] = options_data_loader.build_option_chain_snapshot(
+                                underlying=sym,
+                                target_date=hist_date,
+                                spot_price=spot_close,
+                                timestamp=ts,
+                                exact_atm_only=True,
+                            )
+                    except Exception:
+                        bar_context.setdefault("option_chain", [])
 
                 if trend == "BULLISH":
                     result.trend_bullish += 1
@@ -986,8 +1003,16 @@ class BacktestEngine:
                             symbol_stats[sym]["data_unavailable"] += 1
                             continue
 
-                        opt_stop_loss = round(max(0.5, opt_entry_price * 0.82), 2)
-                        opt_target = round(opt_entry_price + 2.0 * (opt_entry_price - opt_stop_loss), 2)
+                        # Prefer strategy-defined SL/TP (e.g. V8-D dynamic ATR / 1.5R).
+                        # Fall back to default premium % only when strategy did not set them.
+                        if getattr(best, "stop_loss", None) and best.stop_loss > 0 and best.stop_loss < opt_entry_price:
+                            opt_stop_loss = float(best.stop_loss)
+                        else:
+                            opt_stop_loss = round(max(0.5, opt_entry_price * 0.82), 2)
+                        if getattr(best, "target", None) and best.target > opt_entry_price:
+                            opt_target = float(best.target)
+                        else:
+                            opt_target = round(opt_entry_price + 2.0 * (opt_entry_price - opt_stop_loss), 2)
 
                         risk_per_unit = opt_entry_price - opt_stop_loss
                         risk_amount = equity * self.risk_pct_per_trade
@@ -1531,8 +1556,22 @@ class BacktestEngine:
 
     @staticmethod
     def _exit_price_for(position: Dict[str, Any], bar: Dict[str, Any], reason: str) -> float:
+        # Realistic fills: for long options
+        # - SL / trailing: if gap through stop use the open (or low if open > stop), else the stop level
+        # - Target: if gap through target use the open (or high), else the target
+        stop_level = position.get("trailing_stop", position.get("stop_loss", 0.0))
+        target = position.get("target", 0.0)
+        bar_open = float(bar.get("open", bar.get("close", 0.0)))
+        bar_high = float(bar.get("high", 0.0))
+        bar_low = float(bar.get("low", 0.0))
         if reason in ("STOP_LOSS_HIT", "TRAILING_STOP_HIT"):
-            return min(position.get("trailing_stop", position["stop_loss"]), bar["high"])
+            if bar_open <= stop_level:
+                # Gapped through stop — fill at open (worse for long)
+                return round(bar_open, 2)
+            # Stop was hit intra-bar; assume fill near the stop (conservative: min of stop and high)
+            return round(min(stop_level, bar_high), 2)
         if reason == "TARGET_HIT":
-            return max(position["target"], bar["low"])
-        return bar["close"]
+            if bar_open >= target:
+                return round(bar_open, 2)
+            return round(max(target, bar_low), 2)
+        return float(bar.get("close", 0.0))
