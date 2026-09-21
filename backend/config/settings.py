@@ -41,6 +41,11 @@ class RiskSettings:
     max_trades_per_day: int = field(default_factory=lambda: _i("MAX_TRADES_PER_DAY", 3))
     max_concurrent_positions: int = field(default_factory=lambda: _i("MAX_CONCURRENT_POSITIONS", 1))
     max_consecutive_losses: int = field(default_factory=lambda: _i("MAX_CONSECUTIVE_LOSSES", 3))
+    # Cooldown after max consecutive losses (RiskManager.pause_minutes_after_losses).
+    # Default 30 matches RiskManager and historical overview/test config.
+    pause_after_losses_minutes: int = field(
+        default_factory=lambda: _i("PAUSE_AFTER_LOSSES_MINUTES", 30)
+    )
     max_risk_per_trade_pct: float = field(default_factory=lambda: _f("RISK_PER_TRADE_PCT", 0.025))
 
 

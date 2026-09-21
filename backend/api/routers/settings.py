@@ -40,6 +40,7 @@ def _yaml_defaults() -> Dict[str, Any]:
             "max_trades_per_day":       settings.risk.max_trades_per_day,
             "max_concurrent_positions": settings.risk.max_concurrent_positions,
             "max_consecutive_losses":   settings.risk.max_consecutive_losses,
+            "pause_after_losses_minutes": settings.risk.pause_after_losses_minutes,
         },
         "strategy": {
             "orb_window_start":   getattr(settings.strategy, "orb_window_start",   "09:15"),
