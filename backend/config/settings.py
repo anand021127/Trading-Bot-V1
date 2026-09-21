@@ -91,6 +91,17 @@ class IndicatorSettings:
 
 
 @dataclass
+class BacktestSettings:
+    """Defaults for POST /api/backtest/jobs (historical settings.yaml values)."""
+
+    start_date: str = field(default_factory=lambda: _s("BACKTEST_START_DATE", "2024-01-01"))
+    end_date: str = field(default_factory=lambda: _s("BACKTEST_END_DATE", "2024-12-31"))
+    commission_pct: float = field(default_factory=lambda: _f("BACKTEST_COMMISSION_PCT", 0.0003))
+    slippage_pct: float = field(default_factory=lambda: _f("BACKTEST_SLIPPAGE_PCT", 0.0001))
+    stt_pct: float = field(default_factory=lambda: _f("BACKTEST_STT_PCT", 0.001))
+
+
+@dataclass
 class OrderSettings:
     product: str = field(default_factory=lambda: _s("UPSTOX_ORDER_PRODUCT", ""))
     variety: str = "DAY"
@@ -115,6 +126,7 @@ class Settings:
     indicators: IndicatorSettings = field(default_factory=IndicatorSettings)
     order: OrderSettings = field(default_factory=OrderSettings)
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
+    backtest: BacktestSettings = field(default_factory=BacktestSettings)
 
 
 def load_settings() -> Settings:

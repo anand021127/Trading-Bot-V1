@@ -130,8 +130,51 @@ class DatabaseManager:
         )
         self._connect().commit()
 
-    def list_trades(self) -> List[Trade]:
-        rows = self._connect().execute("SELECT * FROM trades ORDER BY timestamp").fetchall()
+    def list_trades(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        symbol: Optional[str] = None,
+        mode: Optional[str] = None,
+        exit_reason: Optional[str] = None,
+    ) -> List[Trade]:
+        """Return trades with optional filters.
+
+        Filters use only columns that exist on the trades table.
+        ``mode`` is accepted for API compatibility but is intentionally
+        ignored for SQL (no mode column in the current schema; trading
+        mode is owned by settings/environment and paper-mode event paths).
+        """
+        # mode is intentionally unused for SQL filtering — keep signature for callers.
+        _ = mode
+
+        clauses: List[str] = []
+        params: List[Any] = []
+
+        # Prefer entry_time when present; fall back to timestamp (both TEXT ISO-ish).
+        time_expr = "COALESCE(NULLIF(entry_time, ''), timestamp)"
+
+        if date_from:
+            clauses.append(f"{time_expr} >= ?")
+            params.append(str(date_from).strip())
+        if date_to:
+            end = str(date_to).strip()
+            # Inclusive end date when only YYYY-MM-DD is provided
+            if len(end) == 10 and "T" not in end:
+                end = end + "T23:59:59.999999"
+            clauses.append(f"{time_expr} <= ?")
+            params.append(end)
+        if symbol:
+            clauses.append("UPPER(COALESCE(symbol, '')) = UPPER(?)")
+            params.append(str(symbol).strip())
+        if exit_reason:
+            clauses.append("COALESCE(exit_reason, '') = ?")
+            params.append(str(exit_reason))
+
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT * FROM trades{where} ORDER BY timestamp"
+        rows = self._connect().execute(sql, params).fetchall()
+
         out: List[Trade] = []
         for r in rows:
             ts = r["timestamp"]
@@ -139,10 +182,19 @@ class DatabaseManager:
                 tsv = datetime.fromisoformat(ts) if ts else self._now()
             except Exception:
                 tsv = self._now()
+            # Prefer net_pnl when present (extended exit accounting)
+            pnl_val = r["pnl"]
+            try:
+                if r["net_pnl"] is not None:
+                    pnl_val = r["net_pnl"]
+            except (KeyError, IndexError):
+                pass
             out.append(Trade(
-                id=r["id"], symbol=r["symbol"], side=r["side"], quantity=r["quantity"],
-                price=r["price"], timestamp=tsv, strategy=r["strategy"] or "",
-                status=r["status"] or "", pnl=r["pnl"], notes=r["notes"] or "",
+                id=r["id"], symbol=r["symbol"] or "", side=r["side"] or "",
+                quantity=int(r["quantity"] or 0),
+                price=float(r["price"] or 0.0), timestamp=tsv,
+                strategy=r["strategy"] or "",
+                status=r["status"] or "", pnl=pnl_val, notes=r["notes"] or "",
             ))
         return out
 
