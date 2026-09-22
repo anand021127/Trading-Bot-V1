@@ -81,4 +81,26 @@ api.interceptors.response.use(
   },
 )
 
+export function formatApiError(err: unknown, fallback = 'Request failed'): string {
+  if (!err || typeof err !== 'object') return fallback
+  const anyErr = err as any
+  const status = anyErr.response?.status as number | undefined
+  const detail = anyErr.response?.data?.detail ?? anyErr.response?.data?.message ?? anyErr.response?.data
+  const detailText = typeof detail === 'string' ? detail : (detail && typeof detail === 'object' && detail.message) ? String(detail.message) : ''
+  if (anyErr.code === 'ECONNABORTED' || String(anyErr.message || '').toLowerCase().includes('timeout')) {
+    return 'The request timed out. If a long job is running, use status polling instead of waiting on a single request.'
+  }
+  if (status === 400) return detailText || 'Request was rejected (missing token, invalid dates, or invalid strategy).'
+  if (status === 401) return 'Upstox token is missing or expired. Open Settings and generate a new token.'
+  if (status === 403) return 'Not authorized to perform this action.'
+  if (status === 404) return detailText || 'Resource not found.'
+  if (status === 409) return detailText || 'A job is already running.'
+  if (status === 422) return detailText || 'Validation failed.'
+  if (status === 429) return 'Rate limited. Wait and retry.'
+  if (status === 500) return 'Backend error. Check server logs; this is not a frontend timeout.'
+  if (status === 502 || status === 503 || status === 504) return 'Backend unreachable or restarting.'
+  if (!anyErr.response) return 'Backend unreachable. Check that the API host is running and CORS allows this origin.'
+  return detailText || anyErr.message || fallback
+}
+
 export default api

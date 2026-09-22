@@ -90,6 +90,7 @@ class IndicatorSettings:
     volume_multiplier: float = 1.5
 
 
+
 @dataclass
 class BacktestSettings:
     """Defaults for POST /api/backtest/jobs (historical settings.yaml values)."""
@@ -99,6 +100,10 @@ class BacktestSettings:
     commission_pct: float = field(default_factory=lambda: _f("BACKTEST_COMMISSION_PCT", 0.0003))
     slippage_pct: float = field(default_factory=lambda: _f("BACKTEST_SLIPPAGE_PCT", 0.0001))
     stt_pct: float = field(default_factory=lambda: _f("BACKTEST_STT_PCT", 0.001))
+    # Defensible default: 80% of requested weekdays must have underlying
+    # candles AND (when attempts exist) contract/premium lookups must also
+    # succeed at >=80%. Below that the result is INVALID, not a P&L report.
+    min_coverage_pct: float = field(default_factory=lambda: _f("BACKTEST_MIN_COVERAGE_PCT", 80.0))
 
 
 @dataclass

@@ -174,6 +174,12 @@ def test_paper_start_fails_without_runtime():
     BotState.stop("test")
     BotState.reset_kill()
     bot_control.set_paper_runtime(None)
+    try:
+        import backend.api.main as main_mod
+        if getattr(getattr(main_mod, "app", None), "state", None) is not None:
+            main_mod.app.state.paper_runtime = None
+    except Exception:
+        pass
     result = asyncio.run(bot_control.start_bot())
     assert result["success"] is False
     assert "PaperTradingRuntime" in result["message"]

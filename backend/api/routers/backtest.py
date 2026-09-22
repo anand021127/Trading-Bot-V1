@@ -71,6 +71,30 @@ def _get_token() -> str:
 
 async def _create_and_start_backtest(request: BacktestRequest) -> JSONResponse:
     """Helper that validates, creates a background backtest task, and returns HTTP 202."""
+    from backend.config.strategy_registry import REGISTERED_STRATEGIES
+
+    configured = (getattr(settings.strategy, "name", "") or "").strip()
+    strategies = list(request.strategies or [])
+    if not strategies:
+        if not configured:
+            raise HTTPException(
+                status_code=400,
+                detail="No backtest strategy specified. Set strategies=[\"V8_D_PULLBACK_ATM\"] "
+                       "or TRADING_STRATEGY. Refusing silent OPTION_PREMIUM fallback.",
+            )
+        strategies = [configured]
+    unknown = [n for n in strategies if n not in REGISTERED_STRATEGIES]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Unknown or unsupported backtest strategy",
+                "unknown": unknown,
+                "known": sorted(REGISTERED_STRATEGIES),
+            },
+        )
+    request.strategies = strategies
+
     active = task_manager.get_active_task()
     if active is not None:
         raise HTTPException(
@@ -102,8 +126,6 @@ async def _create_and_start_backtest(request: BacktestRequest) -> JSONResponse:
             status_code=400,
             detail={"message": "Backtests support index options only", "invalid_symbols": invalid_symbols},
         )
-    if request.strategies and any(name != "OPTION_PREMIUM" for name in request.strategies):
-        raise HTTPException(status_code=400, detail="Only OPTION_PREMIUM is supported for options backtests")
     start_date = request.start_date or settings.backtest.start_date
     end_date = request.end_date or settings.backtest.end_date
 
@@ -140,6 +162,8 @@ async def _create_and_start_backtest(request: BacktestRequest) -> JSONResponse:
             "task_id": task.task_id,
             "status": task.status,
             "message": "Backtest job created and queued. Poll /api/backtest/jobs/{job_id} for progress.",
+            "strategy": strategies,
+            "actual_strategy": strategies[0] if strategies else None,
         },
     )
 

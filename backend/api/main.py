@@ -1,5 +1,6 @@
 """FastAPI application — production Upstox trading bot backend."""
 from __future__ import annotations
+import os
 
 import asyncio
 import importlib.util
@@ -85,6 +86,12 @@ async def lifespan(app: FastAPI):
         app.state.engine = None
         health_monitor.update_status("trading_engine", ComponentStatus.FAILED)
         health_monitor.record_error("trading_engine", str(e))
+
+    if os.environ.get("TRADING_BOT_OFFLINE_TESTS") == "1" and os.environ.get("ALLOW_LIVE_UPSTOX") != "1":
+        logger = __import__("logging").getLogger(__name__)
+        logger.info("OFFLINE TESTS: skipping WebSocket, scanner, and paper-runtime attach")
+        yield
+        return
 
     # Start the real Upstox v3 market-data WebSocket (no mock prices).
     # If there's no token yet, this stays in 'auth_failed' status and the

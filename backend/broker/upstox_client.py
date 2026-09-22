@@ -120,6 +120,12 @@ class UpstoxClient:
         return self._get_url(f"{self.base_url}{path}", params)
 
     def _get_url(self, url: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+        if os.environ.get("TRADING_BOT_OFFLINE_TESTS") == "1" and os.environ.get("ALLOW_LIVE_UPSTOX") != "1":
+            raise UpstoxAPIError(
+                503,
+                "Blocked live Upstox HTTP during default tests. "
+                "Set ALLOW_LIVE_UPSTOX=1 for explicit live-data tests.",
+            )
         if self._session is not None and requests is not None:
             try:
                 r = self._session.get(url, params=params, headers=self._headers(), timeout=self.timeout)

@@ -8,7 +8,8 @@ import type { BacktestResponse } from '../types'
 const INDICES = ['NIFTY50', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX']
 
 const STRATEGIES = [
-  { id: 'OPTION_PREMIUM', label: 'Option Premium', desc: 'Broker-resolved contract, premium momentum, VWAP, liquidity and expiry controls' },
+  { id: 'V8_D_PULLBACK_ATM', label: 'V8-D Pullback ATM', desc: 'Configured production strategy: EMA pullback + ATM option, real historical contracts only' },
+  { id: 'OPTION_PREMIUM', label: 'Option Premium', desc: 'Premium momentum / VWAP filters (research strategy — not the production V8-D path)' },
 ]
 
 const INTERVALS = [
@@ -29,7 +30,7 @@ export default function Backtest() {
   const [startDate, setStartDate]             = useState(defaultStartDate)
   const [endDate, setEndDate]                 = useState(defaultEndDate)
   const [capital, setCapital]                 = useState('100000')
-  const [strategy, setStrategy]               = useState('OPTION_PREMIUM')
+  const [strategy, setStrategy]               = useState('V8_D_PULLBACK_ATM')
   const [interval, setInterval]               = useState('5minute')
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>(['NIFTY50'])
   const [running, setRunning]                 = useState(false)

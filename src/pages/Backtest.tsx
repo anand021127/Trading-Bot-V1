@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
+import { formatApiError } from '../api/client'
 import { Play, BarChart2, RefreshCw, AlertTriangle, Info, Download, Square, Clock } from 'lucide-react'
 import {
   runBacktest,
@@ -16,7 +17,8 @@ import type { BacktestResponse } from '../types'
 const INDICES = ['NIFTY50', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX']
 
 const STRATEGIES = [
-  { id: 'OPTION_PREMIUM', label: 'Option Premium', desc: 'Broker-resolved contract, premium momentum, VWAP, liquidity and expiry controls' },
+  { id: 'V8_D_PULLBACK_ATM', label: 'V8-D Pullback ATM', desc: 'Configured production strategy: EMA pullback + ATM option, real historical contracts only' },
+  { id: 'OPTION_PREMIUM', label: 'Option Premium', desc: 'Premium momentum / VWAP filters (research strategy — not the production V8-D path)' },
 ]
 
 const INTERVALS = [
@@ -37,7 +39,7 @@ export default function Backtest() {
   const [startDate, setStartDate]             = useState(defaultStartDate)
   const [endDate, setEndDate]                 = useState(defaultEndDate)
   const [capital, setCapital]                 = useState('100000')
-  const [strategy, setStrategy]               = useState('OPTION_PREMIUM')
+  const [strategy, setStrategy]               = useState('V8_D_PULLBACK_ATM')
   const [interval, setInterval]               = useState('5minute')
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>(['NIFTY50'])
   const [running, setRunning]                 = useState(false)
@@ -103,7 +105,7 @@ export default function Backtest() {
         }
       }
       const detail = axios.isAxiosError(e) ? (e.response?.data?.detail?.message || e.response?.data?.detail || e.response?.data?.message) : undefined
-      setError(typeof detail === 'string' ? detail : (e instanceof Error ? e.message : 'Backtest failed.'))
+      setError(typeof detail === 'string' ? detail : formatApiError(e, 'Backtest failed.'))
       setRunning(false)
     }
   }
@@ -426,6 +428,30 @@ export default function Backtest() {
       {/* Results */}
       {result && (
         <div className="space-y-4">
+          {((result as any).validity_status === 'INVALID' || (result as any).coverage_status === 'FAILED_INCOMPLETE_COVERAGE') && (
+            <div className="rounded-xl border border-amber-700/50 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
+              <div className="font-semibold">INVALID BACKTEST</div>
+              <div className="mt-1 text-xs text-amber-300/90">
+                Historical coverage is below the quality gate. Do not treat P&amp;L as a trustworthy performance result.
+              </div>
+              {Array.isArray((result as any).validity_reasons) && (result as any).validity_reasons.length > 0 && (
+                <ul className="mt-2 list-disc pl-5 text-xs text-amber-200/80">
+                  {(result as any).validity_reasons.map((r: string, i: number) => <li key={i}>{r}</li>)}
+                </ul>
+              )}
+              {(result as any).coverage_notes && (
+                <div className="mt-2 text-xs text-amber-200/70">{(result as any).coverage_notes}</div>
+              )}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+            <span>Strategy:</span>
+            <span className="font-mono text-slate-200">{Array.isArray((result as any).strategy_names) && (result as any).strategy_names.length ? (result as any).strategy_names.join(', ') : strategy}</span>
+            <span className="text-slate-600">|</span>
+            <span>Coverage: {(result as any).overall_data_coverage_pct ?? (result as any).data_coverage_pct ?? 'n/a'}%</span>
+            <span className="text-slate-600">|</span>
+            <span>Validity: {(result as any).validity_status ?? 'UNKNOWN'}</span>
+          </div>
           <div className="flex flex-wrap items-center justify-between gap-2 bg-[#141b2d] border border-[#1e2d45] rounded-xl px-4 py-3">
             <div className="text-xs text-slate-400">Export the complete result, including the summary and trade log.</div>
             <div className="flex gap-2">

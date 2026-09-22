@@ -347,6 +347,13 @@ class BacktestResult:
     data_coverage_pct: float = 0.0
     coverage_status: str = "UNKNOWN"  # "COMPLETE" | "INCOMPLETE" | "FAILED" | "UNKNOWN"
     coverage_notes: str = ""
+    validity_status: str = "UNKNOWN"  # VALID | INVALID | UNKNOWN
+    validity_reasons: list = field(default_factory=list)
+    strategy_names: list = field(default_factory=list)
+    option_candle_coverage_pct: float = 0.0
+    contract_resolution_success_pct: float = 0.0
+    overall_data_coverage_pct: float = 0.0
+    min_coverage_pct_applied: float = 80.0
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -405,6 +412,16 @@ class BacktestResult:
             "orders_created": self.orders_created,
             "trades_opened": self.trades_opened,
             "trades_closed": self.trades_closed,
+            "data_coverage_pct": self.data_coverage_pct,
+            "option_candle_coverage_pct": self.option_candle_coverage_pct,
+            "contract_resolution_success_pct": self.contract_resolution_success_pct,
+            "overall_data_coverage_pct": self.overall_data_coverage_pct,
+            "coverage_status": self.coverage_status,
+            "coverage_notes": self.coverage_notes,
+            "validity_status": self.validity_status,
+            "validity_reasons": self.validity_reasons,
+            "strategy_names": self.strategy_names,
+            "min_coverage_pct_applied": self.min_coverage_pct_applied,
         }
         return d
 
@@ -466,11 +483,16 @@ class BacktestEngine:
         result = BacktestResult()
         result.candles_loaded = sum(len(c) for c in symbol_candles.values())
         result.total_candles_scanned = result.candles_loaded
-        strategy_names = strategy_names or ["OPTION_PREMIUM"]
+        if not strategy_names:
+            import os
+            env_name = (os.environ.get("TRADING_STRATEGY") or "").strip()
+            strategy_names = [env_name] if env_name else ["OPTION_PREMIUM"]
+        result.strategy_names = list(strategy_names)
+        result.min_coverage_pct_applied = float(min_coverage_pct)
         option_contexts = option_contexts or {}
 
-        # 1. OPTION_PREMIUM with real options requires historical options loader
-        is_option_premium = any(s == "OPTION_PREMIUM" for s in strategy_names)
+        REAL_OPTION_STRATEGIES = {"OPTION_PREMIUM", "V8_D_PULLBACK_ATM"}
+        is_option_premium = any(s in REAL_OPTION_STRATEGIES for s in strategy_names)
 
         result.real_options_required = require_real_options
         result.real_options_used = require_real_options
@@ -1188,11 +1210,11 @@ class BacktestEngine:
                         exit_price = pos["entry_price"]
 
                 qty = pos["quantity"]
-                is_opt = bool(pos.get("is_real_option", False)) or (pos["strategy"] == "OPTION_PREMIUM" and require_real_options)
+                is_opt = bool(pos.get("is_real_option", False)) or (pos["strategy"] in ("OPTION_PREMIUM", "V8_D_PULLBACK_ATM") and require_real_options)
                 inst_type = InstrumentType.INDEX_OPTION if is_opt else InstrumentType.EQUITY
 
                 # HARD VALIDATION GATE: Assert all mandatory option fields before creating trade
-                if require_real_options and pos["strategy"] == "OPTION_PREMIUM":
+                if require_real_options and pos["strategy"] in ("OPTION_PREMIUM", "V8_D_PULLBACK_ATM"):
                     opt_t = pos.get("option_type")
                     stk = pos.get("strike")
                     exp = pos.get("expiry")
@@ -1474,6 +1496,46 @@ class BacktestEngine:
                 "No requested_start_date/requested_end_date was supplied to run() — coverage "
                 "cannot be assessed. Pass both to get a COMPLETE/FAILED_INCOMPLETE_COVERAGE verdict."
             )
+
+        # Option-contract / premium coverage (independent of calendar coverage)
+        attempts = max(0, int(result.contract_resolution_attempts))
+        resolved = max(0, int(result.contracts_resolved))
+        prem_att = max(0, int(result.option_premium_lookup_attempts))
+        prem_ok = max(0, int(result.option_premiums_found))
+        result.contract_resolution_success_pct = round((resolved / attempts * 100.0) if attempts else 0.0, 2)
+        result.option_candle_coverage_pct = round((prem_ok / prem_att * 100.0) if prem_att else 0.0, 2)
+        parts = [result.data_coverage_pct]
+        if attempts:
+            parts.append(result.contract_resolution_success_pct)
+        if prem_att:
+            parts.append(result.option_candle_coverage_pct)
+        result.overall_data_coverage_pct = round(sum(parts) / len(parts), 2) if parts else 0.0
+
+        reasons = []
+        if result.coverage_status == "FAILED_INCOMPLETE_COVERAGE":
+            reasons.append(
+                f"Underlying calendar coverage {result.data_coverage_pct:.1f}% "
+                f"< {result.min_coverage_pct_applied:.0f}%"
+            )
+        if attempts and result.contract_resolution_success_pct < result.min_coverage_pct_applied:
+            reasons.append(
+                f"Contract resolution success {result.contract_resolution_success_pct:.1f}% "
+                f"< {result.min_coverage_pct_applied:.0f}%"
+            )
+        if prem_att and result.option_candle_coverage_pct < result.min_coverage_pct_applied:
+            reasons.append(
+                f"Option premium/candle coverage {result.option_candle_coverage_pct:.1f}% "
+                f"< {result.min_coverage_pct_applied:.0f}%"
+            )
+        if reasons:
+            result.validity_status = "INVALID"
+            result.validity_reasons = reasons
+        elif result.coverage_status == "COMPLETE":
+            result.validity_status = "VALID"
+            result.validity_reasons = []
+        else:
+            result.validity_status = "UNKNOWN"
+            result.validity_reasons = [result.coverage_notes] if result.coverage_notes else []
 
         return result
 

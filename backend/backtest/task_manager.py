@@ -785,6 +785,9 @@ async def run_backtest_in_background(
             task_manager.update_progress(task_id, {"phase": "processing", **p})
 
         # Run engine with historical options data loader and real options mode
+        from backend.config.settings import load_settings
+        _bt = load_settings().backtest
+        min_cov = float(getattr(_bt, "min_coverage_pct", 80.0) or 80.0)
         backtest_result = await asyncio.to_thread(
             engine.run,
             symbol_candles=symbol_candles,
@@ -793,6 +796,9 @@ async def run_backtest_in_background(
             option_contexts=option_contexts,
             options_data_loader=options_data_loader,
             require_real_options=True,
+            requested_start_date=start_date,
+            requested_end_date=end_date,
+            min_coverage_pct=min_cov,
         )
 
         candles_scanned = 0

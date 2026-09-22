@@ -175,6 +175,15 @@ class TestCloseFillsExitPersistence:
     isolation."""
 
     def _engine_with_open_position(self):
+        import os
+        os.environ.setdefault("TRADING_MODE", "paper")
+        os.environ["TRADING_STRATEGY"] = "V8_D_PULLBACK_ATM"
+        os.environ["UPSTOX_ORDER_PRODUCT"] = "I"
+        # Reload settings module values used at engine construction
+        import backend.config.settings as settings_mod
+        settings_mod.settings = settings_mod.load_settings() if hasattr(settings_mod, "load_settings") else settings_mod.settings
+        from backend.strategy import trading_engine as te_mod
+        te_mod.settings = settings_mod.load_settings()
         from backend.strategy.trading_engine import TradingEngine
         db = _memory_db()
         client = MagicMock()
