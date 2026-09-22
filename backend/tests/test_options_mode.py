@@ -21,7 +21,21 @@ def _isolated_engine() -> TradingEngine:
     path = f"{tempfile.gettempdir()}/test_options_mode_{uuid.uuid4().hex}.db"
     db = DatabaseManager(db_path=path)
     db.init_db()
-    return TradingEngine(db_manager=db)
+    import backend.strategy.trading_engine as te_mod
+    te_mod.settings.mode = "paper"
+    te_mod.settings.strategy.name = "V8_D_PULLBACK_ATM"
+    te_mod.settings.order.product = "I"
+    te_mod.settings.capital.total = 1_000_000.0
+    te_mod.settings.capital.max_allocation_per_trade = 0.5
+    te_mod.settings.risk.max_risk_per_trade_pct = 0.05
+    from unittest.mock import MagicMock
+    from backend.orders.order_manager import OrderManager
+    client = MagicMock()
+    om = OrderManager(client=client, paper_mode=True, default_product="I")
+    engine = TradingEngine(db_manager=db, client=client, order_manager=om)
+    engine.risk_manager.capital = 1_000_000.0
+    engine._init_execution_pipeline()
+    return engine
 
 
 class TestGetNearestExpiry:
@@ -57,19 +71,19 @@ class TestDetectUnderlyingTrend:
             closes.append(closes[-1] + step)
         candles = [{"open": c - 0.1, "high": c + 0.5, "low": c - 0.5, "close": c,
                     "volume": 1000, "timestamp": f"bar-{i:04d}"} for i, c in enumerate(closes)]
-        with patch.object(engine.client, "get_historical_candles", return_value=candles):
+        with patch.object(engine.client, "get_current_candles", return_value=candles):
             trend = engine.detect_underlying_trend("NIFTY50")
         assert trend == "BULLISH"
 
     def test_neutral_on_insufficient_data(self) -> None:
         engine = _isolated_engine()
-        with patch.object(engine.client, "get_historical_candles", return_value=[]):
+        with patch.object(engine.client, "get_current_candles", return_value=[]):
             trend = engine.detect_underlying_trend("NIFTY50")
         assert trend == "NEUTRAL"
 
     def test_neutral_on_fetch_error_not_fabricated(self) -> None:
         engine = _isolated_engine()
-        with patch.object(engine.client, "get_historical_candles", side_effect=RuntimeError("boom")):
+        with patch.object(engine.client, "get_current_candles", side_effect=RuntimeError("boom")):
             trend = engine.detect_underlying_trend("NIFTY50")
         assert trend == "NEUTRAL"
 
@@ -126,13 +140,13 @@ class TestChoppyMarketFilter:
         would have leaned one way, a genuinely choppy market must come
         back NEUTRAL so evaluate_option_premium never picks CE or PE."""
         engine = _isolated_engine()
-        with patch.object(engine.client, "get_historical_candles", return_value=_choppy_candles()):
+        with patch.object(engine.client, "get_current_candles", return_value=_choppy_candles()):
             trend = engine.detect_underlying_trend("NIFTY50")
         assert trend == "NEUTRAL"
 
     def test_detect_underlying_trend_still_works_in_a_real_trend(self) -> None:
         engine = _isolated_engine()
-        with patch.object(engine.client, "get_historical_candles", return_value=_smooth_uptrend_candles()):
+        with patch.object(engine.client, "get_current_candles", return_value=_smooth_uptrend_candles()):
             trend = engine.detect_underlying_trend("NIFTY50")
         assert trend == "BULLISH"
 
@@ -361,9 +375,11 @@ class TestExpiryDaySquareOff:
         sig.indicators = {"selected_contract": {"option_type": "CE", "strike": 22000,
                              "instrument_key": "NSE_FO|999", "lot_size": 75,
                              "freeze_quantity": 1800},
-                           "expiry_date": "2026-02-26"}
+                           "expiry_date": "2026-10-02",
+                           "spot_price": 22000.0}
         engine.execute_multi_signal(sig)
-        assert engine._open_positions["NIFTY50"]["expiry_date"] == "2026-02-26"
+        assert "NIFTY50" in engine._open_positions
+        assert engine._open_positions["NIFTY50"]["expiry_date"] == "2026-10-02"
 
     def test_monitor_closes_option_position_on_its_own_expiry_day(self) -> None:
         import asyncio
@@ -383,7 +399,7 @@ class TestExpiryDaySquareOff:
              patch.object(engine.client, "get_quote_by_instrument_key", return_value={
                  "ltp": 102.0, "has_data": True,
              }), \
-             patch.object(engine.client, "get_historical_candles", return_value=[
+             patch.object(engine.client, "get_current_candles", return_value=[
                  {"open": 100, "high": 105, "low": 98, "close": 102, "volume": 1000, "timestamp": "t1"},
              ]), \
              patch.object(engine, "_close_position") as mock_close:
@@ -408,7 +424,7 @@ class TestExpiryDaySquareOff:
              patch.object(engine.client, "get_quote_by_instrument_key", return_value={
                  "ltp": 102.0, "has_data": True,
              }), \
-             patch.object(engine.client, "get_historical_candles", return_value=[
+             patch.object(engine.client, "get_current_candles", return_value=[
                  {"open": 100, "high": 105, "low": 98, "close": 102, "volume": 1000, "timestamp": "t1"},
              ]), \
              patch.object(engine, "_close_position") as mock_close:

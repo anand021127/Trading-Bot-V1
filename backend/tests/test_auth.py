@@ -36,7 +36,7 @@ def test_exchange_code_for_token_posts_expected_payload() -> None:
     """The token exchange helper should post the expected payload to Upstox."""
     captured: Dict[str, Any] = {}
 
-    def fake_post(url: str, payload: Dict[str, str], timeout: int) -> Dict[str, Any]:
+    def fake_post(url: str, payload: Dict[str, str], timeout: int = 15) -> Dict[str, Any]:
         captured["url"] = url
         captured["payload"] = payload
         captured["timeout"] = timeout
@@ -50,7 +50,7 @@ def test_exchange_code_for_token_posts_expected_payload() -> None:
             "UPSTOX_REDIRECT_URI": "https://example.com/callback",
         },
         clear=True,
-    ), mock.patch.object(auth_module, "_post_json", side_effect=fake_post):
+    ), mock.patch.object(auth_module, "_post_form", side_effect=fake_post):
         result = auth_module.exchange_code_for_token("auth-code")
 
     assert result["access_token"] == "token-123"
@@ -60,4 +60,4 @@ def test_exchange_code_for_token_posts_expected_payload() -> None:
     assert captured["payload"]["client_secret"] == "demo-secret"
     assert captured["payload"]["redirect_uri"] == "https://example.com/callback"
     assert captured["payload"]["grant_type"] == "authorization_code"
-    assert captured["timeout"] == 10
+    assert captured["timeout"] == 15

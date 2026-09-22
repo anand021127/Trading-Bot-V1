@@ -725,6 +725,130 @@ class TradingEngine:
 
         return strat.evaluate(underlying_symbol, premium_candles, context)
 
+
+    def evaluate_configured_strategy(self, underlying_symbol: str) -> Any:
+        """Evaluate the configured production strategy for scanner/paper.
+
+        Paper mode requires TRADING_STRATEGY=V8_D_PULLBACK_ATM and never
+        silently falls back to OPTION_PREMIUM.
+        """
+        from backend.strategy.signal import StrategySignal
+        from backend.config.settings import load_settings
+
+        s = load_settings()
+        name = (getattr(s.strategy, "name", None) or getattr(self, "strategy_name", "") or "").strip()
+        mode = (s.mode or "").lower()
+
+        if mode == "paper" and name != "V8_D_PULLBACK_ATM":
+            sig = StrategySignal(strategy_name=name or "UNCONFIGURED", symbol=underlying_symbol)
+            sig.rejected_reasons = [
+                f"Paper mode requires TRADING_STRATEGY=V8_D_PULLBACK_ATM (got {name!r}). "
+                "Refusing silent OPTION_PREMIUM fallback."
+            ]
+            sig.entry_reason = "NO TRADE — " + sig.rejected_reasons[0]
+            sig.signal = "NONE"
+            return sig
+
+        if name != "V8_D_PULLBACK_ATM":
+            # Non-paper research path may still evaluate OPTION_PREMIUM explicitly
+            if name == "OPTION_PREMIUM":
+                return self.evaluate_option_premium(underlying_symbol)
+            sig = StrategySignal(strategy_name=name or "UNCONFIGURED", symbol=underlying_symbol)
+            sig.rejected_reasons = [f"Unsupported scanner strategy {name!r}"]
+            sig.entry_reason = "NO TRADE — " + sig.rejected_reasons[0]
+            sig.signal = "NONE"
+            return sig
+
+        from backend.strategy.strategies.v8d_strategy import V8DStrategy
+        strat = V8DStrategy()
+
+        try:
+            candles = self.client.get_current_candles(underlying_symbol, "5minute", limit=120) or []
+        except Exception as e:
+            TradeLogger.log_error("TradingEngine.evaluate_configured_strategy", e, {"symbol": underlying_symbol})
+            candles = []
+        if len(candles) < 30:
+            sig = StrategySignal(strategy_name="V8_D_PULLBACK_ATM", symbol=underlying_symbol)
+            sig.rejected_reasons = [f"Insufficient underlying candles: {len(candles)}"]
+            sig.entry_reason = "NO TRADE — " + sig.rejected_reasons[0]
+            sig.signal = "NONE"
+            return sig
+
+        try:
+            expiry = self.client.get_nearest_expiry(underlying_symbol)
+        except Exception as e:
+            TradeLogger.log_error("TradingEngine.evaluate_configured_strategy", e, {"symbol": underlying_symbol})
+            expiry = None
+        if not expiry:
+            sig = StrategySignal(strategy_name="V8_D_PULLBACK_ATM", symbol=underlying_symbol)
+            sig.rejected_reasons = ["No upcoming option expiry found for this underlying"]
+            sig.entry_reason = "NO TRADE — " + sig.rejected_reasons[0]
+            sig.signal = "NONE"
+            return sig
+
+        try:
+            if hasattr(self.client, "get_option_chain_with_spot"):
+                chain, chain_spot = self.client.get_option_chain_with_spot(underlying_symbol, expiry)
+            else:
+                chain = self.client.get_option_chain(underlying_symbol, expiry) or []
+                chain_spot = None
+        except Exception as e:
+            TradeLogger.log_error("TradingEngine.evaluate_configured_strategy", e, {"symbol": underlying_symbol})
+            chain, chain_spot = [], None
+        chain = chain or []
+        try:
+            spot = float(chain_spot or 0) or float(candles[-1].get("close") or 0)
+        except (TypeError, ValueError):
+            spot = 0.0
+        if spot <= 0:
+            sig = StrategySignal(strategy_name="V8_D_PULLBACK_ATM", symbol=underlying_symbol)
+            sig.rejected_reasons = [
+                "Could not resolve ATM contract from live option-chain spot data "
+                f"(expiry={expiry}, chain_size={len(chain)})"
+            ]
+            sig.entry_reason = "NO TRADE — " + sig.rejected_reasons[0]
+            sig.signal = "NONE"
+            return sig
+
+        equity = float(getattr(getattr(s, "capital", None), "total", 100000) or 100000)
+        trades_today = 0
+        kill = False
+        try:
+            if hasattr(self, "risk_manager") and self.risk_manager is not None:
+                st = self.risk_manager.get_status() if hasattr(self.risk_manager, "get_status") else {}
+                trades_today = int(st.get("trades_today") or 0)
+        except Exception:
+            pass
+        try:
+            from backend.strategy.bot_state import BotState
+            kill = bool(BotState.status().get("kill_switch_active"))
+        except Exception:
+            try:
+                from backend.api.routers.bot_control import BotState
+                kill = bool(BotState.status().get("kill_switch_active"))
+            except Exception:
+                pass
+
+        sig, decision_log = strat.evaluate_v8d_signal(
+            underlying_symbol=underlying_symbol,
+            underlying_candles=candles,
+            spot_price=spot,
+            option_chain=chain,
+            account_equity=equity,
+            trades_today=trades_today,
+            kill_switch_active=kill,
+            reconciliation_ok=True,
+        )
+        # Attach structured decision for scanner UI
+        if getattr(sig, "indicators", None) is None:
+            sig.indicators = {}
+        if isinstance(sig.indicators, dict):
+            sig.indicators["v8d_decision"] = getattr(decision_log, "decision", None)
+            sig.indicators["expiry"] = expiry
+            sig.indicators["spot"] = spot
+            sig.indicators["chain_size"] = len(chain)
+        return sig
+
     # ─── WebSocket subscription helpers (V21-FINAL Item 3) ────────────────────
 
     def _subscribe_option_contract(self, instrument_key: str) -> None:
@@ -995,7 +1119,7 @@ class TradingEngine:
                 "lot_size": lot_size,
                 "premium": signal.entry_price,
                 "price": signal.entry_price,
-                "spot": (signal.indicators or {}).get("spot_price") or signal.entry_price,
+                "spot": (signal.indicators or {}).get("spot_price") or (signal.indicators or {}).get("underlying_spot") or (signal.indicators or {}).get("spot") or 0,
                 "quantity": qty,
                 "stop_loss": signal.stop_loss,
                 "target": signal.target,
@@ -1214,7 +1338,15 @@ class TradingEngine:
             pos["trailing_stop"] = trail["stop"]
 
             exit_reason: Optional[str] = None
-            if current_price <= pos["trailing_stop"]:
+            exp = pos.get("expiry_date")
+            if exp:
+                try:
+                    from datetime import date as _date
+                    if str(exp)[:10] == _date.today().isoformat():
+                        exit_reason = "EXPIRY_DAY_SQUARE_OFF"
+                except Exception:
+                    pass
+            if exit_reason is None and current_price <= pos["trailing_stop"]:
                 # Same fix as the backtest engine: label from whether the
                 # stop actually moved, not from this bar's freshly-
                 # recomputed stage (which forgets earlier ratcheting).

@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Optional
 
 from backend.strategy.signal import StrategySignal
 from backend.strategy.strategies.base import Strategy
-from backend.strategy.strategies.option_premium import OptionPremiumStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,13 @@ class MultiStrategyEngine:
     """
 
     def __init__(self, strategies: Optional[List[Strategy]] = None) -> None:
-        self.strategies: List[Strategy] = strategies or [OptionPremiumStrategy()]
+        if strategies is not None:
+            self.strategies: List[Strategy] = list(strategies)
+        else:
+            # Lazy-load OPTION_PREMIUM only when the multi-strategy default
+            # registry is constructed — not at module import time.
+            from backend.strategy.strategies.option_premium import OptionPremiumStrategy
+            self.strategies = [OptionPremiumStrategy()]
 
     def enabled_names(self) -> List[str]:
         return [s.name for s in self.strategies]

@@ -41,6 +41,14 @@ class ScannerEntry:
     rejected_reasons: List[str] = field(default_factory=list)
     strategy_breakdown: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
+    strategy_name: str = ""
+    contract_resolution_status: str = "N/A"
+    execution_status: str = "SIGNAL_ONLY"
+    execution_reason: str = ""
+    instrument_key: str = ""
+    strike: Optional[float] = None
+    expiry: str = ""
+    option_type: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -59,6 +67,14 @@ class ScannerEntry:
             "rejected_reasons": self.rejected_reasons,
             "strategy_breakdown": self.strategy_breakdown,
             "error": self.error,
+            "strategy_name": self.strategy_name,
+            "contract_resolution_status": self.contract_resolution_status,
+            "execution_status": self.execution_status,
+            "execution_reason": self.execution_reason,
+            "instrument_key": self.instrument_key,
+            "strike": self.strike,
+            "expiry": self.expiry,
+            "option_type": self.option_type,
         }
 
 
@@ -132,47 +148,68 @@ class LiveScanner:
             mode = "OPTIONS"
 
         try:
-            best = self.trading_engine.evaluate_option_premium(symbol)
+            # Instance override wins (tests). Class-defined method on a real
+            # engine wins over MagicMock auto-attributes.
+            _eng = self.trading_engine
+            _inst_dict = getattr(_eng, "__dict__", {})
+            if "evaluate_configured_strategy" in _inst_dict and callable(_inst_dict["evaluate_configured_strategy"]):
+                best = _eng.evaluate_configured_strategy(symbol)
+            elif "evaluate_configured_strategy" in type(_eng).__dict__:
+                best = _eng.evaluate_configured_strategy(symbol)
+            else:
+                best = _eng.evaluate_option_premium(symbol)
             signals = [best]
         except Exception as e:
             entry.error = str(e)
             entry.decision = f"ERROR — {e}"
+            entry.execution_status = "BLOCKED"
+            entry.execution_reason = str(e)
             with self._results_lock:
                 self._results[symbol] = entry
             return entry
 
-        entry.strategy_breakdown = [s.to_dict() for s in signals]
-
-        ema_signal = next((s for s in signals if s.strategy_name == "EMA_TREND"), None)
-        if ema_signal is not None:
-            conds = ema_signal.conditions
-            entry.ema_status = _status(
-                conds.get("ema_trend_up") and conds.get("price_above_ema20")
-                if conds else None
-            )
-            entry.rsi_value = ema_signal.indicators.get("rsi")
-            entry.rsi_status = _status(conds.get("rsi_in_range")) if conds else "N/A"
-            entry.atr = ema_signal.indicators.get("atr")
-            entry.volume_status = _status(conds.get("volume_confirmed")) if conds else "N/A"
-            entry.trend = "BULLISH" if conds.get("ema_trend_up") else "BEARISH" if conds else "NEUTRAL"
-            if not entry.ltp:
-                entry.ltp = ema_signal.entry_price or entry.ltp
-
-        option_signal = next((s for s in signals if s.strategy_name == "OPTION_PREMIUM"), None)
-        if option_signal is not None and not entry.ltp:
-            entry.ltp = option_signal.entry_price or None
-            contract = option_signal.indicators.get("selected_contract") if option_signal.indicators else None
-            if contract:
-                entry.trend = "BULLISH" if contract.get("option_type") == "CE" else "BEARISH"
-
-        best = max(signals, key=lambda s: s.confidence, default=None)
+        entry.strategy_breakdown = [s.to_dict() for s in signals if hasattr(s, "to_dict")]
+        best = signals[0] if signals else None
         if best is not None:
-            entry.decision = best.entry_reason
-            entry.signal = best.signal
-            entry.confidence = best.confidence
-            entry.rejected_reasons = [
-                reason for s in signals for reason in s.rejected_reasons
-            ]
+            entry.strategy_name = getattr(best, "strategy_name", "") or ""
+            entry.decision = getattr(best, "entry_reason", "") or ""
+            entry.signal = getattr(best, "signal", "NONE") or "NONE"
+            entry.confidence = float(getattr(best, "confidence", 0) or 0)
+            entry.rejected_reasons = list(getattr(best, "rejected_reasons", None) or [])
+            ind = getattr(best, "indicators", None) or {}
+            contract = ind.get("selected_contract") if isinstance(ind, dict) else None
+            if isinstance(contract, dict):
+                entry.instrument_key = str(contract.get("instrument_key") or "")
+                entry.strike = contract.get("strike")
+                entry.expiry = str(contract.get("expiry") or ind.get("expiry") or "")
+                entry.option_type = str(contract.get("option_type") or "")
+                entry.contract_resolution_status = "RESOLVED" if entry.instrument_key else "FAILED"
+                if entry.option_type == "CE":
+                    entry.trend = "BULLISH"
+                elif entry.option_type == "PE":
+                    entry.trend = "BEARISH"
+            else:
+                # Contract missing — classify resolution from rejection text
+                joined = " ".join(entry.rejected_reasons).lower()
+                if "could not resolve" in joined or "atm" in joined:
+                    entry.contract_resolution_status = "FAILED"
+                elif entry.signal == "BUY":
+                    entry.contract_resolution_status = "FAILED"
+                else:
+                    entry.contract_resolution_status = "N/A"
+            if not entry.ltp:
+                entry.ltp = getattr(best, "entry_price", None) or entry.ltp
+            if isinstance(ind, dict):
+                entry.rsi_value = ind.get("rsi")
+                entry.atr = ind.get("atr")
+                if not entry.expiry:
+                    entry.expiry = str(ind.get("expiry") or "")
+
+            # Paper execution: only when bot is started AND signal is BUY
+            entry.execution_status = "SIGNAL_ONLY"
+            entry.execution_reason = ""
+            if entry.signal == "BUY":
+                entry = self._maybe_submit_paper_entry(entry, best)
 
         with self._results_lock:
             self._results[symbol] = entry
@@ -181,10 +218,74 @@ class LiveScanner:
             try:
                 self.copilot_hook(symbol, best, entry)
             except Exception as e:
-                # The Copilot hook must NEVER be able to break the
-                # existing scanner — log and move on.
                 logger.warning("copilot_hook raised for %s: %s", symbol, e)
 
+        return entry
+
+
+    def _maybe_submit_paper_entry(self, entry: ScannerEntry, sig: Any) -> ScannerEntry:
+        """Submit BUY to canonical PaperTradingRuntime when bot is running in paper mode."""
+        try:
+            from backend.config.settings import load_settings
+            settings = load_settings()
+            if (settings.mode or "").lower() != "paper":
+                entry.execution_status = "BLOCKED"
+                entry.execution_reason = "not_paper_mode"
+                return entry
+            if (getattr(settings.strategy, "name", "") or "").strip() != "V8_D_PULLBACK_ATM":
+                entry.execution_status = "BLOCKED"
+                entry.execution_reason = "strategy_not_v8d"
+                return entry
+        except Exception as e:
+            entry.execution_status = "BLOCKED"
+            entry.execution_reason = f"settings_error:{e}"
+            return entry
+
+        try:
+            from backend.api.routers import bot_control
+            if not bot_control.BotState.is_running():
+                entry.execution_status = "SIGNAL_ONLY"
+                entry.execution_reason = "bot_not_started"
+                entry.decision = (entry.decision or "") + " | EXECUTION: bot not started (signal only)"
+                return entry
+            if bot_control.BotState.status().get("kill_switch_active"):
+                entry.execution_status = "BLOCKED"
+                entry.execution_reason = "kill_switch_active"
+                return entry
+            runtime = bot_control.get_paper_runtime()
+        except Exception as e:
+            entry.execution_status = "BLOCKED"
+            entry.execution_reason = f"runtime_lookup:{e}"
+            return entry
+
+        if runtime is None:
+            entry.execution_status = "BLOCKED"
+            entry.execution_reason = "paper_runtime_not_attached"
+            return entry
+
+        try:
+            from backend.paper.market_scan_loop import signal_to_paper_payload
+            payload = signal_to_paper_payload(sig, expiry=entry.expiry or "")
+            if not payload:
+                entry.execution_status = "REJECTED"
+                entry.execution_reason = "signal_payload_incomplete"
+                entry.decision = (entry.decision or "") + " | REJECTED: payload incomplete"
+                return entry
+            result = runtime.submit_entry(payload)
+            accepted = bool(getattr(result, "accepted", False))
+            reason = getattr(result, "reason", "") or ""
+            if accepted:
+                entry.execution_status = "SUBMITTED"
+                entry.execution_reason = reason or "submitted"
+                entry.decision = (entry.decision or "") + " | EXECUTION: SUBMITTED"
+            else:
+                entry.execution_status = "REJECTED"
+                entry.execution_reason = reason or "rejected"
+                entry.decision = (entry.decision or "") + f" | REJECTED: {entry.execution_reason}"
+        except Exception as e:
+            entry.execution_status = "BLOCKED"
+            entry.execution_reason = f"submit_error:{type(e).__name__}"
+            entry.decision = (entry.decision or "") + f" | BLOCKED: {entry.execution_reason}"
         return entry
 
     def scan_once(self) -> List[ScannerEntry]:

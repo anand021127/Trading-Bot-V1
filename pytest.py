@@ -8,6 +8,27 @@ import sys
 from typing import Any, Callable, Optional
 from unittest.mock import patch
 
+# Offline/paper isolation MUST be set before any backend.api.main import.
+# SQLite lives on tmpfs so FUSE-backed project dirs cannot stall the suite.
+os.environ.setdefault("PYTEST_RUNNING", "1")
+os.environ.setdefault("TRADING_BOT_OFFLINE_TESTS", "1")
+os.environ.setdefault("OFFLINE", "1")
+os.environ.setdefault("TRADING_MODE", "paper")
+os.environ.setdefault("TRADING_STRATEGY", "V8_D_PULLBACK_ATM")
+os.environ.setdefault("UPSTOX_ORDER_PRODUCT", "I")
+os.environ.setdefault("PAPER_ALLOW_TEST_SIGNAL", "0")
+if os.environ.get("ALLOW_LIVE_UPSTOX") != "1":
+    os.environ["ALLOW_LIVE_UPSTOX"] = "0"
+    os.environ["UPSTOX_ACCESS_TOKEN"] = ""
+_shm = "/dev/shm" if os.path.isdir("/dev/shm") else "/tmp"
+os.environ.setdefault(
+    "DATABASE_PATH",
+    os.path.join(_shm, f"pytest_trading_bot_{os.getpid()}.db"),
+)
+_empty_opt = os.path.join(_shm, "empty_options_cache")
+os.makedirs(_empty_opt, exist_ok=True)
+os.environ.setdefault("HISTORICAL_OPTIONS_CACHE_DIR", _empty_opt)
+
 
 class RaisesContext:
     def __init__(self, expected_exc: Any, match: Optional[str] = None):
@@ -125,11 +146,99 @@ def skip(reason: str = ""):
     raise unittest.SkipTest(reason)
 
 
+
+def _resolve_fixture(mod, name, cache, mp_holder):
+    """Resolve a pytest-style fixture, including nested deps (e.g. monkeypatch)."""
+    if name in cache:
+        return cache[name]
+    if name == "monkeypatch":
+        mp = MonkeyPatch()
+        mp_holder.append(mp)
+        cache[name] = mp
+        return mp
+    if name == "tmp_path":
+        import tempfile
+        cache[name] = tempfile.mkdtemp()
+        return cache[name]
+    if name == "temp_log_dir" and not (hasattr(mod, "temp_log_dir") and getattr(getattr(mod, "temp_log_dir", None), "_is_fixture", False)):
+        import tempfile, uuid
+        from pathlib import Path
+        d = Path(tempfile.gettempdir()) / f"test_logs_{uuid.uuid4().hex}"
+        d.mkdir(parents=True, exist_ok=True)
+        import os
+        os.environ["LOGS_DIR"] = str(d)
+        cache[name] = d
+        return d
+    fn = getattr(mod, name, None)
+    if fn is None or not getattr(fn, "_is_fixture", False):
+        raise KeyError(name)
+    import inspect
+    sig = inspect.signature(fn)
+    kwargs = {}
+    for p in sig.parameters:
+        kwargs[p] = _resolve_fixture(mod, p, cache, mp_holder)
+    val = fn(**kwargs)
+    # handle generator fixtures
+    if hasattr(val, "__iter__") and hasattr(val, "__next__"):
+        try:
+            val = next(val)
+        except TypeError:
+            pass
+    if hasattr(val, "__next__") and not isinstance(val, (str, bytes, list, dict)):
+        # generator
+        try:
+            val = next(iter([val])) if False else next(val)
+        except Exception:
+            pass
+    # better generator handling
+    import types
+    if isinstance(val, types.GeneratorType):
+        val = next(val)
+    cache[name] = val
+    return val
+
+
+
+def ensure_test_deps() -> None:
+    """Require FastAPI to already be installed; do not install at runtime."""
+    try:
+        import fastapi  # noqa: F401
+        from fastapi.testclient import TestClient  # noqa: F401
+    except ImportError as exc:
+        raise SystemExit(
+            "FastAPI is required for the test suite. "
+            "Install backend/requirements.txt first. "
+            f"Import error: {exc}"
+        ) from exc
+
+
+
 def main(args: Optional[List[str]] = None) -> int:
+    ensure_test_deps()
     import inspect
     import importlib.util
     import tempfile
     import unittest
+    import uuid
+
+    # Re-assert isolation in case a prior module mutated process env.
+    os.environ["TRADING_BOT_OFFLINE_TESTS"] = "1"
+    os.environ["OFFLINE"] = "1"
+    os.environ["TRADING_MODE"] = os.environ.get("TRADING_MODE") or "paper"
+    os.environ["TRADING_STRATEGY"] = os.environ.get("TRADING_STRATEGY") or "V8_D_PULLBACK_ATM"
+    if os.environ.get("ALLOW_LIVE_UPSTOX") != "1":
+        os.environ["ALLOW_LIVE_UPSTOX"] = "0"
+        os.environ["UPSTOX_ACCESS_TOKEN"] = ""
+
+    # Load conftest so fixtures/env apply even with this custom runner.
+    _root = os.path.dirname(os.path.abspath(__file__))
+    _conftest = os.path.join(_root, "backend", "tests", "conftest.py")
+    if os.path.isfile(_conftest):
+        _cspec = importlib.util.spec_from_file_location("conftest", _conftest)
+        if _cspec and _cspec.loader:
+            _cmod = importlib.util.module_from_spec(_cspec)
+            sys.modules["conftest"] = _cmod
+            _cspec.loader.exec_module(_cmod)
     
     if args is None:
         args = sys.argv[1:]
@@ -153,6 +262,10 @@ def main(args: Optional[List[str]] = None) -> int:
     for path in test_paths:
         if not os.path.exists(path):
             continue
+        # Isolate SQLite per test module on tmpfs to avoid FUSE disk I/O stalls
+        os.environ["DATABASE_PATH"] = os.path.join(
+            _shm, f"pytest_{uuid.uuid4().hex}.db"
+        )
         mod_name = os.path.basename(path).replace(".py", "")
         spec = importlib.util.spec_from_file_location(mod_name, path)
         if spec is None or spec.loader is None:
@@ -182,12 +295,55 @@ def main(args: Optional[List[str]] = None) -> int:
                     print(f"FAILED TO INSTANTIATE {mod_name}.{attr_name}: {e}")
                     failed += 1
                     continue
+                # Collect autouse fixtures from module
+                autouse_fns = []
+                for fname, fval in inspect.getmembers(mod, inspect.isfunction):
+                    if getattr(fval, "_is_fixture", False) and getattr(fval, "_autouse", False):
+                        autouse_fns.append(fval)
+
                 for meth_name, meth_val in inspect.getmembers(instance, inspect.ismethod):
                     if meth_name.startswith("test_"):
                         try:
-                            meth_val()
-                            passed += 1
-                            print(f"  PASSED: {mod_name}.{attr_name}.{meth_name}")
+                            # pytest-compatible and unittest-compatible lifecycle
+                            if hasattr(instance, "setup_method"):
+                                instance.setup_method()
+                            elif hasattr(instance, "setUp"):
+                                instance.setUp()
+                            # Run autouse fixtures (generator or plain)
+                            for af in autouse_fns:
+                                try:
+                                    gen = af()
+                                    if hasattr(gen, "__next__"):
+                                        next(gen)
+                                        # store for teardown if needed - best effort
+                                        if not hasattr(instance, "_autouse_gens"):
+                                            instance._autouse_gens = []
+                                        instance._autouse_gens.append(gen)
+                                except Exception as _af_err:
+                                    pass
+                            # Resolve fixtures for class methods (e.g. temp_log_dir)
+                            sig = inspect.signature(meth_val)
+                            kwargs = {}
+                            cache = {}
+                            mp_holder = []
+                            for pname in sig.parameters:
+                                if pname == "self":
+                                    continue
+                                try:
+                                    kwargs[pname] = _resolve_fixture(mod, pname, cache, mp_holder)
+                                except KeyError:
+                                    pass
+                            try:
+                                meth_val(**kwargs) if kwargs else meth_val()
+                                passed += 1
+                                print(f"  PASSED: {mod_name}.{attr_name}.{meth_name}")
+                            finally:
+                                for mp in mp_holder:
+                                    mp.undo()
+                                if hasattr(instance, "teardown_method"):
+                                    instance.teardown_method()
+                                elif hasattr(instance, "tearDown"):
+                                    instance.tearDown()
                         except unittest.SkipTest as st:
                             skipped += 1
                             print(f"  SKIPPED: {mod_name}.{attr_name}.{meth_name} ({st})")
@@ -198,18 +354,23 @@ def main(args: Optional[List[str]] = None) -> int:
         # Run standalone test_* functions
         for attr_name, attr_val in inspect.getmembers(mod, inspect.isfunction):
             if attr_name.startswith("test_") and getattr(attr_val, "__module__", "") == mod_name:
-                # Resolve fixtures
+                # Resolve fixtures (including autouse)
                 sig = inspect.signature(attr_val)
                 kwargs = {}
-                mp = None
-                for p in sig.parameters:
-                    if p == "monkeypatch":
-                        mp = MonkeyPatch()
-                        kwargs[p] = mp
-                    elif p == "tmp_path":
-                        kwargs[p] = tempfile.mkdtemp()
-                    elif hasattr(mod, p) and getattr(getattr(mod, p), "_is_fixture", False):
-                        kwargs[p] = getattr(mod, p)()
+                cache = {}
+                mp_holder = []
+                # autouse first
+                for fname, fval in inspect.getmembers(mod, inspect.isfunction):
+                    if getattr(fval, "_is_fixture", False) and getattr(fval, "_autouse", False):
+                        try:
+                            _resolve_fixture(mod, fname, cache, mp_holder)
+                        except Exception:
+                            pass
+                for pname in sig.parameters:
+                    try:
+                        kwargs[pname] = _resolve_fixture(mod, pname, cache, mp_holder)
+                    except KeyError:
+                        pass
                 try:
                     attr_val(**kwargs)
                     passed += 1
@@ -221,7 +382,7 @@ def main(args: Optional[List[str]] = None) -> int:
                     failed += 1
                     print(f"  FAILED: {mod_name}.{attr_name} - {e}")
                 finally:
-                    if mp:
+                    for mp in mp_holder:
                         mp.undo()
 
     print(f"\n================ SUMMARY ================")

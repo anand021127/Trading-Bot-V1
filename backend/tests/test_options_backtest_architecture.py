@@ -20,7 +20,31 @@ from backend.backtest.engine import BacktestEngine, BacktestResult
 from backend.backtest.options_data_layer import HistoricalOptionsDataLoader, HistoricalOptionRecord
 from backend.strategy.strategy_engine import MultiStrategyEngine
 from backend.strategy.signal import StrategySignal, SignalType
+from backend.strategy.strategies.base import Strategy
 from backend.strategy.strategies.option_premium import OptionPremiumStrategy
+
+
+class _ForcedPremiumBuy(Strategy):
+    """Test-only stub: emit a BUY so BacktestEngine's contract-resolution
+    path is exercised independently of OptionPremiumStrategy confidence /
+    session gates. Does not change production V8-D or paper routing."""
+
+    name = "OPTION_PREMIUM"
+    min_candles = 1
+
+    def evaluate(self, symbol, candles, context=None):
+        ctx = context or {}
+        trend = ctx.get("underlying_trend", "BULLISH")
+        opt = "CE" if trend != "BEARISH" else "PE"
+        sig = StrategySignal(strategy_name=self.name, symbol=symbol)
+        sig.signal = SignalType.BUY
+        sig.confidence = 90.0
+        sig.indicators = {
+            "directional_intent": opt,
+            "option_type": opt,
+            "spot_price": ctx.get("spot_price"),
+        }
+        return sig
 
 
 class TestOptionsBacktestArchitecture(unittest.TestCase):
@@ -83,7 +107,7 @@ class TestOptionsBacktestArchitecture(unittest.TestCase):
 
     def test_4_contract_resolver_receives_correct_timestamp(self):
         """BacktestEngine must invoke resolve_contract with exact bar date and spot."""
-        engine = BacktestEngine(strategy_engine=MultiStrategyEngine([OptionPremiumStrategy(min_momentum_pct=0.01)]), min_candles_required=20)
+        engine = BacktestEngine(strategy_engine=MultiStrategyEngine([_ForcedPremiumBuy()]), min_candles_required=20)
         loader = MagicMock(spec=HistoricalOptionsDataLoader)
         loader.is_data_available.return_value = True
         loader.resolve_contract.return_value = ("NSE_FO|NIFTY24JAN21500CE", "2024-01-04", 21500, "CE")
@@ -129,7 +153,7 @@ class TestOptionsBacktestArchitecture(unittest.TestCase):
 
     def test_5_missing_contract_produces_explicit_rejection(self):
         """When resolve_contract returns None, result records DATA_UNAVAILABLE and contract_resolution_failures."""
-        engine = BacktestEngine(strategy_engine=MultiStrategyEngine([OptionPremiumStrategy(min_momentum_pct=0.01)]), min_candles_required=20)
+        engine = BacktestEngine(strategy_engine=MultiStrategyEngine([_ForcedPremiumBuy()]), min_candles_required=20)
         loader = MagicMock(spec=HistoricalOptionsDataLoader)
         loader.is_data_available.return_value = True
         loader.resolve_contract.return_value = None  # No matching contract
@@ -158,7 +182,7 @@ class TestOptionsBacktestArchitecture(unittest.TestCase):
 
     def test_6_missing_premium_produces_explicit_rejection(self):
         """When get_candle_at returns None, result records option_premium_missing."""
-        engine = BacktestEngine(strategy_engine=MultiStrategyEngine([OptionPremiumStrategy(min_momentum_pct=0.01)]), min_candles_required=20)
+        engine = BacktestEngine(strategy_engine=MultiStrategyEngine([_ForcedPremiumBuy()]), min_candles_required=20)
         loader = MagicMock(spec=HistoricalOptionsDataLoader)
         loader.is_data_available.return_value = True
         loader.resolve_contract.return_value = ("NSE_FO|NIFTY24JAN21500CE", "2024-01-04", 21500, "CE")
@@ -205,7 +229,7 @@ class TestOptionsBacktestArchitecture(unittest.TestCase):
 
     def test_8_no_current_contract_reused_for_historical_dates(self):
         """Contracts are resolved per target_date and spot_price."""
-        engine = BacktestEngine(strategy_engine=MultiStrategyEngine([OptionPremiumStrategy(min_momentum_pct=0.01)]), min_candles_required=20)
+        engine = BacktestEngine(strategy_engine=MultiStrategyEngine([_ForcedPremiumBuy()]), min_candles_required=20)
         loader = MagicMock(spec=HistoricalOptionsDataLoader)
         loader.is_data_available.return_value = True
         

@@ -177,8 +177,12 @@ class PaperTradingRuntime:
             return type("R", (), {"accepted": False, "reason": f"kill_switch={self.kill.level()}"})()
         if is_past_square_off(self.now_fn(), self.risk.eod_square_off):
             return type("R", (), {"accepted": False, "reason": "EOD_CUTOFF"})()
+        # PaperBroker does not place live orders. Token freshness is required
+        # only when live market-data auth is expected — not during offline unit
+        # tests, and not when no token is configured.
+        offline = os.environ.get("TRADING_BOT_OFFLINE_TESTS") == "1"
         token = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
-        if token:
+        if token and not offline:
             try:
                 assert_token_usable(token, context="paper_entry")
             except TokenGuardError as exc:

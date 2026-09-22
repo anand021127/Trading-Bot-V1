@@ -30,3 +30,13 @@ class Position:
     side: str = "long"
     unrealized_pnl: float = 0.0
     extra: dict = field(default_factory=dict)
+
+
+@dataclass
+class PerformanceSnapshot:
+    """Daily performance aggregate used by the performance router."""
+    date: str
+    net_pnl: float = 0.0
+    trades_count: int = 0
+    win_rate: float = 0.0
+    equity: float = 0.0

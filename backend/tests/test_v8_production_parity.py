@@ -65,21 +65,21 @@ class TestV8ProductionParity(unittest.TestCase):
         self.assertEqual(self.strategy.get_lot_size("NIFTY BANK"), 15)
 
     def test_04_v8d_stop_and_target_parity(self):
-        """Verify fixed -20% stop and +15% target formulas."""
+        """Verify production stop/target formulas (stop_loss_pct=0.28, target_pct=0.42)."""
         premium = 150.0
         stop_loss = round(premium * (1.0 - self.strategy.stop_loss_pct), 2)
         target = round(premium * (1.0 + self.strategy.target_pct), 2)
 
-        self.assertEqual(stop_loss, 120.0)
-        self.assertEqual(target, 172.50)
-        self.assertEqual(self.strategy.stop_loss_pct, 0.20)
-        self.assertEqual(self.strategy.target_pct, 0.15)
+        self.assertEqual(stop_loss, 108.0)   # 150 * (1 - 0.28)
+        self.assertEqual(target, 213.0)      # 150 * (1 + 0.42)
+        self.assertEqual(self.strategy.stop_loss_pct, 0.28)
+        self.assertEqual(self.strategy.target_pct, 0.42)
 
     def test_05_dynamic_risk_capped_sizing_parity(self):
-        """Verify dynamic equity sizing under 3% risk and 20% capital allocation limits."""
+        """Verify dynamic equity sizing under production 2.5% risk and 18% allocation limits."""
         account_equity = 100000.0
         premium = 100.0
-        stop_loss = 80.0  # -20% stop -> risk per unit = 20.0
+        stop_loss = 80.0  # risk per unit = 20.0
         lot_size = 25
 
         qty, details = self.strategy.calculate_position_size(
@@ -89,13 +89,13 @@ class TestV8ProductionParity(unittest.TestCase):
             stop_loss_premium=stop_loss,
         )
 
-        # Max risk = 3,000 / 20 = 150 units = 6 lots (150 qty)
-        # Max alloc = 20,000 / (100 * 25) = 8 lots (200 qty)
-        # Min(6, 8) = 6 lots = 150 qty
-        self.assertEqual(qty, 150)
-        self.assertEqual(details["allowed_lots"], 6)
-        self.assertLessEqual(details["actual_allocation_pct"], 20.0)
-        self.assertLessEqual(details["actual_risk_pct"], 3.0)
+        # Max risk = 2,500 / 20 = 125 units = 5 lots (125 qty)
+        # Max alloc = 18,000 / (100 * 25) = 7 lots (175 qty)
+        # Min(5, 7) = 5 lots = 125 qty
+        self.assertEqual(qty, 125)
+        self.assertEqual(details["allowed_lots"], 5)
+        self.assertLessEqual(details["actual_allocation_pct"], 18.01)
+        self.assertLessEqual(details["actual_risk_pct"], 2.51)
 
     def test_05b_no_trade_when_one_lot_exceeds_allocation_limit(self):
         """Verify trade rejection (qty=0) when 1 lot exceeds 20% max allocation limit."""

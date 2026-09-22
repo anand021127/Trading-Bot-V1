@@ -136,7 +136,7 @@ class HistoricalOptionsDataLoader:
 
         # 2. Auto-load local persistent options cache
         if auto_load_cache:
-            cache_dir = os.path.join(
+            cache_dir = os.environ.get("HISTORICAL_OPTIONS_CACHE_DIR") or os.path.join(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
                 "real_data",
                 "options_cache",

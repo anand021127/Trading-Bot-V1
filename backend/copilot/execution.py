@@ -105,10 +105,19 @@ def submit_trade_plan_for_paper_execution(
                     # end-to-end paper-execution test, not assumed present.
                     "lot_size": trade_plan_dict.get("lot_size"),
                     "freeze_quantity": trade_plan_dict.get("freeze_quantity"),
+                    "ltp": entry_mid,
                 },
                 "directional_intent": trade_plan_dict.get("option_type"),
                 "option_type": trade_plan_dict.get("option_type"),
                 "expiry_date": trade_plan_dict.get("expiry"),
+                # Must be underlying spot, never the option premium — otherwise
+                # contract validation falsely reports "LTP equals spot".
+                "spot_price": trade_plan_dict.get("underlying_spot")
+                    or trade_plan_dict.get("spot")
+                    or trade_plan_dict.get("spot_price"),
+                "underlying_spot": trade_plan_dict.get("underlying_spot")
+                    or trade_plan_dict.get("spot")
+                    or trade_plan_dict.get("spot_price"),
             },
         )
     except Exception as e:

@@ -347,7 +347,7 @@ class BacktestResult:
     data_coverage_pct: float = 0.0
     coverage_status: str = "UNKNOWN"  # "COMPLETE" | "INCOMPLETE" | "FAILED" | "UNKNOWN"
     coverage_notes: str = ""
-    validity_status: str = "UNKNOWN"  # VALID | INVALID | UNKNOWN
+    validity_status: str = "UNKNOWN"  # VALID | INVALID | INCONCLUSIVE | UNKNOWN
     validity_reasons: list = field(default_factory=list)
     strategy_names: list = field(default_factory=list)
     option_candle_coverage_pct: float = 0.0
@@ -419,6 +419,7 @@ class BacktestResult:
             "coverage_status": self.coverage_status,
             "coverage_notes": self.coverage_notes,
             "validity_status": self.validity_status,
+            "result_status": self.validity_status,
             "validity_reasons": self.validity_reasons,
             "strategy_names": self.strategy_names,
             "min_coverage_pct_applied": self.min_coverage_pct_applied,
@@ -1531,12 +1532,28 @@ class BacktestEngine:
             result.validity_status = "INVALID"
             result.validity_reasons = reasons
         elif result.coverage_status == "COMPLETE":
-            result.validity_status = "VALID"
-            result.validity_reasons = []
+            if int(result.trades_taken or 0) == 0 and int(result.signals_generated or 0) == 0:
+                result.validity_status = "INCONCLUSIVE"
+                result.validity_reasons = [
+                    "Zero signals and zero trades after a complete scan — "
+                    "not a valid performance result. Inspect rejection/candidate counts."
+                ]
+            elif int(result.trades_taken or 0) == 0:
+                result.validity_status = "INCONCLUSIVE"
+                result.validity_reasons = [
+                    f"Signals generated={result.signals_generated} but trades_taken=0 — "
+                    "not a valid P&L performance result."
+                ]
+            else:
+                result.validity_status = "VALID"
+                result.validity_reasons = []
         else:
             result.validity_status = "UNKNOWN"
             result.validity_reasons = [result.coverage_notes] if result.coverage_notes else []
 
+        # Always expose a stable result_status alias for API/UI
+        if not hasattr(result, "result_status"):
+            pass
         return result
 
     # ── exit logic ─────────────────────────────────────────────────────────

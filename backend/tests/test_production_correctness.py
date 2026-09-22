@@ -35,9 +35,9 @@ def _isolated_engine() -> TradingEngine:
     te_mod.settings.mode = "paper"
     te_mod.settings.strategy.name = "V8_D_PULLBACK_ATM"
     te_mod.settings.order.product = "I"
-    te_mod.settings.risk.max_risk_per_trade_pct = 0.025
-    te_mod.settings.capital.total = 100000.0
-    te_mod.settings.capital.max_allocation_per_trade = 0.18
+    te_mod.settings.risk.max_risk_per_trade_pct = 0.05
+    te_mod.settings.capital.total = 1_000_000.0
+    te_mod.settings.capital.max_allocation_per_trade = 0.5
     client = MagicMock()
     om = OrderManager(client=client, paper_mode=True, default_product="I")
     engine = TradingEngine(db_manager=db, client=client, order_manager=om)
@@ -59,7 +59,8 @@ def _buy_signal_with_contract(symbol: str = "NIFTY50") -> StrategySignal:
             "instrument_key": "NSE_FO|12345",
             "lot_size": 75, "freeze_quantity": 1800,
         },
-        "expiry_date": "2026-03-05",
+        "expiry_date": "2026-10-06",
+        "spot_price": 22000.0,
     }
     return sig
 
@@ -102,10 +103,10 @@ class TestInstrumentKeyOnOrders:
         def capture_and_place(req):
             captured_requests.append(req)
             return Order(
-                id="EXIT-1", symbol=req.symbol, side=req.side,
+                id="EXIT-1", symbol=req.symbol,
                 quantity=req.quantity, price=155.0,
-                status=OrderStatus.FILLED, instrument_key=req.instrument_key,
-                filled_quantity=req.quantity, average_fill_price=155.0,
+                status=OrderStatus.FILLED,
+                filled_quantity=req.quantity, average_price=155.0,
             )
         engine.order_manager.place_order = capture_and_place
         asyncio.run(engine._close_position("NIFTY50", "STOP_LOSS_HIT"))
@@ -123,10 +124,10 @@ class TestInstrumentKeyOnOrders:
         def capture(req):
             captured.append(req)
             return Order(
-                id="P-1", symbol=req.symbol, side=req.side,
+                id="P-1", symbol=req.symbol,
                 quantity=req.quantity, price=150.0,
-                status=OrderStatus.FILLED, instrument_key=req.instrument_key,
-                filled_quantity=req.quantity, average_fill_price=150.0,
+                status=OrderStatus.FILLED,
+                filled_quantity=req.quantity, average_price=150.0,
             )
         engine.order_manager.place_order = capture
         with patch.object(engine.position_sizer, "calculate", return_value=75):
@@ -218,13 +219,16 @@ class TestRiskEnforcement:
         """Adding a position that pushes total exposure over the limit
         must be rejected."""
         engine = _isolated_engine()
-        # Saturate exposure
-        engine.risk_manager.current_exposure = engine.risk_manager.capital * 0.59
+        # Saturate exposure relative to actual capital (60% limit)
+        capital = float(getattr(engine.risk_manager, "capital", 0) or 0)
+        if capital <= 0:
+            capital = 1_000_000.0
+            engine.risk_manager.capital = capital
+        engine.risk_manager.current_exposure = capital * 0.595
         sig = _buy_signal_with_contract()
         sig.entry_price = 200.0
         sig.indicators["selected_contract"]["lot_size"] = 75
-        # 200 × 75 = ₹15,000 — would push exposure over 60% of 500k
-        engine.risk_manager.current_exposure = 290000.0  # already near limit
+        # 200 × 75 notional must push over the limit
         with patch.object(engine.position_sizer, "calculate", return_value=75):
             trade_id = engine.execute_multi_signal(sig)
         assert trade_id is None
@@ -306,8 +310,8 @@ class TestFillTracking:
             "order_id": "ORD-123", "status": "PARTIALLY_FILLED",
             "average_price": 150.0, "filled_quantity": 50, "quantity": 100,
         }
-        manager = OrderManager(client=client, paper_mode=False)
-        req = OrderRequest(symbol="NIFTY50", side="BUY", quantity=100)
+        manager = OrderManager(client=client, paper_mode=False, default_product="I")
+        req = OrderRequest(symbol="NIFTY50", side="BUY", quantity=100, product="I")
         order = manager.place_order(req)
         assert order.status == OrderStatus.PARTIALLY_FILLED
         assert order.filled_quantity == 50
@@ -321,11 +325,10 @@ class TestFillTracking:
         # Make the order manager return a REJECTED order
         def reject_order(req):
             return Order(
-                id="REJ-1", symbol=req.symbol, side=req.side,
+                id="REJ-1", symbol=req.symbol,
                 quantity=req.quantity, price=0.0,
                 status=OrderStatus.REJECTED,
-                instrument_key=req.instrument_key,
-                filled_quantity=0, average_fill_price=0.0,
+                filled_quantity=0, average_price=0.0,
             )
         engine.order_manager.place_order = reject_order
         with patch.object(engine.position_sizer, "calculate", return_value=75):

@@ -74,9 +74,19 @@ class V8DStrategy(Strategy):
 
     @staticmethod
     def get_atm_strike(spot_price: float, underlying: str) -> int:
-        """Calculate exact ATM strike (step 50 for NIFTY, 100 for BANKNIFTY)."""
-        step = 50 if "NIFTY" in underlying.upper() and "BANK" not in underlying.upper() else 100
-        return int(round(spot_price / step) * step)
+        """Deterministic ATM strike from spot using exchange-typical steps."""
+        u = (underlying or "").upper()
+        if "SENSEX" in u or "BANKEX" in u or "BANKNIFTY" in u:
+            step = 100
+        elif "MIDCP" in u:
+            step = 25
+        elif "FINNIFTY" in u:
+            step = 50
+        elif "NIFTY" in u:
+            step = 50
+        else:
+            step = 50
+        return int(round(float(spot_price) / step) * step)
 
     @staticmethod
     def get_lot_size(underlying: str) -> int:
@@ -311,13 +321,41 @@ class V8DStrategy(Strategy):
         lot_size = self.get_lot_size(underlying_symbol)
 
         candidate_contract = None
+        opt_u = (opt_type or "").upper()
+        nearest = None
+        nearest_dist = None
         for c in option_chain:
-            if c.get("strike") == atm_strike and c.get("option_type") == opt_type:
+            try:
+                sk = float(c.get("strike") or 0)
+            except (TypeError, ValueError):
+                continue
+            ot = str(c.get("option_type") or c.get("instrument_type") or "").upper()
+            if ot not in ("CE", "PE"):
+                # some chains use call/put
+                if "CALL" in ot:
+                    ot = "CE"
+                elif "PUT" in ot:
+                    ot = "PE"
+            if ot != opt_u:
+                continue
+            dist = abs(sk - float(atm_strike))
+            if dist < 0.01 and c.get("instrument_key"):
                 candidate_contract = c
                 break
+            if c.get("instrument_key") and (nearest_dist is None or dist < nearest_dist):
+                nearest = c
+                nearest_dist = dist
+        # Prefer exact ATM; else nearest same-type strike within one step (never invent keys)
+        if candidate_contract is None and nearest is not None and nearest_dist is not None:
+            step_guess = 100 if nearest_dist >= 75 else 50
+            if nearest_dist <= step_guess + 0.01:
+                candidate_contract = nearest
 
         if not candidate_contract or not candidate_contract.get("instrument_key"):
-            rejection_reasons.append(f"Could not resolve liquid ATM {opt_type} {atm_strike} contract")
+            rejection_reasons.append(
+                f"Could not resolve ATM {opt_type} contract near strike {atm_strike} "
+                f"from live option-chain (chain_size={len(option_chain or [])})"
+            )
             decision_log = V8DDecisionLog(
                 timestamp=ts_now,
                 underlying=underlying_symbol,

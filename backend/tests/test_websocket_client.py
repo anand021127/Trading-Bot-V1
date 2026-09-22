@@ -7,6 +7,9 @@ Upstox feed or fabricate market prices.
 """
 from __future__ import annotations
 
+import os
+from unittest.mock import patch
+
 from backend.broker.websocket_client import (
     UpstoxWebSocketClient,
     _extract_ltpc,
@@ -89,10 +92,14 @@ def test_on_message_ignores_market_info_ticks() -> None:
 
 
 def test_start_without_token_sets_auth_failed_status() -> None:
-    client = UpstoxWebSocketClient(access_token="")
-    client.start()
-    assert client.connection_status == "auth_failed"
-    assert client.is_connected is False
+    # Force empty token and block any env/DB resolution so this unit test
+    # stays hermetic even when other tests leave a token in process state.
+    with patch("backend.broker.token_resolver.resolve_upstox_token", return_value=""), \
+         patch.dict(os.environ, {"UPSTOX_ACCESS_TOKEN": ""}, clear=False):
+        client = UpstoxWebSocketClient(access_token="")
+        client.start()
+        assert client.connection_status == "auth_failed"
+        assert client.is_connected is False
 
 
 def test_on_open_sets_connected_status() -> None:

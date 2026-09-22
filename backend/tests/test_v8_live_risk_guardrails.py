@@ -20,37 +20,40 @@ class TestV8LiveRiskGuardrails(unittest.TestCase):
         cls.strategy = V8DStrategy()
 
     def test_01_dynamic_capital_scaling(self):
-        """Verify position sizing scales dynamically with different account equity levels."""
+        """Verify position sizing scales dynamically with different account equity levels.
+
+        Production V8-D defaults: max_account_risk_pct=2.5%, max_capital_alloc_pct=18%.
+        """
         premium = 120.0
-        stop_loss = 96.0  # -20% stop -> risk per unit = 24.0
+        stop_loss = 96.0  # risk per unit = 24.0
         lot_size = 25
 
         # ₹100,000 capital:
-        # Max risk = 3,000 / 24 = 125 units (5 lots)
-        # Max alloc = 20,000 / 3000 = 6 lots
-        # Min(5, 6) = 5 lots = 125 qty
+        # Max risk = 2,500 / 24 ≈ 104.17 units → 4 lots
+        # Max alloc = 18,000 / 3000 = 6 lots
+        # Min(4, 6) = 4 lots = 100 qty
         qty_100k, details_100k = self.strategy.calculate_position_size(100000.0, premium, lot_size, stop_loss)
-        self.assertEqual(qty_100k, 125)
-        self.assertEqual(details_100k["allowed_lots"], 5)
+        self.assertEqual(qty_100k, 100)
+        self.assertEqual(details_100k["allowed_lots"], 4)
 
         # ₹500,000 capital:
-        # Max risk = 15,000 / 24 = 625 units (25 lots)
-        # Max alloc = 100,000 / 3000 = 33 lots
-        # Min(25, 33) = 25 lots = 625 qty
+        # Max risk = 12,500 / 24 ≈ 520.83 units → 20 lots
+        # Max alloc = 90,000 / 3000 = 30 lots
+        # Min(20, 30) = 20 lots = 500 qty
         qty_500k, details_500k = self.strategy.calculate_position_size(500000.0, premium, lot_size, stop_loss)
-        self.assertEqual(qty_500k, 625)
-        self.assertEqual(details_500k["allowed_lots"], 25)
+        self.assertEqual(qty_500k, 500)
+        self.assertEqual(details_500k["allowed_lots"], 20)
 
         # ₹50,000 capital:
-        # Max risk = 1,500 / 24 = 62.5 units (2 lots = 50 qty)
-        # Max alloc = 10,000 / 3000 = 3 lots
+        # Max risk = 1,250 / 24 ≈ 52.08 units → 2 lots
+        # Max alloc = 9,000 / 3000 = 3 lots
         # Min(2, 3) = 2 lots = 50 qty
         qty_50k, details_50k = self.strategy.calculate_position_size(50000.0, premium, lot_size, stop_loss)
         self.assertEqual(qty_50k, 50)
         self.assertEqual(details_50k["allowed_lots"], 2)
 
     def test_02_strict_risk_allocation_bounds(self):
-        """Verify that neither the 3% risk nor the 20% allocation limit is ever breached."""
+        """Verify production 2.5% risk and 18% allocation limits are never breached."""
         equities = [50000.0, 100000.0, 250000.0, 1000000.0]
         premiums = [50.0, 100.0, 200.0, 400.0, 800.0]
 
@@ -64,17 +67,17 @@ class TestV8LiveRiskGuardrails(unittest.TestCase):
                     pos_val = qty * prem
                     tot_risk = qty * (prem - sl)
                     
-                    # Allocation must be <= 20% (allowing single lot threshold if equity is small)
-                    if pos_val > eq * 0.20:
-                        self.assertEqual(qty, 25, "Can only exceed 20% if at minimum 1 lot constraint")
+                    # Allocation must be <= 18% (allowing single lot threshold if equity is small)
+                    if pos_val > eq * 0.18:
+                        self.assertEqual(qty, 25, "Can only exceed 18% if at minimum 1 lot constraint")
                     else:
-                        self.assertLessEqual(pos_val / eq, 0.2001)
+                        self.assertLessEqual(pos_val / eq, 0.1801)
 
-                    # Risk must be <= 3% (or 1 lot if minimum)
-                    if tot_risk > eq * 0.03:
-                        self.assertEqual(qty, 25, "Can only exceed 3% if at minimum 1 lot constraint")
+                    # Risk must be <= 2.5% (or 1 lot if minimum)
+                    if tot_risk > eq * 0.025:
+                        self.assertEqual(qty, 25, "Can only exceed 2.5% if at minimum 1 lot constraint")
                     else:
-                        self.assertLessEqual(tot_risk / eq, 0.0301)
+                        self.assertLessEqual(tot_risk / eq, 0.0251)
 
     def test_03_daily_trade_ceiling(self):
         """Verify that reaching 3 trades per day blocks new signal execution."""

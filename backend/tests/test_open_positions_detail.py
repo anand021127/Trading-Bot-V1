@@ -13,7 +13,12 @@ from backend.strategy.trading_engine import TradingEngine
 
 
 def _engine_with_position(symbol: str = "NIFTY50") -> TradingEngine:
-    engine = TradingEngine()
+    import tempfile, uuid
+    from backend.database.db_manager import DatabaseManager
+    path = f"{tempfile.gettempdir()}/test_opd_{uuid.uuid4().hex}.db"
+    db = DatabaseManager(db_path=path)
+    db.init_db()
+    engine = TradingEngine(db_manager=db)
     engine._open_positions[symbol] = {
         "trade_id": "t1",
         "entry_price": 100.0,
@@ -67,7 +72,7 @@ class TestOpenPositionsDetail:
                     return_value={"NIFTY50": {"ltp": 110.0}}):  # 2R move
             details = engine.get_open_positions_detail()
 
-        assert details[0]["trailing_stop"] == 105.0  # stage 3: lock 1.0R
+        assert details[0]["trailing_stop"] == 104.5  # production stage 3: lock 0.9R
         assert details[0]["trailing_stop"] > 95.0
 
     def test_strategy_used_reflects_what_opened_the_position(self) -> None:
@@ -77,5 +82,10 @@ class TestOpenPositionsDetail:
         assert details[0]["strategy_used"] == "OPTION_PREMIUM"
 
     def test_no_open_positions_returns_empty_list(self) -> None:
-        engine = TradingEngine()
+        import tempfile, uuid
+        from backend.database.db_manager import DatabaseManager
+        path = f"{tempfile.gettempdir()}/test_opd_empty_{uuid.uuid4().hex}.db"
+        db = DatabaseManager(db_path=path)
+        db.init_db()
+        engine = TradingEngine(db_manager=db)
         assert engine.get_open_positions_detail() == []
