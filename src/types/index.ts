@@ -340,16 +340,6 @@ export interface BacktestResponse {
   date_range?: { start: string; end: string }
   interval?: string
   message?: string
-  /** VALID | ZERO_TRADES | INCONCLUSIVE | INVALID_DATA */
-  result_status?: string
-  validity_status?: string
-  validity_reasons?: string[]
-  coverage_status?: string
-  coverage_notes?: string
-  data_coverage_pct?: number
-  option_candle_coverage_pct?: number
-  overall_data_coverage_pct?: number
-  strategy_names?: string[]
 }
 
 // ── Live Scanner (item #3) ──────────────────────────────────────────────

@@ -54,7 +54,7 @@ def test_time_varying_trend_series_overrides_static_context_per_bar() -> None:
         return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
     engine.strategy_engine.evaluate = MagicMock(side_effect=fake_evaluate)
-    engine.run({"NIFTY50": candles}, option_contexts={"NIFTY50": context})
+    engine.run({"NIFTY50": candles}, strategy_names=["OPTION_PREMIUM"], option_contexts={"NIFTY50": context})
 
     # Bars at t002 and t004 have no exact trend_series entry — must use
     # the MOST RECENT one at-or-before that timestamp (t001's BULLISH for
@@ -117,12 +117,14 @@ def test_real_options_data_layer_validation() -> None:
 
     res = engine.run(
         {"NIFTY50": spot_candles},
+        strategy_names=["OPTION_PREMIUM"],
         options_data_loader=loader,
         require_real_options=True,
     )
 
     assert res.trades_taken >= 1
     trade = res.trade_log[0]
+    assert trade.get("strategy") == "OPTION_PREMIUM"
     # 1. Underlying spot price (24505) != Option entry price (215.0)
     assert trade["entry_price"] != 24505
     # 2. Option entry price matches actual historical option candle close
@@ -164,6 +166,7 @@ def test_real_options_data_unavailable_failsafe() -> None:
 
     res = engine.run(
         {"NIFTY50": spot_candles},
+        strategy_names=["OPTION_PREMIUM"],
         options_data_loader=loader,
         require_real_options=True,
     )
@@ -227,7 +230,7 @@ def test_zero_synthetic_option_pricing_guarantee() -> None:
         return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
     engine.strategy_engine.evaluate = MagicMock(side_effect=fake_evaluate)
-    res = engine.run({"NIFTY50": spot_candles}, options_data_loader=loader, require_real_options=True)
+    res = engine.run({"NIFTY50": spot_candles}, strategy_names=["OPTION_PREMIUM"], options_data_loader=loader, require_real_options=True)
     assert res.trades_taken == 0
     assert any("Missing historical option candle" in r for r in res.rejection_reason_counts.keys())
 

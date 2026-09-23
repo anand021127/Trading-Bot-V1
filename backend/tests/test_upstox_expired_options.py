@@ -192,6 +192,7 @@ class TestUpstoxExpiredOptions(unittest.TestCase):
 
         bt_res = engine.run(
             {"NIFTY50": spot_candles},
+            strategy_names=["OPTION_PREMIUM"],
             options_data_loader=loader,
             require_real_options=True,
         )

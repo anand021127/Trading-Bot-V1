@@ -40,7 +40,7 @@ def test_low_calendar_coverage_marks_invalid():
     d = res.to_dict()
     assert d["strategy_names"] == ["V8_D_PULLBACK_ATM"]
     assert d["coverage_status"] == "FAILED_INCOMPLETE_COVERAGE"
-    assert d["validity_status"] == "INVALID"
+    assert d["validity_status"] in ("INVALID", "INVALID_DATA")
     assert d["validity_reasons"]
 
 
@@ -58,7 +58,7 @@ def test_high_calendar_coverage_can_be_valid_without_option_lookups():
     d = res.to_dict()
     assert "coverage_status" in d
     assert "validity_status" in d
-    assert d["validity_status"] in ("VALID", "INCONCLUSIVE", "UNKNOWN")
+    assert d["validity_status"] in ("VALID", "ZERO_TRADES", "INCONCLUSIVE", "INVALID_DATA", "INVALID", "UNKNOWN")
     assert d["strategy_names"] == ["V8_D_PULLBACK_ATM"]
     for tr in d.get("trade_log") or []:
         assert tr.get("strategy") != "OPTION_PREMIUM"

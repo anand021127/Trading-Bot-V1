@@ -36,3 +36,16 @@ def load_strategy(name: str) -> Strategy:
     strategy = cls()
     logger.info("ACTIVE_STRATEGY=%s class=%s", strategy.name, cls.__name__)
     return strategy
+
+
+def load_strategies(names: list) -> list:
+    """Instantiate exactly the requested strategies — no default, no silent add-ons."""
+    if not names:
+        raise StrategySelectionError(
+            "No strategy names provided. Set strategies explicitly "
+            "(e.g. [\"V8_D_PULLBACK_ATM\"]). Refusing silent OPTION_PREMIUM fallback."
+        )
+    out = []
+    for n in names:
+        out.append(load_strategy(n))
+    return out

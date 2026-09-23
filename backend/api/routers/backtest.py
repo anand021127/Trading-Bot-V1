@@ -135,7 +135,10 @@ async def _create_and_start_backtest(request: BacktestRequest) -> JSONResponse:
         slippage_pct=request.slippage_pct if request.slippage_pct is not None else settings.backtest.slippage_pct,
         stt_pct=request.stt_pct if request.stt_pct is not None else settings.backtest.stt_pct,
     )
+    from backend.config.strategy_registry import load_strategies
+    from backend.strategy.strategy_engine import MultiStrategyEngine
     engine = BacktestEngine(
+        strategy_engine=MultiStrategyEngine(strategies=load_strategies(strategies)),
         costs=costs, capital=capital, risk_pct_per_trade=request.risk_pct_per_trade,
     )
 

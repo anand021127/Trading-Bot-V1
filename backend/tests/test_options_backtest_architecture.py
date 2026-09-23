@@ -288,7 +288,12 @@ class TestOptionsBacktestArchitecture(unittest.TestCase):
 
     def test_9_no_lookahead_data_used(self):
         """Window passed to strategy on bar i includes only bars up to index i."""
-        engine = BacktestEngine(min_candles_required=20)
+        from backend.config.strategy_registry import load_strategies
+
+        engine = BacktestEngine(
+            strategy_engine=MultiStrategyEngine(strategies=load_strategies(["OPTION_PREMIUM"])),
+            min_candles_required=20,
+        )
         captured_windows = []
 
         original_eval = engine.strategy_engine.evaluate

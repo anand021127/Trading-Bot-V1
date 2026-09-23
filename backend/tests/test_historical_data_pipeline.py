@@ -30,7 +30,7 @@ from backend.backtest.task_manager import (
 )
 from backend.backtest.engine import BacktestEngine, CostConfig
 from backend.strategy.strategy_engine import MultiStrategyEngine
-from backend.strategy.strategies.ema_trend import EMATrendStrategy
+from backend.strategy.strategies.v8d_strategy import V8DStrategy
 
 
 def generate_synthetic_candles(count: int, start_time: str = "2024-01-01T09:15:00+05:30") -> list:
@@ -90,13 +90,13 @@ class TestHistoricalDataPipeline(unittest.TestCase):
 
         # 3. Process through BacktestEngine
         engine = BacktestEngine(
-            strategy_engine=MultiStrategyEngine([EMATrendStrategy()]),
+            strategy_engine=MultiStrategyEngine([V8DStrategy()]),
             costs=CostConfig(),
             capital=100000.0,
         )
         res = engine.run(
             symbol_candles={"NIFTY": loaded_candles[:2000]},
-            strategy_names=["EMA_TREND"],
+            strategy_names=["V8_D_PULLBACK_ATM"],
             require_real_options=False,
         )
         self.assertIsNotNone(res)
@@ -176,7 +176,7 @@ class TestHistoricalDataPipeline(unittest.TestCase):
         task_id = task.task_id
 
         engine = BacktestEngine(
-            strategy_engine=MultiStrategyEngine([EMATrendStrategy()]),
+            strategy_engine=MultiStrategyEngine([V8DStrategy()]),
             costs=CostConfig(),
             capital=100000.0,
         )
@@ -191,7 +191,7 @@ class TestHistoricalDataPipeline(unittest.TestCase):
                 interval="5minute",
                 start_date="2024-01-01",
                 end_date="2024-01-10",
-                strategy_names=["EMA_TREND"],
+                strategy_names=["V8_D_PULLBACK_ATM"],
             )
         )
 
@@ -252,7 +252,7 @@ class TestHistoricalDataPipeline(unittest.TestCase):
 
         # Use real NIFTY50 data from 2024-01-01 to 2024-01-10 (600 bars)
         engine = BacktestEngine(
-            strategy_engine=MultiStrategyEngine([EMATrendStrategy()]),
+            strategy_engine=MultiStrategyEngine([V8DStrategy()]),
             costs=CostConfig(),
             capital=100000.0,
         )
@@ -266,7 +266,7 @@ class TestHistoricalDataPipeline(unittest.TestCase):
                 interval="5minute",
                 start_date="2024-01-01",
                 end_date="2024-01-10",
-                strategy_names=["EMA_TREND"],
+                strategy_names=["V8_D_PULLBACK_ATM"],
             )
         )
 
@@ -308,7 +308,7 @@ class TestHistoricalDataPipeline(unittest.TestCase):
                 interval="5minute",
                 start_date="2024-01-01",
                 end_date="2024-01-10",
-                strategy_names=["EMA_TREND"],
+                strategy_names=["V8_D_PULLBACK_ATM"],
             )
         )
 
@@ -325,7 +325,7 @@ class TestHistoricalDataPipeline(unittest.TestCase):
         task_id = task.task_id
 
         engine = BacktestEngine(
-            strategy_engine=MultiStrategyEngine([EMATrendStrategy()]),
+            strategy_engine=MultiStrategyEngine([V8DStrategy()]),
             costs=CostConfig(),
             capital=100000.0,
         )
@@ -340,7 +340,7 @@ class TestHistoricalDataPipeline(unittest.TestCase):
                 interval="5minute",
                 start_date="2024-01-01",
                 end_date="2024-09-09",
-                strategy_names=["EMA_TREND"],
+                strategy_names=["V8_D_PULLBACK_ATM"],
             )
         )
 

@@ -88,7 +88,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=fake_eval)
-        self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         # Verify that for each timestamp, both symbols are evaluated together
         ts_nifty = [item[1] for item in evaluated_sequence if item[0] == "NIFTY50"]
@@ -100,8 +100,8 @@ class TestMultiSymbolBacktest(unittest.TestCase):
         c1 = generate_candles("NIFTY50", count=30, start_price=21000.0)
         c2 = generate_candles("BANKNIFTY", count=30, start_price=45000.0)
 
-        res1 = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
-        res2 = self.engine.run({"BANKNIFTY": c2, "NIFTY50": c1})
+        res1 = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
+        res2 = self.engine.run({"BANKNIFTY": c2, "NIFTY50": c1}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertEqual(res1.trades_taken, res2.trades_taken)
         self.assertEqual(res1.net_profit, res2.net_profit)
@@ -131,7 +131,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         # Both symbols should have taken trades
         symbols_in_trades = set(t["underlying"] for t in res.trade_log)
@@ -146,7 +146,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
 
         # Set allow_same_bar_reentry to False
         engine = BacktestEngine(min_candles_required=20, allow_same_bar_reentry=False)
-        res = engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
         self.assertIsInstance(res.symbol_summary, dict)
 
     # 5. Portfolio equity curve aggregates all symbol trades
@@ -164,7 +164,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertGreater(len(res.equity_curve), 1)
         final_equity = res.equity_curve[-1]["equity"]
@@ -189,7 +189,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         # Only BANKNIFTY should be taken due to higher confidence
         self.assertEqual(res.trades_taken, 1)
@@ -216,7 +216,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = engine.run({"NIFTY50": c1, "BANKNIFTY": c2, "SENSEX": c3})
+        res = engine.run({"NIFTY50": c1, "BANKNIFTY": c2, "SENSEX": c3}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertEqual(res.trades_taken, 2)
         traded_symbols = [t["underlying"] for t in res.trade_log]
@@ -230,7 +230,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
         c2 = generate_candles("BANKNIFTY", count=25)
         c3 = generate_candles("FINNIFTY", count=10)  # Under min_candles_required
 
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2, "FINNIFTY": c3})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2, "FINNIFTY": c3}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertIn("NIFTY50", res.symbol_summary)
         self.assertIn("BANKNIFTY", res.symbol_summary)
@@ -243,7 +243,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
     # 9. portfolio_summary populated with accurate portfolio metrics
     def test_09_portfolio_summary_aggregates_exact_metrics(self):
         c1 = generate_candles("NIFTY50", count=25)
-        res = self.engine.run({"NIFTY50": c1})
+        res = self.engine.run({"NIFTY50": c1}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertIn("starting_capital", res.portfolio_summary)
         self.assertIn("ending_equity", res.portfolio_summary)
@@ -266,7 +266,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertEqual(res.winning_trades + res.losing_trades, res.trades_taken)
         self.assertEqual(res.trades_taken, len(res.trade_log))
@@ -286,7 +286,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         calc_sum = round(sum(t["net_pnl"] for t in res.trade_log), 2)
         self.assertAlmostEqual(res.net_profit, calc_sum, places=2)
@@ -306,7 +306,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         calc_charges = round(sum(t["charges"] for t in res.trade_log), 2)
         self.assertAlmostEqual(res.total_charges, calc_charges, places=2)
@@ -326,7 +326,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         task = BacktestTask(task_id="test_task", status=STATUS_COMPLETED, result=res.to_dict())
         csv_path = task.generate_csv()
@@ -345,7 +345,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
         c1 = generate_candles("NIFTY50", count=25)
         c2 = generate_candles("SHORT_SYM", count=5)
 
-        res = self.engine.run({"NIFTY50": c1, "SHORT_SYM": c2})
+        res = self.engine.run({"NIFTY50": c1, "SHORT_SYM": c2}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertEqual(len(res.skipped_symbols), 1)
         self.assertEqual(res.skipped_symbols[0]["symbol"], "SHORT_SYM")
@@ -367,7 +367,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2, "SENSEX": c3})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2, "SENSEX": c3}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertEqual(res.trades_taken, 3)
         self.assertEqual(res.symbol_summary["NIFTY50"]["trades"], 1)
@@ -379,7 +379,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
         c1 = generate_candles("NIFTY50", count=30, start_time="2024-01-02T09:15:00")
         c2 = generate_candles("BANKNIFTY", count=30, start_time="2024-01-02T10:00:00")
 
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
         self.assertGreater(res.total_candles_scanned, 0)
         self.assertEqual(res.symbol_summary["NIFTY50"]["candles"], 30)
         self.assertEqual(res.symbol_summary["BANKNIFTY"]["candles"], 30)
@@ -405,7 +405,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, option_contexts=opt_contexts)
+        self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, option_contexts=opt_contexts, strategy_names=["OPTION_PREMIUM"])
 
         self.assertEqual(seen_trends["NIFTY50"], "BULLISH")
         self.assertEqual(seen_trends["BANKNIFTY"], "BEARISH")
@@ -447,11 +447,9 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run(
-            {"NIFTY50": c1, "BANKNIFTY": c2},
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2},
             options_data_loader=loader,
-            require_real_options=True,
-        )
+            require_real_options=True, strategy_names=["OPTION_PREMIUM"])
 
         self.assertEqual(res.contracts_resolved, 2)
         self.assertEqual(res.trades_taken, 2)
@@ -477,7 +475,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertEqual(res.trades_taken, 2)
         for t in res.trade_log:
@@ -486,12 +484,12 @@ class TestMultiSymbolBacktest(unittest.TestCase):
     # 21. Accurate portfolio-wide max drawdown calculation
     def test_21_max_drawdown_calculated_correctly_across_portfolio(self):
         c1 = generate_candles("NIFTY50", count=30)
-        res = self.engine.run({"NIFTY50": c1})
+        res = self.engine.run({"NIFTY50": c1}, strategy_names=["OPTION_PREMIUM"])
         self.assertGreaterEqual(res.max_drawdown_pct, 0.0)
 
     # 22. Empty dataset / zero valid candles safe handling
     def test_22_empty_dataset_handling(self):
-        res = self.engine.run({})
+        res = self.engine.run({}, strategy_names=["OPTION_PREMIUM"])
         self.assertEqual(res.trades_taken, 0)
         self.assertEqual(res.net_profit, 0.0)
         self.assertEqual(res.portfolio_summary["total_trades"], 0)
@@ -510,7 +508,7 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res = self.engine.run({"NIFTY50": c1})
+        res = self.engine.run({"NIFTY50": c1}, strategy_names=["OPTION_PREMIUM"])
 
         task = BacktestTask(task_id="fee_test", status=STATUS_COMPLETED, result=res.to_dict())
         csv_path = task.generate_csv()
@@ -539,10 +537,10 @@ class TestMultiSymbolBacktest(unittest.TestCase):
             return [StrategySignal(strategy_name="OPTION_PREMIUM", symbol=symbol, signal=SignalType.NONE)]
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res1 = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res1 = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         self.engine.strategy_engine.evaluate = MagicMock(side_effect=mock_eval)
-        res2 = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2})
+        res2 = self.engine.run({"NIFTY50": c1, "BANKNIFTY": c2}, strategy_names=["OPTION_PREMIUM"])
 
         self.assertEqual(res1.to_dict(), res2.to_dict())
 

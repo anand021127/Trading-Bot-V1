@@ -273,19 +273,18 @@ class TradingEngine:
         self.telegram_alerts = telegram_alerts
         self.email_alerts = email_alerts
         configured = (getattr(settings.strategy, "name", "") or "").strip()
-        self.strategy_name = configured or strategy_name
-        if configured:
-            from backend.config.strategy_registry import load_strategy
-            loaded = load_strategy(configured)
-            self.strategy_engine = MultiStrategyEngine(strategies=[loaded])
-            logger.info("TradingEngine active_strategy=%s (explicit config)", loaded.name)
-        else:
-            # Legacy default kept for existing tests; production must set TRADING_STRATEGY.
-            logger.warning(
-                "TRADING_STRATEGY unset; MultiStrategyEngine defaulting to OPTION_PREMIUM. "
-                "Set TRADING_STRATEGY explicitly for paper/live."
+        explicit = (strategy_name or "").strip() if strategy_name else ""
+        chosen = configured or explicit
+        self.strategy_name = chosen
+        if not chosen:
+            raise ValueError(
+                "TRADING_STRATEGY is empty. Set it explicitly (e.g. V8_D_PULLBACK_ATM). "
+                "Refusing silent OPTION_PREMIUM fallback."
             )
-            self.strategy_engine = MultiStrategyEngine()
+        from backend.config.strategy_registry import load_strategy
+        loaded = load_strategy(chosen)
+        self.strategy_engine = MultiStrategyEngine(strategies=[loaded])
+        logger.info("TradingEngine active_strategy=%s (explicit config)", loaded.name)
         self.trailing_stop_manager = TrailingStopManager()
         # Optional AI decision-filter layer — see backend/ai/. Disabled by
         # default; behaves as a pure pass-through when AI_ENABLED=false, so
@@ -353,7 +352,7 @@ class TradingEngine:
                     "stop_loss": stop_loss,
                     "target": target,
                     "trailing_stop": stop_loss,
-                    "strategy_name": self.strategy_name or "OPTION_PREMIUM",
+                    "strategy_name": self.strategy_name or "V8_D_PULLBACK_ATM",
                     "quantity": pos.quantity,
                     "requested_quantity": pos.quantity,
                     "side": pos.side,
@@ -445,7 +444,7 @@ class TradingEngine:
                 "stop_loss": stop_loss,
                 "target": target,
                 "trailing_stop": stop_loss,
-                "strategy_name": self.strategy_name or "OPTION_PREMIUM",
+                "strategy_name": self.strategy_name or "V8_D_PULLBACK_ATM",
                 "quantity": pos.quantity,
                 "requested_quantity": pos.quantity,
                 "side": pos.side,

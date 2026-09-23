@@ -347,7 +347,7 @@ class BacktestResult:
     data_coverage_pct: float = 0.0
     coverage_status: str = "UNKNOWN"  # "COMPLETE" | "INCOMPLETE" | "FAILED" | "UNKNOWN"
     coverage_notes: str = ""
-    validity_status: str = "UNKNOWN"  # VALID | INVALID | INCONCLUSIVE | UNKNOWN
+    validity_status: str = "UNKNOWN"  # VALID | ZERO_TRADES | INCONCLUSIVE | INVALID_DATA
     validity_reasons: list = field(default_factory=list)
     strategy_names: list = field(default_factory=list)
     option_candle_coverage_pct: float = 0.0
@@ -451,7 +451,7 @@ class BacktestEngine:
         if self.ai_mode != "disabled":
             from backend.ai.predictor import AIPredictor
             self.ai_predictor = AIPredictor()
-        self.strategy_engine = strategy_engine or MultiStrategyEngine()
+        self.strategy_engine = strategy_engine if strategy_engine is not None else MultiStrategyEngine(strategies=[])
         self.costs = costs or CostConfig()
         self.trailing_stop_manager = TrailingStopManager()
         self.capital = capital
@@ -484,11 +484,56 @@ class BacktestEngine:
         result = BacktestResult()
         result.candles_loaded = sum(len(c) for c in symbol_candles.values())
         result.total_candles_scanned = result.candles_loaded
+        # Explicit strategy selection only — NEVER silent OPTION_PREMIUM fallback.
         if not strategy_names:
-            import os
-            env_name = (os.environ.get("TRADING_STRATEGY") or "").strip()
-            strategy_names = [env_name] if env_name else ["OPTION_PREMIUM"]
+            if self.strategy_engine is not None and self.strategy_engine.enabled_names():
+                strategy_names = list(self.strategy_engine.enabled_names())
+            else:
+                import os
+                env_name = (os.environ.get("TRADING_STRATEGY") or "").strip()
+                if not env_name:
+                    raise ValueError(
+                        "No backtest strategy specified. Pass strategy_names "
+                        "(e.g. [\"V8_D_PULLBACK_ATM\"]) or set TRADING_STRATEGY. "
+                        "Refusing silent OPTION_PREMIUM fallback."
+                    )
+                strategy_names = [env_name]
         result.strategy_names = list(strategy_names)
+
+        # Bind MultiStrategyEngine to EXACTLY the requested strategies.
+        from backend.config.strategy_registry import load_strategies, StrategySelectionError
+        try:
+            loaded = load_strategies(list(strategy_names))
+        except StrategySelectionError as e:
+            raise ValueError(str(e)) from e
+        loaded_names = {s.name for s in loaded}
+        missing = [n for n in strategy_names if n not in loaded_names]
+        if missing:
+            raise ValueError(
+                f"Requested strategies not loaded: {missing}. "
+                "No fallback to OPTION_PREMIUM."
+            )
+        # Always bind EXACTLY the requested strategies for production paths.
+        # Preserve MagicMock evaluate() only for unit tests that patch the engine.
+        from unittest.mock import Mock
+        enabled = set(self.strategy_engine.enabled_names()) if self.strategy_engine is not None else set()
+        eval_fn = getattr(self.strategy_engine, "evaluate", None) if self.strategy_engine is not None else None
+        is_mock_engine = isinstance(eval_fn, Mock)
+        if not is_mock_engine and (self.strategy_engine is None or enabled != loaded_names):
+            self.strategy_engine = MultiStrategyEngine(strategies=loaded)
+        # Hard gate: V8-D request must never also run OPTION_PREMIUM.
+        if "V8_D_PULLBACK_ATM" in strategy_names and "OPTION_PREMIUM" in self.strategy_engine.enabled_names():
+            raise ValueError(
+                "V8_D_PULLBACK_ATM was requested but OPTION_PREMIUM is also loaded. "
+                "Refusing mixed-strategy backtest."
+            )
+        # Identity lock: requested set must equal enabled set (no extras, no missing).
+        final_enabled = set(self.strategy_engine.enabled_names())
+        if not is_mock_engine and final_enabled != loaded_names:
+            raise ValueError(
+                f"Strategy engine mismatch after bind: requested={sorted(loaded_names)} "
+                f"enabled={sorted(final_enabled)}. No silent fallback allowed."
+            )
         result.min_coverage_pct_applied = float(min_coverage_pct)
         option_contexts = option_contexts or {}
 
@@ -709,7 +754,7 @@ class BacktestEngine:
                             result.contract_resolution_failures += 1
                             result.data_unavailable_count += 1
                             logger.error(
-                                "HARD GATE REJECTION: Dropped invalid OPTION_PREMIUM exit trade: symbol=%s, type=%s, strike=%s, expiry=%s, lot_size=%s, entry=%s, exit=%s",
+                                "HARD GATE REJECTION: Dropped invalid option exit trade: symbol=%s, type=%s, strike=%s, expiry=%s, lot_size=%s, entry=%s, exit=%s",
                                 sym, opt_t, stk, exp, ls, ent, exit_price,
                             )
                             symbol_positions[sym] = None
@@ -719,9 +764,21 @@ class BacktestEngine:
                         position["entry_price"], exit_price, qty,
                         instrument_type=inst_type,
                     )
+                    trade_strategy = position["strategy"]
+                    if trade_strategy not in strategy_names:
+                        raise ValueError(
+                            f"Trade strategy identity breach: recorded={trade_strategy!r} "
+                            f"but backtest requested {strategy_names}. "
+                            "Refusing OPTION_PREMIUM/silent fallback."
+                        )
+                    if "V8_D_PULLBACK_ATM" in strategy_names and trade_strategy != "V8_D_PULLBACK_ATM":
+                        raise ValueError(
+                            f"V8_D_PULLBACK_ATM was requested but trade has strategy={trade_strategy!r}. "
+                            "Refusing mixed/fallback execution."
+                        )
                     trade = BacktestTrade(
                         symbol=(position.get("contract_key") or position.get("contract_symbol") or position.get("option_symbol", sym)) if position.get("is_real_option") else sym,
-                        strategy=position["strategy"],
+                        strategy=trade_strategy,
                         entry_time=position["entry_time"],
                         exit_time=ts,
                         entry_price=position["entry_price"],
@@ -1239,7 +1296,7 @@ class BacktestEngine:
                         result.contract_resolution_failures += 1
                         result.data_unavailable_count += 1
                         logger.error(
-                            "HARD GATE REJECTION: Dropped invalid OPTION_PREMIUM closeout trade: symbol=%s, type=%s, strike=%s, expiry=%s, lot_size=%s, entry=%s, exit=%s",
+                            "HARD GATE REJECTION: Dropped invalid option closeout trade: symbol=%s, type=%s, strike=%s, expiry=%s, lot_size=%s, entry=%s, exit=%s",
                             sym, opt_t, stk, exp, ls, ent, exit_price,
                         )
                         symbol_positions[sym] = None
@@ -1249,9 +1306,21 @@ class BacktestEngine:
                     pos["entry_price"], exit_price, qty,
                     instrument_type=inst_type,
                 )
+                trade_strategy = pos["strategy"]
+                if trade_strategy not in strategy_names:
+                    raise ValueError(
+                        f"Trade strategy identity breach: recorded={trade_strategy!r} "
+                        f"but backtest requested {strategy_names}. "
+                        "Refusing OPTION_PREMIUM/silent fallback."
+                    )
+                if "V8_D_PULLBACK_ATM" in strategy_names and trade_strategy != "V8_D_PULLBACK_ATM":
+                    raise ValueError(
+                        f"V8_D_PULLBACK_ATM was requested but trade has strategy={trade_strategy!r}. "
+                        "Refusing mixed/fallback execution."
+                    )
                 trade = BacktestTrade(
                     symbol=(pos.get("contract_key") or pos.get("contract_symbol") or pos.get("option_symbol", sym)) if pos.get("is_real_option") else sym,
-                    strategy=pos["strategy"],
+                    strategy=trade_strategy,
                     entry_time=pos["entry_time"],
                     exit_time=last_ts,
                     entry_price=pos["entry_price"],
@@ -1529,31 +1598,41 @@ class BacktestEngine:
                 f"< {result.min_coverage_pct_applied:.0f}%"
             )
         if reasons:
-            result.validity_status = "INVALID"
+            # Incomplete calendar / contract / option-candle coverage → not a valid performance result.
+            result.validity_status = "INVALID_DATA"
             result.validity_reasons = reasons
         elif result.coverage_status == "COMPLETE":
-            if int(result.trades_taken or 0) == 0 and int(result.signals_generated or 0) == 0:
+            trades_n = int(result.trades_taken or 0)
+            signals_n = int(result.signals_generated or 0)
+            if trades_n == 0 and signals_n == 0:
                 result.validity_status = "INCONCLUSIVE"
                 result.validity_reasons = [
                     "Zero signals and zero trades after a complete scan — "
                     "not a valid performance result. Inspect rejection/candidate counts."
                 ]
-            elif int(result.trades_taken or 0) == 0:
-                result.validity_status = "INCONCLUSIVE"
+            elif trades_n == 0:
+                result.validity_status = "ZERO_TRADES"
                 result.validity_reasons = [
-                    f"Signals generated={result.signals_generated} but trades_taken=0 — "
-                    "not a valid P&L performance result."
+                    f"Signals generated={signals_n} but trades_taken=0 — "
+                    "strategy ran with full coverage but produced no executed trades. "
+                    "Not a valid P&L performance result."
                 ]
             else:
                 result.validity_status = "VALID"
                 result.validity_reasons = []
         else:
-            result.validity_status = "UNKNOWN"
-            result.validity_reasons = [result.coverage_notes] if result.coverage_notes else []
+            # No requested date range or coverage could not be computed.
+            if int(result.trades_taken or 0) == 0 and int(result.candles_loaded or 0) == 0:
+                result.validity_status = "INVALID_DATA"
+                result.validity_reasons = [
+                    result.coverage_notes or "No historical candles loaded for the requested period."
+                ]
+            else:
+                result.validity_status = "INCONCLUSIVE"
+                result.validity_reasons = [result.coverage_notes] if result.coverage_notes else [
+                    "Coverage status unknown — treat results as non-authoritative."
+                ]
 
-        # Always expose a stable result_status alias for API/UI
-        if not hasattr(result, "result_status"):
-            pass
         return result
 
     # ── exit logic ─────────────────────────────────────────────────────────

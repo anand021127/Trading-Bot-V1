@@ -23,7 +23,18 @@ router = APIRouter()
 # bot_control.py) so we reuse the same UpstoxClient/strategy instances
 # rather than constructing a new one per request.
 _engine_ref: Any = None
-_standalone_strategy_engine = MultiStrategyEngine()  # fallback if no TradingEngine yet
+_standalone_strategy_engine: Any = None  # lazy; never silent OPTION_PREMIUM
+
+
+def _standalone_engine() -> MultiStrategyEngine:
+    from backend.config.settings import load_settings
+    from backend.config.strategy_registry import load_strategy, StrategySelectionError
+
+    name = (getattr(load_settings().strategy, "name", "") or "").strip() or "V8_D_PULLBACK_ATM"
+    try:
+        return MultiStrategyEngine(strategies=[load_strategy(name)])
+    except StrategySelectionError:
+        return MultiStrategyEngine(strategies=[load_strategy("V8_D_PULLBACK_ATM")])
 
 
 def set_engine(engine: Any) -> None:
@@ -33,7 +44,13 @@ def set_engine(engine: Any) -> None:
 
 @router.get("/list")
 async def list_strategies() -> Dict[str, Any]:
-    engine = _engine_ref.strategy_engine if _engine_ref else _standalone_strategy_engine
+    global _standalone_strategy_engine
+    if _engine_ref is not None and getattr(_engine_ref, "strategy_engine", None) is not None:
+        engine = _engine_ref.strategy_engine
+    else:
+        if _standalone_strategy_engine is None:
+            _standalone_strategy_engine = _standalone_engine()
+        engine = _standalone_strategy_engine
     return {"strategies": engine.enabled_names()}
 
 

@@ -28,10 +28,13 @@ class MultiStrategyEngine:
         if strategies is not None:
             self.strategies: List[Strategy] = list(strategies)
         else:
-            # Lazy-load OPTION_PREMIUM only when the multi-strategy default
-            # registry is constructed — not at module import time.
-            from backend.strategy.strategies.option_premium import OptionPremiumStrategy
-            self.strategies = [OptionPremiumStrategy()]
+            # No silent default to OPTION_PREMIUM. Callers (backtest/paper/live)
+            # must pass an explicit strategy list built via strategy_registry.
+            self.strategies = []
+            logger.warning(
+                "MultiStrategyEngine constructed with empty strategy list — "
+                "no strategies will evaluate until load_strategies is used."
+            )
 
     def enabled_names(self) -> List[str]:
         return [s.name for s in self.strategies]
