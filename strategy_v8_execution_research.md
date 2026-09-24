@@ -1,9 +1,9 @@
 # STRATEGY V8 — OPTION CONTRACT & EXECUTION ARCHITECTURE RESEARCH REPORT
 
-**Research Date:** 2026-08-15 12:00:26
-**Underlying Entry Control:** V7-G Pullback Retest + Reversal Candle Confirmation (Identical across all variants)
-**Development Period:** 2024-01-01 to 2024-06-30
-**Untouched Validation Period:** 2024-07-01 to 2024-11-06
+**Research Date:** 2026-08-15 12:00:26  
+**Underlying Entry Control:** V7-G Pullback Retest + Reversal Candle Confirmation (Identical across all variants)  
+**Development Period:** 2024-01-01 to 2024-06-30  
+**Untouched Validation Period:** 2024-07-01 to 2024-11-06  
 **Execution Standard:** Next Candle Open, Real Expired Upstox Options (`require_real_options=True`), Portfolio Limit <= 3 trades/day.
 
 ---

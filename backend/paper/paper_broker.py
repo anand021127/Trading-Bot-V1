@@ -154,7 +154,57 @@ class PaperBroker:
             pos["unrealized_pnl"] = 0.0
         return pos
 
+    def restore_position(
+        self,
+        *,
+        instrument_key: str,
+        quantity: int,
+        average_price: float,
+        entry_time: str = "",
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Rehydrate an open position from the durable paper ledger (SQLite).
+
+        Used after process restart so PaperBroker matches SQLite without
+        placing a new order. Does not contact the real Upstox API.
+        """
+        meta = meta or {}
+        qty = int(quantity)
+        if qty == 0:
+            return
+        px = float(average_price)
+        self.positions[instrument_key] = {
+            "instrument_key": instrument_key,
+            "quantity": qty,
+            "average_price": px,
+            "entry_price": px,
+            "side": "BUY" if qty > 0 else "SELL",
+            "status": "OPEN",
+            "underlying": meta.get("underlying"),
+            "option_type": meta.get("option_type"),
+            "strike": meta.get("strike"),
+            "expiry": meta.get("expiry"),
+            "lot_size": int(meta.get("lot_size") or 0),
+            "stop_loss": float(meta.get("stop_loss") or 0),
+            "target": float(meta.get("target") or 0),
+            "trailing_stop": float(meta.get("trailing_stop") or meta.get("stop_loss") or 0),
+            "initial_stop": float(meta.get("stop_loss") or 0),
+            "highest_price": px,
+            "lowest_price": px,
+            "mark_price": px,
+            "entry_time": entry_time or meta.get("entry_time") or "",
+            "strategy": meta.get("strategy", "V8_D_PULLBACK_ATM"),
+            "trade_id": meta.get("trade_id", ""),
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "exit_reason": None,
+            "exit_price": None,
+            "exit_time": None,
+            "closed": False,
+        }
+
     def get_positions_with_details(self) -> List[dict]:
+
         if self.fail_get_positions:
             raise RuntimeError("paper_broker_unavailable")
         out = []

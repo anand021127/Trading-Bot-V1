@@ -104,6 +104,11 @@ class PaperTradingRuntime:
         self._closed_instruments: set = set()
         self.cost_model = CostConfig()
         self.trailing = TrailingStopManager()
+        # Recover durable paper positions into memory on startup (no Upstox call).
+        try:
+            self._hydrate_paper_broker_from_db()
+        except Exception as exc:
+            logger.warning("Paper startup hydrate deferred: %s", exc)
         self._pending_entry_meta: Dict[str, Any] = {}
         self._log_startup()
 
@@ -460,16 +465,105 @@ class PaperTradingRuntime:
         )
         return summary
 
+    def _hydrate_paper_broker_from_db(self) -> int:
+        """Restore PaperBroker open positions from the durable SQLite paper ledger.
+
+        Paper mode never consults real Upstox positions. After a worker/process
+        restart the in-memory PaperBroker is empty while SQLite still holds
+        confirmed paper fills — rehydrate so reconcile compares ledger↔broker
+        consistently without requiring a matching live Upstox position.
+        """
+        if not isinstance(self.broker, PaperBroker):
+            # Paper runtime must not use a live client as the position book.
+            logger.error(
+                "Paper reconcile refused non-PaperBroker client type=%s",
+                type(self.broker).__name__,
+            )
+            return 0
+        restored = 0
+        for pos in self.db.get_open_positions():
+            ik = (getattr(pos, "instrument_key", None) or pos.symbol or "").strip()
+            if not ik:
+                continue
+            qty = int(pos.quantity or 0)
+            if qty == 0:
+                continue
+            existing = self.broker.positions.get(ik)
+            if existing and not existing.get("closed") and int(existing.get("quantity") or 0) != 0:
+                continue  # already present in memory
+            entry_time = ""
+            if getattr(pos, "entry_time", None) is not None:
+                et = pos.entry_time
+                entry_time = et.isoformat() if hasattr(et, "isoformat") else str(et)
+            extra = getattr(pos, "extra", None) or {}
+            self.broker.restore_position(
+                instrument_key=ik,
+                quantity=qty,
+                average_price=float(pos.average_price or 0),
+                entry_time=entry_time,
+                meta={
+                    "strategy": self.env.get("strategy", "V8_D_PULLBACK_ATM"),
+                    **(extra if isinstance(extra, dict) else {}),
+                },
+            )
+            restored += 1
+        if restored:
+            logger.info("Paper ledger hydrate: restored %d position(s) into PaperBroker from SQLite", restored)
+        return restored
+
     def reconcile(self) -> Dict[str, Any]:
+        """Reconcile SQLite paper ledger ↔ in-memory PaperBroker only.
+
+        Never compares paper fills against the real Upstox position book.
+        Never places a real order. Genuine ledger↔PaperBroker mismatches and
+        broker API failures still raise STOP_NEW_ENTRIES.
+        """
+        if not isinstance(self.broker, PaperBroker):
+            self.kill.set_level("STOP_NEW_ENTRIES", "paper_broker_type_invalid")
+            return {
+                "ok": False,
+                "action": "STOP_NEW_ENTRIES",
+                "error": f"paper_requires_PaperBroker_got_{type(self.broker).__name__}",
+            }
+
+        # Recover durable paper positions into memory before comparing.
+        self._hydrate_paper_broker_from_db()
+
         book = fetch_positions(self.broker)
         if not book.ok:
+            self.kill.set_level("STOP_NEW_ENTRIES", "broker_positions_unavailable")
             return {"ok": False, "action": "STOP_NEW_ENTRIES", "error": book.error}
-        local = {p.symbol: p.quantity for p in self.db.get_open_positions()}
-        remote = {p["instrument_key"]: int(p["quantity"]) for p in book.positions}
-        if local != remote:
+
+        local = {p.symbol: int(p.quantity) for p in self.db.get_open_positions() if int(p.quantity or 0) != 0}
+        # Normalize keys: SQLite may use symbol == instrument_key for options
+        local_norm: Dict[str, int] = {}
+        for p in self.db.get_open_positions():
+            qty = int(p.quantity or 0)
+            if qty == 0:
+                continue
+            ik = (getattr(p, "instrument_key", None) or p.symbol or "").strip()
+            if ik:
+                local_norm[ik] = qty
+
+        remote = {
+            str(p["instrument_key"]): int(p["quantity"])
+            for p in book.positions
+            if int(p.get("quantity") or 0) != 0
+        }
+
+        if local_norm != remote:
             self.kill.set_level("STOP_NEW_ENTRIES", "position_mismatch")
-            return {"ok": False, "action": "STOP_NEW_ENTRIES", "local": local, "remote": remote}
-        return {"ok": True, "local": local, "remote": remote}
+            logger.warning(
+                "Paper position mismatch ledger=%s paper_broker=%s",
+                local_norm, remote,
+            )
+            return {
+                "ok": False,
+                "action": "STOP_NEW_ENTRIES",
+                "local": local_norm,
+                "remote": remote,
+            }
+        return {"ok": True, "local": local_norm, "remote": remote}
 
     def run_eod(self, now: Optional[datetime] = None, marks: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         """Square off remaining open paper positions at latest valid mark prices.
