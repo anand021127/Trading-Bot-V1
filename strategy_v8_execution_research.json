@@ -1,0 +1,2043 @@
+{
+  "metadata": {
+    "timestamp": "2026-08-15T12:00:25.999395",
+    "entry_control_architecture": "V7-G (Pullback Retest + Candle Reversal Confirmation at EMA fast)",
+    "development_period": "2024-01-01 to 2024-06-30",
+    "validation_period": "2024-07-01 to 2024-11-06",
+    "execution_model": "Conservative Next-Bar-Open (Model B)",
+    "total_evaluated_trades": 5873
+  },
+  "variants": {
+    "V8-A": {
+      "variant_name": "V8-A",
+      "description": "ATM Contract (Standard Baseline Control)",
+      "development_period": {
+        "total_trades": 340,
+        "wins": 267,
+        "losses": 73,
+        "win_rate": 78.53,
+        "gross_pnl": 262730.04,
+        "total_costs": 11688.59,
+        "net_pnl": 251041.57,
+        "net_profit_factor": 5.65,
+        "gross_profit_factor": 6.07,
+        "expectancy": 738.36,
+        "max_drawdown": 1.78,
+        "average_winner": 1142.63,
+        "average_loser": -740.27,
+        "max_consecutive_losses": 3,
+        "avg_holding_time": 62.4,
+        "stop_hit_rate": 4.41,
+        "target_hit_rate": 77.94,
+        "time_exit_rate": 17.65,
+        "mean_mfe": 99.03,
+        "mean_mae": -7.18,
+        "cost_per_trade": 34.38,
+        "avg_opt_und_ratio": 14.87,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 165,
+            "net_pnl": 121409.01,
+            "win_rate": 78.18,
+            "mean_mae": -6.44
+          },
+          "BANKNIFTY": {
+            "trades": 175,
+            "net_pnl": 129632.56,
+            "win_rate": 78.86,
+            "mean_mae": -7.88
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 180,
+            "net_pnl": 134409.26,
+            "win_rate": 77.22,
+            "mean_mae": -6.43
+          },
+          "PE": {
+            "trades": 160,
+            "net_pnl": 116632.31,
+            "win_rate": 80.0,
+            "mean_mae": -8.02
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 84,
+            "net_pnl": 59041.28,
+            "win_rate": 77.38,
+            "mean_mae": -12.1
+          },
+          "non_expiry_day": {
+            "trades": 256,
+            "net_pnl": 192000.29,
+            "win_rate": 78.91,
+            "mean_mae": -5.56
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 245,
+        "wins": 180,
+        "losses": 65,
+        "win_rate": 73.47,
+        "gross_pnl": 569346.16,
+        "total_costs": 27053.89,
+        "net_pnl": 542292.32,
+        "net_profit_factor": 5.59,
+        "gross_profit_factor": 6.1,
+        "expectancy": 2213.44,
+        "max_drawdown": 3.06,
+        "average_winner": 3668.54,
+        "average_loser": -1816.07,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 82.6,
+        "stop_hit_rate": 2.86,
+        "target_hit_rate": 71.84,
+        "time_exit_rate": 25.31,
+        "mean_mfe": 65.99,
+        "mean_mae": -6.84,
+        "cost_per_trade": 110.42,
+        "avg_opt_und_ratio": 14.25,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 124,
+            "net_pnl": 248392.31,
+            "win_rate": 69.35,
+            "mean_mae": -6.36
+          },
+          "BANKNIFTY": {
+            "trades": 121,
+            "net_pnl": 293900.01,
+            "win_rate": 77.69,
+            "mean_mae": -7.33
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 129,
+            "net_pnl": 282177.35,
+            "win_rate": 73.64,
+            "mean_mae": -6.44
+          },
+          "PE": {
+            "trades": 116,
+            "net_pnl": 260114.97,
+            "win_rate": 73.28,
+            "mean_mae": -7.28
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 46,
+            "net_pnl": 99508.48,
+            "win_rate": 78.26,
+            "mean_mae": -10.97
+          },
+          "non_expiry_day": {
+            "trades": 199,
+            "net_pnl": 442783.84,
+            "win_rate": 72.36,
+            "mean_mae": -5.88
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 585,
+        "wins": 447,
+        "losses": 138,
+        "win_rate": 76.41,
+        "gross_pnl": 832076.2,
+        "total_costs": 38742.48,
+        "net_pnl": 793333.89,
+        "net_profit_factor": 5.61,
+        "gross_profit_factor": 6.09,
+        "expectancy": 1356.13,
+        "max_drawdown": 1.91,
+        "average_winner": 2159.77,
+        "average_loser": -1246.99,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 70.8,
+        "stop_hit_rate": 3.76,
+        "target_hit_rate": 75.38,
+        "time_exit_rate": 20.85,
+        "mean_mfe": 85.19,
+        "mean_mae": -7.04,
+        "cost_per_trade": 66.23,
+        "avg_opt_und_ratio": 14.61,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 289,
+            "net_pnl": 369801.32,
+            "win_rate": 74.39,
+            "mean_mae": -6.41
+          },
+          "BANKNIFTY": {
+            "trades": 296,
+            "net_pnl": 423532.57,
+            "win_rate": 78.38,
+            "mean_mae": -7.65
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 309,
+            "net_pnl": 416586.61,
+            "win_rate": 75.73,
+            "mean_mae": -6.43
+          },
+          "PE": {
+            "trades": 276,
+            "net_pnl": 376747.28,
+            "win_rate": 77.17,
+            "mean_mae": -7.71
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 130,
+            "net_pnl": 158549.76,
+            "win_rate": 77.69,
+            "mean_mae": -11.7
+          },
+          "non_expiry_day": {
+            "trades": 455,
+            "net_pnl": 634784.13,
+            "win_rate": 76.04,
+            "mean_mae": -5.7
+          }
+        }
+      },
+      "classification": "A (PROMISING)"
+    },
+    "V8-B": {
+      "variant_name": "V8-B",
+      "description": "ITM1 Contract (1 Strike In-The-Money)",
+      "development_period": {
+        "total_trades": 343,
+        "wins": 218,
+        "losses": 125,
+        "win_rate": 63.56,
+        "gross_pnl": 35975.5,
+        "total_costs": 6953.21,
+        "net_pnl": 29022.42,
+        "net_profit_factor": 1.23,
+        "gross_profit_factor": 1.29,
+        "expectancy": 84.61,
+        "max_drawdown": 8.73,
+        "average_winner": 707.14,
+        "average_loser": -1001.08,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 33.3,
+        "stop_hit_rate": 33.53,
+        "target_hit_rate": 62.68,
+        "time_exit_rate": 3.79,
+        "mean_mfe": 70.91,
+        "mean_mae": -24.76,
+        "cost_per_trade": 20.27,
+        "avg_opt_und_ratio": 13.13,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 162,
+            "net_pnl": 10261.07,
+            "win_rate": 62.96,
+            "mean_mae": -23.6
+          },
+          "BANKNIFTY": {
+            "trades": 181,
+            "net_pnl": 18761.35,
+            "win_rate": 64.09,
+            "mean_mae": -25.8
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 179,
+            "net_pnl": 11286.13,
+            "win_rate": 63.13,
+            "mean_mae": -23.79
+          },
+          "PE": {
+            "trades": 164,
+            "net_pnl": 17736.29,
+            "win_rate": 64.02,
+            "mean_mae": -25.81
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 89,
+            "net_pnl": -8344.48,
+            "win_rate": 56.18,
+            "mean_mae": -36.65
+          },
+          "non_expiry_day": {
+            "trades": 254,
+            "net_pnl": 37366.9,
+            "win_rate": 66.14,
+            "mean_mae": -20.59
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 245,
+        "wins": 137,
+        "losses": 108,
+        "win_rate": 55.92,
+        "gross_pnl": 5180.14,
+        "total_costs": 5123.11,
+        "net_pnl": 57.08,
+        "net_profit_factor": 1.0,
+        "gross_profit_factor": 1.05,
+        "expectancy": 0.23,
+        "max_drawdown": 18.78,
+        "average_winner": 746.59,
+        "average_loser": -946.53,
+        "max_consecutive_losses": 6,
+        "avg_holding_time": 45.3,
+        "stop_hit_rate": 37.14,
+        "target_hit_rate": 53.88,
+        "time_exit_rate": 8.98,
+        "mean_mfe": 51.68,
+        "mean_mae": -24.38,
+        "cost_per_trade": 20.91,
+        "avg_opt_und_ratio": 32.17,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 125,
+            "net_pnl": -9448.65,
+            "win_rate": 51.2,
+            "mean_mae": -24.25
+          },
+          "BANKNIFTY": {
+            "trades": 120,
+            "net_pnl": 9505.73,
+            "win_rate": 60.83,
+            "mean_mae": -24.51
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 126,
+            "net_pnl": 1402.9,
+            "win_rate": 57.14,
+            "mean_mae": -23.99
+          },
+          "PE": {
+            "trades": 119,
+            "net_pnl": -1345.82,
+            "win_rate": 54.62,
+            "mean_mae": -24.79
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 49,
+            "net_pnl": -2064.69,
+            "win_rate": 55.1,
+            "mean_mae": -36.92
+          },
+          "non_expiry_day": {
+            "trades": 196,
+            "net_pnl": 2121.77,
+            "win_rate": 56.12,
+            "mean_mae": -21.24
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 588,
+        "wins": 355,
+        "losses": 233,
+        "win_rate": 60.37,
+        "gross_pnl": 41155.64,
+        "total_costs": 12076.32,
+        "net_pnl": 29079.5,
+        "net_profit_factor": 1.13,
+        "gross_profit_factor": 1.18,
+        "expectancy": 49.45,
+        "max_drawdown": 18.28,
+        "average_winner": 722.37,
+        "average_loser": -975.8,
+        "max_consecutive_losses": 9,
+        "avg_holding_time": 38.3,
+        "stop_hit_rate": 35.03,
+        "target_hit_rate": 59.01,
+        "time_exit_rate": 5.95,
+        "mean_mfe": 62.9,
+        "mean_mae": -24.6,
+        "cost_per_trade": 20.54,
+        "avg_opt_und_ratio": 21.06,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 287,
+            "net_pnl": 812.42,
+            "win_rate": 57.84,
+            "mean_mae": -23.88
+          },
+          "BANKNIFTY": {
+            "trades": 301,
+            "net_pnl": 28267.08,
+            "win_rate": 62.79,
+            "mean_mae": -25.28
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 305,
+            "net_pnl": 12689.03,
+            "win_rate": 60.66,
+            "mean_mae": -23.88
+          },
+          "PE": {
+            "trades": 283,
+            "net_pnl": 16390.47,
+            "win_rate": 60.07,
+            "mean_mae": -25.38
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 138,
+            "net_pnl": -10409.17,
+            "win_rate": 55.8,
+            "mean_mae": -36.75
+          },
+          "non_expiry_day": {
+            "trades": 450,
+            "net_pnl": 39488.67,
+            "win_rate": 61.78,
+            "mean_mae": -20.88
+          }
+        }
+      },
+      "classification": "B (RESEARCH CONTINUE)"
+    },
+    "V8-C": {
+      "variant_name": "V8-C",
+      "description": "ITM2 Contract (2 Strikes In-The-Money)",
+      "development_period": {
+        "total_trades": 339,
+        "wins": 205,
+        "losses": 134,
+        "win_rate": 60.47,
+        "gross_pnl": 14789.73,
+        "total_costs": 8187.9,
+        "net_pnl": 6601.88,
+        "net_profit_factor": 1.04,
+        "gross_profit_factor": 1.09,
+        "expectancy": 19.47,
+        "max_drawdown": 15.59,
+        "average_winner": 829.7,
+        "average_loser": -1220.05,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 38.0,
+        "stop_hit_rate": 37.46,
+        "target_hit_rate": 57.23,
+        "time_exit_rate": 5.31,
+        "mean_mfe": 51.2,
+        "mean_mae": -28.45,
+        "cost_per_trade": 24.15,
+        "avg_opt_und_ratio": 21.37,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 160,
+            "net_pnl": 17477.68,
+            "win_rate": 63.75,
+            "mean_mae": -26.95
+          },
+          "BANKNIFTY": {
+            "trades": 179,
+            "net_pnl": -10875.8,
+            "win_rate": 57.54,
+            "mean_mae": -29.8
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 176,
+            "net_pnl": 14377.96,
+            "win_rate": 63.07,
+            "mean_mae": -26.95
+          },
+          "PE": {
+            "trades": 163,
+            "net_pnl": -7776.08,
+            "win_rate": 57.67,
+            "mean_mae": -30.08
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 85,
+            "net_pnl": -10972.61,
+            "win_rate": 54.12,
+            "mean_mae": -39.85
+          },
+          "non_expiry_day": {
+            "trades": 254,
+            "net_pnl": 17574.49,
+            "win_rate": 62.6,
+            "mean_mae": -24.64
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 228,
+        "wins": 126,
+        "losses": 102,
+        "win_rate": 55.26,
+        "gross_pnl": -6103.83,
+        "total_costs": 5830.0,
+        "net_pnl": -11933.8,
+        "net_profit_factor": 0.9,
+        "gross_profit_factor": 0.95,
+        "expectancy": -52.34,
+        "max_drawdown": 22.57,
+        "average_winner": 883.53,
+        "average_loser": -1208.42,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 54.7,
+        "stop_hit_rate": 38.6,
+        "target_hit_rate": 52.63,
+        "time_exit_rate": 8.77,
+        "mean_mfe": 38.6,
+        "mean_mae": -28.12,
+        "cost_per_trade": 25.57,
+        "avg_opt_und_ratio": -0.92,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 119,
+            "net_pnl": -2618.84,
+            "win_rate": 56.3,
+            "mean_mae": -27.23
+          },
+          "BANKNIFTY": {
+            "trades": 109,
+            "net_pnl": -9314.96,
+            "win_rate": 54.13,
+            "mean_mae": -29.1
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 117,
+            "net_pnl": 478.05,
+            "win_rate": 57.26,
+            "mean_mae": -28.07
+          },
+          "PE": {
+            "trades": 111,
+            "net_pnl": -12411.85,
+            "win_rate": 53.15,
+            "mean_mae": -28.18
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 43,
+            "net_pnl": -2668.2,
+            "win_rate": 55.81,
+            "mean_mae": -41.53
+          },
+          "non_expiry_day": {
+            "trades": 185,
+            "net_pnl": -9265.6,
+            "win_rate": 55.14,
+            "mean_mae": -25.01
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 567,
+        "wins": 331,
+        "losses": 236,
+        "win_rate": 58.38,
+        "gross_pnl": 8685.9,
+        "total_costs": 14017.9,
+        "net_pnl": -5331.92,
+        "net_profit_factor": 0.98,
+        "gross_profit_factor": 1.03,
+        "expectancy": -9.4,
+        "max_drawdown": 30.51,
+        "average_winner": 850.19,
+        "average_loser": -1215.02,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 44.7,
+        "stop_hit_rate": 37.92,
+        "target_hit_rate": 55.38,
+        "time_exit_rate": 6.7,
+        "mean_mfe": 46.13,
+        "mean_mae": -28.32,
+        "cost_per_trade": 24.72,
+        "avg_opt_und_ratio": 12.4,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 279,
+            "net_pnl": 14858.84,
+            "win_rate": 60.57,
+            "mean_mae": -27.07
+          },
+          "BANKNIFTY": {
+            "trades": 288,
+            "net_pnl": -20190.76,
+            "win_rate": 56.25,
+            "mean_mae": -29.53
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 293,
+            "net_pnl": 14856.01,
+            "win_rate": 60.75,
+            "mean_mae": -27.39
+          },
+          "PE": {
+            "trades": 274,
+            "net_pnl": -20187.93,
+            "win_rate": 55.84,
+            "mean_mae": -29.31
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 128,
+            "net_pnl": -13640.81,
+            "win_rate": 54.69,
+            "mean_mae": -40.41
+          },
+          "non_expiry_day": {
+            "trades": 439,
+            "net_pnl": 8308.89,
+            "win_rate": 59.45,
+            "mean_mae": -24.79
+          }
+        }
+      },
+      "classification": "D (FAILED)"
+    },
+    "V8-D": {
+      "variant_name": "V8-D",
+      "description": "Fixed Percentage Option Stop (-20% Stop)",
+      "development_period": {
+        "total_trades": 340,
+        "wins": 267,
+        "losses": 73,
+        "win_rate": 78.53,
+        "gross_pnl": 305924.45,
+        "total_costs": 13705.41,
+        "net_pnl": 292219.17,
+        "net_profit_factor": 5.7,
+        "gross_profit_factor": 6.14,
+        "expectancy": 859.47,
+        "max_drawdown": 1.99,
+        "average_winner": 1327.53,
+        "average_loser": -852.47,
+        "max_consecutive_losses": 3,
+        "avg_holding_time": 62.2,
+        "stop_hit_rate": 4.41,
+        "target_hit_rate": 77.94,
+        "time_exit_rate": 17.65,
+        "mean_mfe": 99.03,
+        "mean_mae": -7.18,
+        "cost_per_trade": 40.31,
+        "avg_opt_und_ratio": 13.99,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 165,
+            "net_pnl": 140189.35,
+            "win_rate": 78.18,
+            "mean_mae": -6.44
+          },
+          "BANKNIFTY": {
+            "trades": 175,
+            "net_pnl": 152029.82,
+            "win_rate": 78.86,
+            "mean_mae": -7.88
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 180,
+            "net_pnl": 157689.73,
+            "win_rate": 77.22,
+            "mean_mae": -6.43
+          },
+          "PE": {
+            "trades": 160,
+            "net_pnl": 134529.44,
+            "win_rate": 80.0,
+            "mean_mae": -8.02
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 84,
+            "net_pnl": 70825.76,
+            "win_rate": 77.38,
+            "mean_mae": -12.1
+          },
+          "non_expiry_day": {
+            "trades": 256,
+            "net_pnl": 221393.41,
+            "win_rate": 78.91,
+            "mean_mae": -5.56
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 245,
+        "wins": 180,
+        "losses": 65,
+        "win_rate": 73.47,
+        "gross_pnl": 717232.48,
+        "total_costs": 33206.05,
+        "net_pnl": 684026.46,
+        "net_profit_factor": 5.78,
+        "gross_profit_factor": 6.3,
+        "expectancy": 2791.94,
+        "max_drawdown": 2.95,
+        "average_winner": 4595.15,
+        "average_loser": -2201.56,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 82.4,
+        "stop_hit_rate": 2.86,
+        "target_hit_rate": 71.84,
+        "time_exit_rate": 25.31,
+        "mean_mfe": 65.99,
+        "mean_mae": -6.84,
+        "cost_per_trade": 135.53,
+        "avg_opt_und_ratio": 14.0,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 124,
+            "net_pnl": 312689.0,
+            "win_rate": 69.35,
+            "mean_mae": -6.36
+          },
+          "BANKNIFTY": {
+            "trades": 121,
+            "net_pnl": 371337.46,
+            "win_rate": 77.69,
+            "mean_mae": -7.33
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 129,
+            "net_pnl": 357296.97,
+            "win_rate": 73.64,
+            "mean_mae": -6.44
+          },
+          "PE": {
+            "trades": 116,
+            "net_pnl": 326729.49,
+            "win_rate": 73.28,
+            "mean_mae": -7.28
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 46,
+            "net_pnl": 125592.67,
+            "win_rate": 78.26,
+            "mean_mae": -10.97
+          },
+          "non_expiry_day": {
+            "trades": 199,
+            "net_pnl": 558433.79,
+            "win_rate": 72.36,
+            "mean_mae": -5.88
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 585,
+        "wins": 447,
+        "losses": 138,
+        "win_rate": 76.41,
+        "gross_pnl": 1023156.93,
+        "total_costs": 46911.46,
+        "net_pnl": 976245.63,
+        "net_profit_factor": 5.75,
+        "gross_profit_factor": 6.25,
+        "expectancy": 1668.8,
+        "max_drawdown": 1.99,
+        "average_winner": 2643.35,
+        "average_loser": -1487.91,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 70.7,
+        "stop_hit_rate": 3.76,
+        "target_hit_rate": 75.38,
+        "time_exit_rate": 20.85,
+        "mean_mfe": 85.19,
+        "mean_mae": -7.04,
+        "cost_per_trade": 80.19,
+        "avg_opt_und_ratio": 13.99,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 289,
+            "net_pnl": 452878.35,
+            "win_rate": 74.39,
+            "mean_mae": -6.41
+          },
+          "BANKNIFTY": {
+            "trades": 296,
+            "net_pnl": 523367.28,
+            "win_rate": 78.38,
+            "mean_mae": -7.65
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 309,
+            "net_pnl": 514986.7,
+            "win_rate": 75.73,
+            "mean_mae": -6.43
+          },
+          "PE": {
+            "trades": 276,
+            "net_pnl": 461258.93,
+            "win_rate": 77.17,
+            "mean_mae": -7.71
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 130,
+            "net_pnl": 196418.43,
+            "win_rate": 77.69,
+            "mean_mae": -11.7
+          },
+          "non_expiry_day": {
+            "trades": 455,
+            "net_pnl": 779827.2,
+            "win_rate": 76.04,
+            "mean_mae": -5.7
+          }
+        }
+      },
+      "classification": "A (PROMISING)"
+    },
+    "V8-E": {
+      "variant_name": "V8-E",
+      "description": "Option ATR-based Stop (2.0x Option ATR)",
+      "development_period": {
+        "total_trades": 340,
+        "wins": 265,
+        "losses": 75,
+        "win_rate": 77.94,
+        "gross_pnl": 13895015.69,
+        "total_costs": 573435.17,
+        "net_pnl": 13321580.59,
+        "net_profit_factor": 9.68,
+        "gross_profit_factor": 11.65,
+        "expectancy": 39181.12,
+        "max_drawdown": 3.08,
+        "average_winner": 56060.71,
+        "average_loser": -20460.09,
+        "max_consecutive_losses": 3,
+        "avg_holding_time": 60.2,
+        "stop_hit_rate": 7.94,
+        "target_hit_rate": 77.65,
+        "time_exit_rate": 14.41,
+        "mean_mfe": 99.31,
+        "mean_mae": -7.17,
+        "cost_per_trade": 1686.57,
+        "avg_opt_und_ratio": 12.58,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 170,
+            "net_pnl": 6799459.04,
+            "win_rate": 74.71,
+            "mean_mae": -6.31
+          },
+          "BANKNIFTY": {
+            "trades": 170,
+            "net_pnl": 6522121.55,
+            "win_rate": 81.18,
+            "mean_mae": -8.03
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 181,
+            "net_pnl": 7891779.01,
+            "win_rate": 76.8,
+            "mean_mae": -6.38
+          },
+          "PE": {
+            "trades": 159,
+            "net_pnl": 5429801.58,
+            "win_rate": 79.25,
+            "mean_mae": -8.07
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 83,
+            "net_pnl": 2377530.22,
+            "win_rate": 79.52,
+            "mean_mae": -12.05
+          },
+          "non_expiry_day": {
+            "trades": 257,
+            "net_pnl": 10944050.37,
+            "win_rate": 77.43,
+            "mean_mae": -5.59
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 246,
+        "wins": 178,
+        "losses": 68,
+        "win_rate": 72.36,
+        "gross_pnl": 432229308.73,
+        "total_costs": 19475745.8,
+        "net_pnl": 412753563.02,
+        "net_profit_factor": 8.35,
+        "gross_profit_factor": 10.14,
+        "expectancy": 1677860.01,
+        "max_drawdown": 3.76,
+        "average_winner": 2634501.52,
+        "average_loser": -826289.82,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 76.8,
+        "stop_hit_rate": 8.13,
+        "target_hit_rate": 70.73,
+        "time_exit_rate": 21.14,
+        "mean_mfe": 65.81,
+        "mean_mae": -6.83,
+        "cost_per_trade": 79169.7,
+        "avg_opt_und_ratio": 8.12,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 124,
+            "net_pnl": 233791196.59,
+            "win_rate": 70.97,
+            "mean_mae": -6.31
+          },
+          "BANKNIFTY": {
+            "trades": 122,
+            "net_pnl": 178962366.43,
+            "win_rate": 73.77,
+            "mean_mae": -7.36
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 130,
+            "net_pnl": 209142188.07,
+            "win_rate": 71.54,
+            "mean_mae": -6.48
+          },
+          "PE": {
+            "trades": 116,
+            "net_pnl": 203611374.95,
+            "win_rate": 73.28,
+            "mean_mae": -7.23
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 46,
+            "net_pnl": 60230278.43,
+            "win_rate": 84.78,
+            "mean_mae": -10.84
+          },
+          "non_expiry_day": {
+            "trades": 200,
+            "net_pnl": 352523284.59,
+            "win_rate": 69.5,
+            "mean_mae": -5.91
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 586,
+        "wins": 443,
+        "losses": 143,
+        "win_rate": 75.6,
+        "gross_pnl": 446124324.42,
+        "total_costs": 20049180.97,
+        "net_pnl": 426075143.61,
+        "net_profit_factor": 8.38,
+        "gross_profit_factor": 10.18,
+        "expectancy": 727090.69,
+        "max_drawdown": 3.58,
+        "average_winner": 1092093.36,
+        "average_loser": -403651.85,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 67.2,
+        "stop_hit_rate": 8.02,
+        "target_hit_rate": 74.74,
+        "time_exit_rate": 17.24,
+        "mean_mfe": 85.25,
+        "mean_mae": -7.03,
+        "cost_per_trade": 34213.62,
+        "avg_opt_und_ratio": 10.7,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 294,
+            "net_pnl": 240590655.63,
+            "win_rate": 73.13,
+            "mean_mae": -6.31
+          },
+          "BANKNIFTY": {
+            "trades": 292,
+            "net_pnl": 185484487.98,
+            "win_rate": 78.08,
+            "mean_mae": -7.75
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 311,
+            "net_pnl": 217033967.08,
+            "win_rate": 74.6,
+            "mean_mae": -6.42
+          },
+          "PE": {
+            "trades": 275,
+            "net_pnl": 209041176.53,
+            "win_rate": 76.73,
+            "mean_mae": -7.71
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 129,
+            "net_pnl": 62607808.65,
+            "win_rate": 81.4,
+            "mean_mae": -11.62
+          },
+          "non_expiry_day": {
+            "trades": 457,
+            "net_pnl": 363467334.96,
+            "win_rate": 73.96,
+            "mean_mae": -5.73
+          }
+        }
+      },
+      "classification": "A (PROMISING)"
+    },
+    "V8-F": {
+      "variant_name": "V8-F",
+      "description": "Underlying Structure Stop (EMA Slow Breach)",
+      "development_period": {
+        "total_trades": 349,
+        "wins": 178,
+        "losses": 171,
+        "win_rate": 51.0,
+        "gross_pnl": 61353.76,
+        "total_costs": 6339.11,
+        "net_pnl": 55014.72,
+        "net_profit_factor": 2.1,
+        "gross_profit_factor": 2.31,
+        "expectancy": 157.64,
+        "max_drawdown": 2.92,
+        "average_winner": 589.57,
+        "average_loser": -291.98,
+        "max_consecutive_losses": 7,
+        "avg_holding_time": 15.8,
+        "stop_hit_rate": 51.0,
+        "target_hit_rate": 48.42,
+        "time_exit_rate": 0.57,
+        "mean_mfe": 101.1,
+        "mean_mae": -7.15,
+        "cost_per_trade": 18.16,
+        "avg_opt_und_ratio": 0.35,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 163,
+            "net_pnl": 27224.74,
+            "win_rate": 52.76,
+            "mean_mae": -6.44
+          },
+          "BANKNIFTY": {
+            "trades": 186,
+            "net_pnl": 27789.98,
+            "win_rate": 49.46,
+            "mean_mae": -7.77
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 181,
+            "net_pnl": 32607.95,
+            "win_rate": 50.83,
+            "mean_mae": -6.46
+          },
+          "PE": {
+            "trades": 168,
+            "net_pnl": 22406.77,
+            "win_rate": 51.19,
+            "mean_mae": -7.89
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 87,
+            "net_pnl": 4305.01,
+            "win_rate": 52.87,
+            "mean_mae": -11.96
+          },
+          "non_expiry_day": {
+            "trades": 262,
+            "net_pnl": 50709.71,
+            "win_rate": 50.38,
+            "mean_mae": -5.55
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 256,
+        "wins": 125,
+        "losses": 131,
+        "win_rate": 48.83,
+        "gross_pnl": 62432.99,
+        "total_costs": 6032.89,
+        "net_pnl": 56400.12,
+        "net_profit_factor": 2.48,
+        "gross_profit_factor": 2.77,
+        "expectancy": 220.31,
+        "max_drawdown": 2.68,
+        "average_winner": 756.32,
+        "average_loser": -291.14,
+        "max_consecutive_losses": 10,
+        "avg_holding_time": 23.1,
+        "stop_hit_rate": 53.91,
+        "target_hit_rate": 44.14,
+        "time_exit_rate": 1.95,
+        "mean_mfe": 67.16,
+        "mean_mae": -6.84,
+        "cost_per_trade": 23.57,
+        "avg_opt_und_ratio": -4.82,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 137,
+            "net_pnl": 31101.62,
+            "win_rate": 47.45,
+            "mean_mae": -6.18
+          },
+          "BANKNIFTY": {
+            "trades": 119,
+            "net_pnl": 25298.5,
+            "win_rate": 50.42,
+            "mean_mae": -7.61
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 131,
+            "net_pnl": 32833.85,
+            "win_rate": 52.67,
+            "mean_mae": -6.42
+          },
+          "PE": {
+            "trades": 125,
+            "net_pnl": 23566.27,
+            "win_rate": 44.8,
+            "mean_mae": -7.29
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 49,
+            "net_pnl": 10388.29,
+            "win_rate": 53.06,
+            "mean_mae": -10.92
+          },
+          "non_expiry_day": {
+            "trades": 207,
+            "net_pnl": 46011.83,
+            "win_rate": 47.83,
+            "mean_mae": -5.88
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 605,
+        "wins": 303,
+        "losses": 302,
+        "win_rate": 50.08,
+        "gross_pnl": 123786.75,
+        "total_costs": 12372.0,
+        "net_pnl": 111414.84,
+        "net_profit_factor": 2.27,
+        "gross_profit_factor": 2.5,
+        "expectancy": 184.16,
+        "max_drawdown": 2.92,
+        "average_winner": 658.36,
+        "average_loser": -291.61,
+        "max_consecutive_losses": 10,
+        "avg_holding_time": 18.9,
+        "stop_hit_rate": 52.23,
+        "target_hit_rate": 46.61,
+        "time_exit_rate": 1.16,
+        "mean_mfe": 86.74,
+        "mean_mae": -7.02,
+        "cost_per_trade": 20.45,
+        "avg_opt_und_ratio": -1.84,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 300,
+            "net_pnl": 58326.36,
+            "win_rate": 50.33,
+            "mean_mae": -6.32
+          },
+          "BANKNIFTY": {
+            "trades": 305,
+            "net_pnl": 53088.48,
+            "win_rate": 49.84,
+            "mean_mae": -7.71
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 312,
+            "net_pnl": 65441.8,
+            "win_rate": 51.6,
+            "mean_mae": -6.44
+          },
+          "PE": {
+            "trades": 293,
+            "net_pnl": 45973.04,
+            "win_rate": 48.46,
+            "mean_mae": -7.63
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 136,
+            "net_pnl": 14693.3,
+            "win_rate": 52.94,
+            "mean_mae": -11.58
+          },
+          "non_expiry_day": {
+            "trades": 469,
+            "net_pnl": 96721.54,
+            "win_rate": 49.25,
+            "mean_mae": -5.69
+          }
+        }
+      },
+      "classification": "A (PROMISING)"
+    },
+    "V8-G": {
+      "variant_name": "V8-G",
+      "description": "Hybrid Structure + Volatility Stop",
+      "development_period": {
+        "total_trades": 349,
+        "wins": 178,
+        "losses": 171,
+        "win_rate": 51.0,
+        "gross_pnl": 61353.76,
+        "total_costs": 6339.11,
+        "net_pnl": 55014.72,
+        "net_profit_factor": 2.1,
+        "gross_profit_factor": 2.31,
+        "expectancy": 157.64,
+        "max_drawdown": 2.92,
+        "average_winner": 589.57,
+        "average_loser": -291.98,
+        "max_consecutive_losses": 7,
+        "avg_holding_time": 15.8,
+        "stop_hit_rate": 51.0,
+        "target_hit_rate": 48.42,
+        "time_exit_rate": 0.57,
+        "mean_mfe": 101.1,
+        "mean_mae": -7.15,
+        "cost_per_trade": 18.16,
+        "avg_opt_und_ratio": 0.35,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 163,
+            "net_pnl": 27224.74,
+            "win_rate": 52.76,
+            "mean_mae": -6.44
+          },
+          "BANKNIFTY": {
+            "trades": 186,
+            "net_pnl": 27789.98,
+            "win_rate": 49.46,
+            "mean_mae": -7.77
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 181,
+            "net_pnl": 32607.95,
+            "win_rate": 50.83,
+            "mean_mae": -6.46
+          },
+          "PE": {
+            "trades": 168,
+            "net_pnl": 22406.77,
+            "win_rate": 51.19,
+            "mean_mae": -7.89
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 87,
+            "net_pnl": 4305.01,
+            "win_rate": 52.87,
+            "mean_mae": -11.96
+          },
+          "non_expiry_day": {
+            "trades": 262,
+            "net_pnl": 50709.71,
+            "win_rate": 50.38,
+            "mean_mae": -5.55
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 256,
+        "wins": 125,
+        "losses": 131,
+        "win_rate": 48.83,
+        "gross_pnl": 62432.99,
+        "total_costs": 6032.89,
+        "net_pnl": 56400.12,
+        "net_profit_factor": 2.48,
+        "gross_profit_factor": 2.77,
+        "expectancy": 220.31,
+        "max_drawdown": 2.68,
+        "average_winner": 756.32,
+        "average_loser": -291.14,
+        "max_consecutive_losses": 10,
+        "avg_holding_time": 23.1,
+        "stop_hit_rate": 53.91,
+        "target_hit_rate": 44.14,
+        "time_exit_rate": 1.95,
+        "mean_mfe": 67.16,
+        "mean_mae": -6.84,
+        "cost_per_trade": 23.57,
+        "avg_opt_und_ratio": -4.82,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 137,
+            "net_pnl": 31101.62,
+            "win_rate": 47.45,
+            "mean_mae": -6.18
+          },
+          "BANKNIFTY": {
+            "trades": 119,
+            "net_pnl": 25298.5,
+            "win_rate": 50.42,
+            "mean_mae": -7.61
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 131,
+            "net_pnl": 32833.85,
+            "win_rate": 52.67,
+            "mean_mae": -6.42
+          },
+          "PE": {
+            "trades": 125,
+            "net_pnl": 23566.27,
+            "win_rate": 44.8,
+            "mean_mae": -7.29
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 49,
+            "net_pnl": 10388.29,
+            "win_rate": 53.06,
+            "mean_mae": -10.92
+          },
+          "non_expiry_day": {
+            "trades": 207,
+            "net_pnl": 46011.83,
+            "win_rate": 47.83,
+            "mean_mae": -5.88
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 605,
+        "wins": 303,
+        "losses": 302,
+        "win_rate": 50.08,
+        "gross_pnl": 123786.75,
+        "total_costs": 12372.0,
+        "net_pnl": 111414.84,
+        "net_profit_factor": 2.27,
+        "gross_profit_factor": 2.5,
+        "expectancy": 184.16,
+        "max_drawdown": 2.92,
+        "average_winner": 658.36,
+        "average_loser": -291.61,
+        "max_consecutive_losses": 10,
+        "avg_holding_time": 18.9,
+        "stop_hit_rate": 52.23,
+        "target_hit_rate": 46.61,
+        "time_exit_rate": 1.16,
+        "mean_mfe": 86.74,
+        "mean_mae": -7.02,
+        "cost_per_trade": 20.45,
+        "avg_opt_und_ratio": -1.84,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 300,
+            "net_pnl": 58326.36,
+            "win_rate": 50.33,
+            "mean_mae": -6.32
+          },
+          "BANKNIFTY": {
+            "trades": 305,
+            "net_pnl": 53088.48,
+            "win_rate": 49.84,
+            "mean_mae": -7.71
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 312,
+            "net_pnl": 65441.8,
+            "win_rate": 51.6,
+            "mean_mae": -6.44
+          },
+          "PE": {
+            "trades": 293,
+            "net_pnl": 45973.04,
+            "win_rate": 48.46,
+            "mean_mae": -7.63
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 136,
+            "net_pnl": 14693.3,
+            "win_rate": 52.94,
+            "mean_mae": -11.58
+          },
+          "non_expiry_day": {
+            "trades": 469,
+            "net_pnl": 96721.54,
+            "win_rate": 49.25,
+            "mean_mae": -5.69
+          }
+        }
+      },
+      "classification": "A (PROMISING)"
+    },
+    "V8-H": {
+      "variant_name": "V8-H",
+      "description": "Profit Target Control (+10% Target)",
+      "development_period": {
+        "total_trades": 342,
+        "wins": 284,
+        "losses": 58,
+        "win_rate": 83.04,
+        "gross_pnl": 128251.41,
+        "total_costs": 8461.96,
+        "net_pnl": 119789.35,
+        "net_profit_factor": 4.34,
+        "gross_profit_factor": 4.72,
+        "expectancy": 350.26,
+        "max_drawdown": 1.87,
+        "average_winner": 547.91,
+        "average_loser": -617.56,
+        "max_consecutive_losses": 3,
+        "avg_holding_time": 47.8,
+        "stop_hit_rate": 4.09,
+        "target_hit_rate": 82.75,
+        "time_exit_rate": 13.16,
+        "mean_mfe": 102.8,
+        "mean_mae": -7.15,
+        "cost_per_trade": 24.74,
+        "avg_opt_und_ratio": 25.54,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 165,
+            "net_pnl": 58713.18,
+            "win_rate": 83.64,
+            "mean_mae": -6.39
+          },
+          "BANKNIFTY": {
+            "trades": 177,
+            "net_pnl": 61076.17,
+            "win_rate": 82.49,
+            "mean_mae": -7.85
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 181,
+            "net_pnl": 67266.54,
+            "win_rate": 83.43,
+            "mean_mae": -6.35
+          },
+          "PE": {
+            "trades": 161,
+            "net_pnl": 52522.81,
+            "win_rate": 82.61,
+            "mean_mae": -8.05
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 89,
+            "net_pnl": 28055.16,
+            "win_rate": 80.9,
+            "mean_mae": -11.75
+          },
+          "non_expiry_day": {
+            "trades": 253,
+            "net_pnl": 91734.19,
+            "win_rate": 83.79,
+            "mean_mae": -5.53
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 249,
+        "wins": 197,
+        "losses": 52,
+        "win_rate": 79.12,
+        "gross_pnl": 207964.34,
+        "total_costs": 13346.68,
+        "net_pnl": 194617.64,
+        "net_profit_factor": 5.6,
+        "gross_profit_factor": 6.22,
+        "expectancy": 781.6,
+        "max_drawdown": 2.59,
+        "average_winner": 1202.8,
+        "average_loser": -814.11,
+        "max_consecutive_losses": 2,
+        "avg_holding_time": 64.5,
+        "stop_hit_rate": 2.41,
+        "target_hit_rate": 79.12,
+        "time_exit_rate": 18.47,
+        "mean_mfe": 67.91,
+        "mean_mae": -6.65,
+        "cost_per_trade": 53.6,
+        "avg_opt_und_ratio": 18.13,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 126,
+            "net_pnl": 93724.48,
+            "win_rate": 76.98,
+            "mean_mae": -6.23
+          },
+          "BANKNIFTY": {
+            "trades": 123,
+            "net_pnl": 100893.16,
+            "win_rate": 81.3,
+            "mean_mae": -7.08
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 131,
+            "net_pnl": 103351.17,
+            "win_rate": 80.92,
+            "mean_mae": -6.35
+          },
+          "PE": {
+            "trades": 118,
+            "net_pnl": 91266.47,
+            "win_rate": 77.12,
+            "mean_mae": -6.99
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 47,
+            "net_pnl": 35990.35,
+            "win_rate": 85.11,
+            "mean_mae": -10.92
+          },
+          "non_expiry_day": {
+            "trades": 202,
+            "net_pnl": 158627.29,
+            "win_rate": 77.72,
+            "mean_mae": -5.66
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 591,
+        "wins": 481,
+        "losses": 110,
+        "win_rate": 81.39,
+        "gross_pnl": 336215.75,
+        "total_costs": 21808.64,
+        "net_pnl": 314406.99,
+        "net_profit_factor": 5.02,
+        "gross_profit_factor": 5.52,
+        "expectancy": 531.99,
+        "max_drawdown": 1.87,
+        "average_winner": 816.13,
+        "average_loser": -710.47,
+        "max_consecutive_losses": 3,
+        "avg_holding_time": 54.8,
+        "stop_hit_rate": 3.38,
+        "target_hit_rate": 81.22,
+        "time_exit_rate": 15.4,
+        "mean_mfe": 88.1,
+        "mean_mae": -6.94,
+        "cost_per_trade": 36.9,
+        "avg_opt_und_ratio": 22.42,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 291,
+            "net_pnl": 152437.66,
+            "win_rate": 80.76,
+            "mean_mae": -6.32
+          },
+          "BANKNIFTY": {
+            "trades": 300,
+            "net_pnl": 161969.33,
+            "win_rate": 82.0,
+            "mean_mae": -7.53
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 312,
+            "net_pnl": 170617.71,
+            "win_rate": 82.37,
+            "mean_mae": -6.35
+          },
+          "PE": {
+            "trades": 279,
+            "net_pnl": 143789.28,
+            "win_rate": 80.29,
+            "mean_mae": -7.6
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 136,
+            "net_pnl": 64045.51,
+            "win_rate": 82.35,
+            "mean_mae": -11.46
+          },
+          "non_expiry_day": {
+            "trades": 455,
+            "net_pnl": 250361.48,
+            "win_rate": 81.1,
+            "mean_mae": -5.59
+          }
+        }
+      },
+      "classification": "A (PROMISING)"
+    },
+    "V8-I": {
+      "variant_name": "V8-I",
+      "description": "Profit Target Control (+15% Target)",
+      "development_period": {
+        "total_trades": 340,
+        "wins": 267,
+        "losses": 73,
+        "win_rate": 78.53,
+        "gross_pnl": 262730.04,
+        "total_costs": 11688.59,
+        "net_pnl": 251041.57,
+        "net_profit_factor": 5.65,
+        "gross_profit_factor": 6.07,
+        "expectancy": 738.36,
+        "max_drawdown": 1.78,
+        "average_winner": 1142.63,
+        "average_loser": -740.27,
+        "max_consecutive_losses": 3,
+        "avg_holding_time": 62.4,
+        "stop_hit_rate": 4.41,
+        "target_hit_rate": 77.94,
+        "time_exit_rate": 17.65,
+        "mean_mfe": 99.03,
+        "mean_mae": -7.18,
+        "cost_per_trade": 34.38,
+        "avg_opt_und_ratio": 14.87,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 165,
+            "net_pnl": 121409.01,
+            "win_rate": 78.18,
+            "mean_mae": -6.44
+          },
+          "BANKNIFTY": {
+            "trades": 175,
+            "net_pnl": 129632.56,
+            "win_rate": 78.86,
+            "mean_mae": -7.88
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 180,
+            "net_pnl": 134409.26,
+            "win_rate": 77.22,
+            "mean_mae": -6.43
+          },
+          "PE": {
+            "trades": 160,
+            "net_pnl": 116632.31,
+            "win_rate": 80.0,
+            "mean_mae": -8.02
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 84,
+            "net_pnl": 59041.28,
+            "win_rate": 77.38,
+            "mean_mae": -12.1
+          },
+          "non_expiry_day": {
+            "trades": 256,
+            "net_pnl": 192000.29,
+            "win_rate": 78.91,
+            "mean_mae": -5.56
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 245,
+        "wins": 180,
+        "losses": 65,
+        "win_rate": 73.47,
+        "gross_pnl": 569346.16,
+        "total_costs": 27053.89,
+        "net_pnl": 542292.32,
+        "net_profit_factor": 5.59,
+        "gross_profit_factor": 6.1,
+        "expectancy": 2213.44,
+        "max_drawdown": 3.06,
+        "average_winner": 3668.54,
+        "average_loser": -1816.07,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 82.6,
+        "stop_hit_rate": 2.86,
+        "target_hit_rate": 71.84,
+        "time_exit_rate": 25.31,
+        "mean_mfe": 65.99,
+        "mean_mae": -6.84,
+        "cost_per_trade": 110.42,
+        "avg_opt_und_ratio": 14.25,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 124,
+            "net_pnl": 248392.31,
+            "win_rate": 69.35,
+            "mean_mae": -6.36
+          },
+          "BANKNIFTY": {
+            "trades": 121,
+            "net_pnl": 293900.01,
+            "win_rate": 77.69,
+            "mean_mae": -7.33
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 129,
+            "net_pnl": 282177.35,
+            "win_rate": 73.64,
+            "mean_mae": -6.44
+          },
+          "PE": {
+            "trades": 116,
+            "net_pnl": 260114.97,
+            "win_rate": 73.28,
+            "mean_mae": -7.28
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 46,
+            "net_pnl": 99508.48,
+            "win_rate": 78.26,
+            "mean_mae": -10.97
+          },
+          "non_expiry_day": {
+            "trades": 199,
+            "net_pnl": 442783.84,
+            "win_rate": 72.36,
+            "mean_mae": -5.88
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 585,
+        "wins": 447,
+        "losses": 138,
+        "win_rate": 76.41,
+        "gross_pnl": 832076.2,
+        "total_costs": 38742.48,
+        "net_pnl": 793333.89,
+        "net_profit_factor": 5.61,
+        "gross_profit_factor": 6.09,
+        "expectancy": 1356.13,
+        "max_drawdown": 1.91,
+        "average_winner": 2159.77,
+        "average_loser": -1246.99,
+        "max_consecutive_losses": 5,
+        "avg_holding_time": 70.8,
+        "stop_hit_rate": 3.76,
+        "target_hit_rate": 75.38,
+        "time_exit_rate": 20.85,
+        "mean_mfe": 85.19,
+        "mean_mae": -7.04,
+        "cost_per_trade": 66.23,
+        "avg_opt_und_ratio": 14.61,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 289,
+            "net_pnl": 369801.32,
+            "win_rate": 74.39,
+            "mean_mae": -6.41
+          },
+          "BANKNIFTY": {
+            "trades": 296,
+            "net_pnl": 423532.57,
+            "win_rate": 78.38,
+            "mean_mae": -7.65
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 309,
+            "net_pnl": 416586.61,
+            "win_rate": 75.73,
+            "mean_mae": -6.43
+          },
+          "PE": {
+            "trades": 276,
+            "net_pnl": 376747.28,
+            "win_rate": 77.17,
+            "mean_mae": -7.71
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 130,
+            "net_pnl": 158549.76,
+            "win_rate": 77.69,
+            "mean_mae": -11.7
+          },
+          "non_expiry_day": {
+            "trades": 455,
+            "net_pnl": 634784.13,
+            "win_rate": 76.04,
+            "mean_mae": -5.7
+          }
+        }
+      },
+      "classification": "A (PROMISING)"
+    },
+    "V8-J": {
+      "variant_name": "V8-J",
+      "description": "Profit Target Control (+20% Target)",
+      "development_period": {
+        "total_trades": 337,
+        "wins": 253,
+        "losses": 84,
+        "win_rate": 75.07,
+        "gross_pnl": 439266.78,
+        "total_costs": 15958.39,
+        "net_pnl": 423308.39,
+        "net_profit_factor": 5.74,
+        "gross_profit_factor": 6.12,
+        "expectancy": 1256.11,
+        "max_drawdown": 1.79,
+        "average_winner": 2026.03,
+        "average_loser": -1062.81,
+        "max_consecutive_losses": 3,
+        "avg_holding_time": 76.0,
+        "stop_hit_rate": 5.04,
+        "target_hit_rate": 72.7,
+        "time_exit_rate": 22.26,
+        "mean_mfe": 99.93,
+        "mean_mae": -7.31,
+        "cost_per_trade": 47.35,
+        "avg_opt_und_ratio": -7.24,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 163,
+            "net_pnl": 191124.0,
+            "win_rate": 73.62,
+            "mean_mae": -6.64
+          },
+          "BANKNIFTY": {
+            "trades": 174,
+            "net_pnl": 232184.39,
+            "win_rate": 76.44,
+            "mean_mae": -7.93
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 177,
+            "net_pnl": 225551.15,
+            "win_rate": 74.58,
+            "mean_mae": -6.72
+          },
+          "PE": {
+            "trades": 160,
+            "net_pnl": 197757.24,
+            "win_rate": 75.62,
+            "mean_mae": -7.95
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 83,
+            "net_pnl": 105238.02,
+            "win_rate": 75.9,
+            "mean_mae": -12.55
+          },
+          "non_expiry_day": {
+            "trades": 254,
+            "net_pnl": 318070.37,
+            "win_rate": 74.8,
+            "mean_mae": -5.59
+          }
+        }
+      },
+      "validation_period": {
+        "total_trades": 239,
+        "wins": 163,
+        "losses": 76,
+        "win_rate": 68.2,
+        "gross_pnl": 1204000.35,
+        "total_costs": 43875.28,
+        "net_pnl": 1160125.07,
+        "net_profit_factor": 5.72,
+        "gross_profit_factor": 6.16,
+        "expectancy": 4854.08,
+        "max_drawdown": 4.67,
+        "average_winner": 8624.17,
+        "average_loser": -3231.78,
+        "max_consecutive_losses": 9,
+        "avg_holding_time": 97.6,
+        "stop_hit_rate": 3.35,
+        "target_hit_rate": 66.11,
+        "time_exit_rate": 30.54,
+        "mean_mfe": 67.34,
+        "mean_mae": -6.73,
+        "cost_per_trade": 183.58,
+        "avg_opt_und_ratio": 32.3,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 121,
+            "net_pnl": 558416.03,
+            "win_rate": 66.12,
+            "mean_mae": -6.23
+          },
+          "BANKNIFTY": {
+            "trades": 118,
+            "net_pnl": 601709.04,
+            "win_rate": 70.34,
+            "mean_mae": -7.25
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 124,
+            "net_pnl": 610375.79,
+            "win_rate": 69.35,
+            "mean_mae": -6.33
+          },
+          "PE": {
+            "trades": 115,
+            "net_pnl": 549749.28,
+            "win_rate": 66.96,
+            "mean_mae": -7.17
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 46,
+            "net_pnl": 225289.53,
+            "win_rate": 71.74,
+            "mean_mae": -10.39
+          },
+          "non_expiry_day": {
+            "trades": 193,
+            "net_pnl": 934835.54,
+            "win_rate": 67.36,
+            "mean_mae": -5.86
+          }
+        }
+      },
+      "full_period": {
+        "total_trades": 576,
+        "wins": 416,
+        "losses": 160,
+        "win_rate": 72.22,
+        "gross_pnl": 1643267.13,
+        "total_costs": 59833.67,
+        "net_pnl": 1583433.46,
+        "net_profit_factor": 5.73,
+        "gross_profit_factor": 6.15,
+        "expectancy": 2749.02,
+        "max_drawdown": 2.56,
+        "average_winner": 4611.36,
+        "average_loser": -2093.07,
+        "max_consecutive_losses": 9,
+        "avg_holding_time": 85.0,
+        "stop_hit_rate": 4.34,
+        "target_hit_rate": 69.97,
+        "time_exit_rate": 25.69,
+        "mean_mfe": 86.41,
+        "mean_mae": -7.07,
+        "cost_per_trade": 103.88,
+        "avg_opt_und_ratio": 9.17,
+        "by_underlying": {
+          "NIFTY50": {
+            "trades": 284,
+            "net_pnl": 749540.03,
+            "win_rate": 70.42,
+            "mean_mae": -6.46
+          },
+          "BANKNIFTY": {
+            "trades": 292,
+            "net_pnl": 833893.43,
+            "win_rate": 73.97,
+            "mean_mae": -7.66
+          }
+        },
+        "by_option_type": {
+          "CE": {
+            "trades": 301,
+            "net_pnl": 835926.94,
+            "win_rate": 72.43,
+            "mean_mae": -6.56
+          },
+          "PE": {
+            "trades": 275,
+            "net_pnl": 747506.52,
+            "win_rate": 72.0,
+            "mean_mae": -7.62
+          }
+        },
+        "by_expiry_day": {
+          "expiry_day": {
+            "trades": 129,
+            "net_pnl": 330527.55,
+            "win_rate": 74.42,
+            "mean_mae": -11.78
+          },
+          "non_expiry_day": {
+            "trades": 447,
+            "net_pnl": 1252905.91,
+            "win_rate": 71.59,
+            "mean_mae": -5.71
+          }
+        }
+      },
+      "classification": "A (PROMISING)"
+    }
+  },
+  "final_decision": "CANDIDATE IDENTIFIED FOR FORENSIC VALIDATION"
+}

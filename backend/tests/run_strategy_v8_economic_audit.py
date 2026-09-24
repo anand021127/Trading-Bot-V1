@@ -36,6 +36,11 @@ import random
 from datetime import datetime
 from typing import Dict, List, Any, Tuple
 
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 DEV_END_DATE = "2024-06-30"
@@ -59,8 +64,8 @@ def run_v8_economic_audit():
     print("STRATEGY V8 — ECONOMIC SANITY & POSITION-SIZING AUDIT")
     print("=" * 80)
 
-    json_path = "strategy_v8_execution_research.json"
-    csv_path = "strategy_v8_execution_research.csv"
+    json_path = os.path.join(ROOT_DIR, "strategy_v8_execution_research.json")
+    csv_path = os.path.join(ROOT_DIR, "strategy_v8_execution_research.csv")
 
     if not os.path.exists(json_path) or not os.path.exists(csv_path):
         raise FileNotFoundError(f"Required research files {json_path} or {csv_path} not found.")
@@ -854,13 +859,13 @@ def run_v8_economic_audit():
 
     # Save outputs
     # 1. JSON
-    audit_json_file = "strategy_v8_economic_audit.json"
+    audit_json_file = os.path.join(ROOT_DIR, "strategy_v8_economic_audit.json")
     with open(audit_json_file, "w") as fp:
         json.dump(audit_results, fp, indent=2)
     print(f"Written {audit_json_file}")
 
     # 2. CSV
-    audit_csv_file = "strategy_v8_economic_audit.csv"
+    audit_csv_file = os.path.join(ROOT_DIR, "strategy_v8_economic_audit.csv")
     with open(audit_csv_file, "w", newline="") as fp:
         fieldnames = [
             "variant", "trade_number", "date", "period", "underlying", "option_type",
@@ -997,9 +1002,9 @@ def generate_economic_audit_markdown(audit_data: Dict[str, Any]):
 - **Action:** Live trading code remains strictly unmodified. Position sizing architecture must be updated to enforce strict dual-constraint position sizing (`min(risk_based_lots, capital_allocation_lots)`) before any future paper trading consideration.
 """
 
-    with open("strategy_v8_economic_audit.md", "w") as fp:
+    with open(os.path.join(ROOT_DIR, "strategy_v8_economic_audit.md"), "w") as fp:
         fp.write(md)
-    print("Written strategy_v8_economic_audit.md")
+    print(f"Written {os.path.join(ROOT_DIR, 'strategy_v8_economic_audit.md')}")
 
 
 if __name__ == "__main__":

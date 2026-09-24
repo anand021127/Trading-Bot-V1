@@ -33,6 +33,13 @@ _empty_opt = os.path.join(_shm, "empty_options_cache")
 os.makedirs(_empty_opt, exist_ok=True)
 os.environ.setdefault("HISTORICAL_OPTIONS_CACHE_DIR", _empty_opt)
 
+# Reset in-memory verified token so prior process state cannot leak into the suite.
+try:
+    from backend.broker.token_resolver import clear_verified_runtime_token as _clear_vrt
+    _clear_vrt()
+except Exception:
+    pass
+
 from unittest.mock import patch, MagicMock
 
 # Ensure root is in path
@@ -177,7 +184,26 @@ def discover_and_run_all() -> bool:
         f"{len(bare_function_tests)} standalone test functions."
     )
 
-    runner = unittest.TextTestRunner(verbosity=1)
+    class _IsolatingResult(unittest.TextTestResult):
+        """Clear verified runtime token before each test to prevent cross-module leakage."""
+
+        def startTest(self, test):
+            try:
+                from backend.broker.token_resolver import clear_verified_runtime_token
+                clear_verified_runtime_token()
+            except Exception:
+                pass
+            super().startTest(test)
+
+        def stopTest(self, test):
+            super().stopTest(test)
+            try:
+                from backend.broker.token_resolver import clear_verified_runtime_token
+                clear_verified_runtime_token()
+            except Exception:
+                pass
+
+    runner = unittest.TextTestRunner(verbosity=1, resultclass=_IsolatingResult)
     result = runner.run(suite)
 
     bare_passed = 0

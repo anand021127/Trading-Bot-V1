@@ -66,3 +66,16 @@ models/
 /v9_*.csv
 /walk_forward*.json
 /metadata.json
+
+# Derived Strategy V8 research audit outputs
+strategy_v8_capital_reconciliation.json
+strategy_v8_capital_reconciliation.csv
+strategy_v8_capital_reconciliation.md
+strategy_v8_economic_audit.json
+strategy_v8_economic_audit.csv
+strategy_v8_economic_audit.md
+
+# Required source research input used by V8 QA generators
+!/strategy_v8_execution_research.csv
+!/strategy_v8_execution_research.json
+!/strategy_v8_execution_research.md

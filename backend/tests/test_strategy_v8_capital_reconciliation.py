@@ -10,23 +10,69 @@ Validates:
 7. 1,000-reshuffle Monte Carlo correctness and distributional consistency
 8. V8-D sub-segment breakdown integrity (Underlying, Option Type, Expiry Day, Monthly)
 9. Final Governance Verdict
+
+QA architecture:
+- Derived research artifacts are generated deterministically from
+  strategy_v8_execution_research.csv by run_strategy_v8_capital_reconciliation.py.
+- Tests must not fail merely because derived outputs were not packaged/deployed.
+- If artifacts are missing, setUpClass invokes the generator when the source
+  research CSV is present. If the source is also absent, the suite is skipped
+  with an explicit prerequisite message (never dummy/empty files).
 """
 import os
+import sys
 import json
 import csv
 import unittest
 
 
+def _repo_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 class TestStrategyV8CapitalReconciliation(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):
-        cls.json_path = "strategy_v8_capital_reconciliation.json"
-        cls.csv_path = "strategy_v8_capital_reconciliation.csv"
-        cls.md_path = "strategy_v8_capital_reconciliation.md"
+    def _ensure_artifacts(cls) -> None:
+        """Generate reconciliation artifacts if missing, using the deterministic generator."""
+        root = _repo_root()
+        src_csv = os.path.join(root, "strategy_v8_execution_research.csv")
+        if not os.path.isfile(src_csv):
+            raise unittest.SkipTest(
+                "Prerequisite research artifact strategy_v8_execution_research.csv is absent. "
+                "Deploy research outputs or run the execution-research pipeline before this audit."
+            )
+        # Ensure generator writes under repo root (same paths the tests assert).
+        prev_cwd = os.getcwd()
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        try:
+            os.chdir(root)
+            from backend.tests.run_strategy_v8_capital_reconciliation import (
+                run_full_reconciliation_audit,
+            )
+            run_full_reconciliation_audit()
+        finally:
+            os.chdir(prev_cwd)
 
-        assert os.path.exists(cls.json_path), f"Missing {cls.json_path}"
-        assert os.path.exists(cls.csv_path), f"Missing {cls.csv_path}"
-        assert os.path.exists(cls.md_path), f"Missing {cls.md_path}"
+        for path in (cls.json_path, cls.csv_path, cls.md_path):
+            if not os.path.isfile(path):
+                raise AssertionError(
+                    f"Generator completed but expected artifact still missing: {path}"
+                )
+
+    @classmethod
+    def setUpClass(cls):
+        root = _repo_root()
+        cls.json_path = os.path.join(root, "strategy_v8_capital_reconciliation.json")
+        cls.csv_path = os.path.join(root, "strategy_v8_capital_reconciliation.csv")
+        cls.md_path = os.path.join(root, "strategy_v8_capital_reconciliation.md")
+
+        if not (
+            os.path.isfile(cls.json_path)
+            and os.path.isfile(cls.csv_path)
+            and os.path.isfile(cls.md_path)
+        ):
+            cls._ensure_artifacts()
 
         with open(cls.json_path, "r") as fp:
             cls.recon_json = json.load(fp)
@@ -52,7 +98,7 @@ class TestStrategyV8CapitalReconciliation(unittest.TestCase):
     def test_03_v8a_reconciliation_exact_math(self):
         """Verify V8-A validation results across all 4 models."""
         val_m = self.recon_json["validation_period_reconciliation"]["V8-A"]
-        
+
         # Model 1 (Unconstrained)
         m1 = val_m["MODEL_1"]
         self.assertEqual(m1["trades_count"], 245)
@@ -70,7 +116,7 @@ class TestStrategyV8CapitalReconciliation(unittest.TestCase):
     def test_04_v8d_reconciliation_exact_math(self):
         """Verify V8-D validation results across all 4 models."""
         val_m = self.recon_json["validation_period_reconciliation"]["V8-D"]
-        
+
         # Model 1
         m1 = val_m["MODEL_1"]
         self.assertEqual(m1["trades_count"], 245)
@@ -100,7 +146,7 @@ class TestStrategyV8CapitalReconciliation(unittest.TestCase):
         # Model 1 has astronomical position values and account risk %
         self.assertGreater(m1["max_position_value"], 100000000.0)
         self.assertGreater(m1["max_account_risk_pct"], 100.0)
-        
+
         # Model 4 strictly bounds sizing
         self.assertLessEqual(m4["max_position_value"], 20000.0)
         self.assertLessEqual(m4["max_account_risk_pct"], 3.01)
@@ -111,7 +157,7 @@ class TestStrategyV8CapitalReconciliation(unittest.TestCase):
         self.assertIn("V8-D", mc)
         v8d_mc = mc["V8-D"]
         self.assertEqual(v8d_mc["iterations"], 1000)
-        
+
         eq = v8d_mc["final_equity_distribution"]
         self.assertGreater(eq["median_50th"], 2000000.0)
         self.assertGreater(eq["5th_percentile"], 1900000.0)
@@ -120,7 +166,7 @@ class TestStrategyV8CapitalReconciliation(unittest.TestCase):
     def test_07_v8d_detailed_subsegment_breakdown(self):
         """Verify that V8-D sub-segment partitions sum to exactly 245 validation trades."""
         bk = self.recon_json.get("v8d_detailed_breakdown", {})
-        
+
         # Underlying breakdown
         nifty = bk["underlying_breakdown"]["NIFTY50"]
         banknifty = bk["underlying_breakdown"]["BANKNIFTY"]

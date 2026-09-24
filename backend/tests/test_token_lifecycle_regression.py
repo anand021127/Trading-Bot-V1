@@ -341,26 +341,156 @@ class TestTokenLifecycleRegression(unittest.TestCase):
             self.assertEqual(res_b["failure_classification"], "EXPIRED_OPTIONS_ENTITLEMENT_FAILURE")
 
     def test_dynamic_token_resolution_across_clients(self):
-        """Proves UpstoxClient and UpstoxExpiredOptionsClient dynamically reflect refreshed canonical tokens."""
+        """Proves dynamic resolution across clients with proper isolation from leaked verified state.
+
+        Coverage:
+        a) Clean environment + tok1 via env (no verified/DB/dotenv leakage)
+        b) Stale verified runtime state overridden by explicit test canonical setup
+        c) invalidate_old_token_references(tok1 -> tok2) propagates to non-explicit clients
+        d) Explicit access_token clients remain explicit and are not overwritten
+        """
         from backend.broker.upstox_client import UpstoxClient
-        from backend.broker.token_resolver import invalidate_old_token_references
+        from backend.broker.token_resolver import (
+            invalidate_old_token_references,
+            set_verified_runtime_token,
+            clear_verified_runtime_token,
+            get_verified_runtime_token,
+        )
 
         tok1 = _make_dummy_jwt({"user_id": "U1", "exp": 9999999999})
         tok2 = _make_dummy_jwt({"user_id": "U2", "exp": 9999999999})
+        stale = _make_dummy_jwt({"user_id": "U_STALE", "exp": 9999999999})
 
+        # Isolate resolver from persisted DB / dotenv / json so only env + runtime verified matter.
+        empty_db = DatabaseManager(db_path=self.db_path)
+        isolation = (
+            patch("backend.database.db_manager.DatabaseManager", return_value=empty_db),
+            patch("backend.broker.token_resolver.find_repo_dotenv_path", return_value=None),
+            patch(
+                "backend.broker.token_resolver.get_token_diagnostic_candidates",
+                side_effect=lambda explicit_token=None, dotenv_path=None: (
+                    # Rebuild candidates from runtime verified + env only (no disk leakage).
+                    _isolated_candidates(explicit_token)
+                ),
+            ),
+        )
+
+        def _isolated_candidates(explicit_token=None):
+            from backend.broker.token_resolver import (
+                get_verified_runtime_token as _gvt,
+                token_fingerprint as _fp,
+                decode_jwt_safe as _dj,
+            )
+            results = []
+            if explicit_token and str(explicit_token).strip():
+                tok = str(explicit_token).strip().strip("\"'").strip()
+                jwt = _dj(tok)
+                results.append({
+                    "source": "runtime (--token)",
+                    "source_key": "runtime",
+                    "token": tok,
+                    "fingerprint": _fp(tok),
+                    "length": len(tok),
+                    "is_jwt": jwt.get("is_jwt", False),
+                    "issued_at_iso": jwt.get("issued_at_iso"),
+                    "expires_at_iso": jwt.get("expires_at_iso"),
+                    "is_expired": jwt.get("is_expired"),
+                    "isPlusPlan": jwt.get("isPlusPlan", False),
+                    "verified": True,
+                    "rejection_reason": "ACTIVE_SELECTION",
+                })
+                return results
+            v_tok = _gvt()
+            if v_tok and v_tok.get("token"):
+                tok = v_tok["token"]
+                jwt = _dj(tok)
+                results.append({
+                    "source": v_tok.get("source", "runtime (verified)"),
+                    "source_key": "runtime",
+                    "token": tok,
+                    "fingerprint": _fp(tok),
+                    "length": len(tok),
+                    "is_jwt": jwt.get("is_jwt", False),
+                    "issued_at_iso": jwt.get("issued_at_iso"),
+                    "expires_at_iso": jwt.get("expires_at_iso"),
+                    "is_expired": jwt.get("is_expired"),
+                    "isPlusPlan": jwt.get("isPlusPlan", False) or v_tok.get("is_plus_plan", False),
+                    "verified": True,
+                    "rejection_reason": "ACTIVE_SELECTION",
+                })
+            env_token = (os.getenv("UPSTOX_ACCESS_TOKEN") or "").strip().strip("\"'").strip()
+            if env_token:
+                jwt = _dj(env_token)
+                results.append({
+                    "source": "environment (os.environ)",
+                    "source_key": "environment",
+                    "token": env_token,
+                    "fingerprint": _fp(env_token),
+                    "length": len(env_token),
+                    "is_jwt": jwt.get("is_jwt", False),
+                    "issued_at_iso": jwt.get("issued_at_iso"),
+                    "expires_at_iso": jwt.get("expires_at_iso"),
+                    "is_expired": jwt.get("is_expired"),
+                    "isPlusPlan": jwt.get("isPlusPlan", False),
+                    "verified": False,
+                    "rejection_reason": "EXPIRED" if jwt.get("is_expired") is True else None,
+                })
+            return results
+
+        # ---- (a) clean environment + tok1 ----
+        clear_verified_runtime_token()
         os.environ["UPSTOX_ACCESS_TOKEN"] = tok1
-        client = UpstoxClient()
-        expired_client = UpstoxExpiredOptionsClient(cache_dir=self.cache_dir)
+        with isolation[0], isolation[1], isolation[2]:
+            client = UpstoxClient()
+            expired_client = UpstoxExpiredOptionsClient(cache_dir=self.cache_dir)
+            self.assertEqual(client.access_token, tok1)
+            self.assertEqual(expired_client.access_token, tok1)
 
-        self.assertEqual(client.access_token, tok1)
-        self.assertEqual(expired_client.access_token, tok1)
+            # ---- (c) invalidate tok1 -> tok2 propagates to non-explicit clients ----
+            invalidate_old_token_references(tok2)
+            self.assertEqual(client.access_token, tok2)
+            self.assertEqual(expired_client.access_token, tok2)
+            self.assertEqual(os.environ.get("UPSTOX_ACCESS_TOKEN"), tok2)
+            v = get_verified_runtime_token()
+            self.assertIsNotNone(v)
+            self.assertEqual(v.get("token"), tok2)
 
-        # Invalidate old token and propagate new token
-        invalidate_old_token_references(tok2)
+        # ---- (b) existing stale verified runtime + explicit test setup ----
+        clear_verified_runtime_token()
+        set_verified_runtime_token(
+            stale,
+            {"source": "runtime (stale verified)", "verified_at": "2020-01-01T00:00:00Z"},
+        )
+        os.environ["UPSTOX_ACCESS_TOKEN"] = tok1  # env alone must NOT beat verified
+        with isolation[0], isolation[1], isolation[2]:
+            # Production priority: verified runtime wins over arbitrary env
+            leaked_client = UpstoxClient()
+            self.assertEqual(leaked_client.access_token, stale)
 
-        self.assertEqual(client.access_token, tok2)
-        self.assertEqual(expired_client.access_token, tok2)
-        self.assertEqual(os.environ.get("UPSTOX_ACCESS_TOKEN"), tok2)
+            # Explicit test setup establishes tok1 as the new canonical verified token
+            invalidate_old_token_references(tok1)
+            setup_client = UpstoxClient()
+            setup_expired = UpstoxExpiredOptionsClient(cache_dir=self.cache_dir)
+            self.assertEqual(setup_client.access_token, tok1)
+            self.assertEqual(setup_expired.access_token, tok1)
+            self.assertEqual(os.environ.get("UPSTOX_ACCESS_TOKEN"), tok1)
+
+            # ---- (d) explicit access_token clients remain explicit ----
+            explicit_client = UpstoxClient(access_token=tok1)
+            explicit_expired = UpstoxExpiredOptionsClient(
+                access_token=tok1, cache_dir=self.cache_dir
+            )
+            self.assertEqual(explicit_client.access_token, tok1)
+            self.assertEqual(explicit_expired.access_token, tok1)
+
+            invalidate_old_token_references(tok2)
+            # Non-explicit clients pick up tok2
+            self.assertEqual(setup_client.access_token, tok2)
+            self.assertEqual(setup_expired.access_token, tok2)
+            # Explicit clients are NOT overwritten
+            self.assertEqual(explicit_client.access_token, tok1)
+            self.assertEqual(explicit_expired.access_token, tok1)
+            self.assertEqual(os.environ.get("UPSTOX_ACCESS_TOKEN"), tok2)
 
 
 if __name__ == "__main__":
