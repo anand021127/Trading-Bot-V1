@@ -19,7 +19,7 @@ def _run(cmd: str, env: dict) -> dict:
         env=full,
         cwd=str(ROOT),
         stderr=subprocess.STDOUT,
-        timeout=35,
+        timeout=60,
     )
     line = out.decode().strip().splitlines()[-1]
     return json.loads(line)

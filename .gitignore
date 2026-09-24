@@ -43,3 +43,26 @@ Thumbs.db
 *.swp
 
 .claude/
+
+# Local historical/research artifacts
+real_data/options_cache/
+real_data/options_cache_oos_clean/
+real_data/*.bak
+real_data/*.backup_*
+models/
+/*_audit.csv
+/*_audit.json
+/*_audit.md
+/*_research.csv
+/*_research.json
+/*_research.md
+/*_shadow_report.md
+/*_shadow_session.json
+/*_shadow_trades.csv
+/*_oos_*.csv
+/*_oos_*.json
+/*_oos_*.md
+/v8d_*.csv
+/v9_*.csv
+/walk_forward*.json
+/metadata.json

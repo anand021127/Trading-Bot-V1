@@ -137,6 +137,7 @@ class TestUpstoxExpiredOptions(unittest.TestCase):
                 "strike": 24500.0,
                 "option_type": "CE",
                 "instrument_key": "NSE_FO|NIFTY2462724500CE",
+                "lot_size": 65,
             },
             "candles": [
                 {"timestamp": "2024-06-25T09:15:00", "open": 180.0, "high": 195.0, "low": 175.0, "close": 190.0, "volume": 50000, "oi": 120000},

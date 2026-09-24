@@ -12,7 +12,7 @@ class ValidationResult:
     reasons: List[str] = field(default_factory=list)
 
 
-_NIFTY_LOTS = {25, 75}
+_NIFTY_LOTS = {25, 50, 65, 75}
 
 
 def validate_option_contract(
@@ -31,8 +31,9 @@ def validate_option_contract(
     stop_loss: float = 0.0,
 ) -> ValidationResult:
     reasons: List[str] = []
-    if not instrument_key or "NSE_FO" not in str(instrument_key):
-        reasons.append("instrument_key must be an NSE_FO option contract")
+    ik = str(instrument_key or "")
+    if not ik or ("NSE_FO" not in ik and "BSE_FO" not in ik):
+        reasons.append("instrument_key must be an NSE_FO or BSE_FO option contract")
     if option_type not in ("CE", "PE"):
         reasons.append("option_type must be CE or PE")
     if option_ltp is None or float(option_ltp) <= 0:
@@ -49,11 +50,13 @@ def validate_option_contract(
         reasons.append("expiry_date is invalid")
 
     und = (underlying or "").upper()
-    if "NIFTY" in und and "BANK" not in und:
-        if int(round(float(strike))) % 50 != 0:
+    if "NIFTY" in und and "BANK" not in und and "MIDCP" not in und and "FIN" not in und:
+        if strike and int(round(float(strike))) % 50 != 0:
             reasons.append("strike is not a valid NIFTY step of 50")
-        if int(lot_size) not in _NIFTY_LOTS:
-            reasons.append(f"lot size {lot_size} is not a valid NIFTY contract size {sorted(_NIFTY_LOTS)}")
+        # Prefer known NIFTY lots when present; still allow any positive metadata lot > 1
+        if lot_size and int(lot_size) > 1 and int(lot_size) not in _NIFTY_LOTS:
+            # Do not reject — exchange lot sizes change; metadata is authoritative
+            pass
     if not lot_size or int(lot_size) <= 1:
         reasons.append("lot size could not be resolved from contract metadata")
     if quantity and lot_size and int(quantity) % int(lot_size) != 0:

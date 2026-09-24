@@ -198,8 +198,9 @@ class HistoricalOptionsDataLoader:
     ) -> int:
         """Load candle list for a specific option contract."""
         norm_und = normalize_underlying(underlying)
-        if lot_size is None or lot_size <= 1:
-            lot_size = INDEX_LOT_SIZES.get(norm_und, 25)
+        # Contract metadata only — never invent exchange lot sizes.
+        if lot_size is None or int(lot_size) <= 1:
+            lot_size = 0
 
         self._contracts_metadata[instrument_key] = {
             "underlying": norm_und,
@@ -247,11 +248,7 @@ class HistoricalOptionsDataLoader:
             ls = self._contracts_metadata[contract_key].get("lot_size")
             if isinstance(ls, int) and ls > 1:
                 return ls
-        norm_und = normalize_underlying(underlying) if underlying else ""
-        if norm_und in INDEX_LOT_SIZES:
-            ls = INDEX_LOT_SIZES[norm_und]
-            if ls > 1:
-                return ls
+        # No INDEX_LOT_SIZES / hardcoded fallback — missing metadata => unresolved
         return None
 
     def load_from_directory(self, dir_path: str) -> int:
@@ -377,6 +374,15 @@ class HistoricalOptionsDataLoader:
                         contract_info_ref=resolved_info,
                     )
                     if ok and data and "candles" in data:
+                        meta_lot = 0
+                        try:
+                            meta_lot = int(
+                                (data.get("contract") or {}).get("lot_size")
+                                or resolved_info.get("lot_size")
+                                or 0
+                            )
+                        except (TypeError, ValueError):
+                            meta_lot = 0
                         self.load_contract_candles(
                             underlying=und_key,
                             expiry=exp_str,
@@ -384,6 +390,7 @@ class HistoricalOptionsDataLoader:
                             option_type=opt_type,
                             instrument_key=inst_key,
                             candles=data["candles"],
+                            lot_size=meta_lot if meta_lot > 1 else 0,
                         )
                         return inst_key, exp_str, resolved_strike, opt_type
             except Exception as e:
@@ -528,7 +535,7 @@ class HistoricalOptionsDataLoader:
                 "high": float(rec.high),
                 "low": float(rec.low),
                 "volume": float(rec.volume or 0),
-                "lot_size": meta.get("lot_size") or INDEX_LOT_SIZES.get(und_key, 25),
+                "lot_size": int(meta.get("lot_size") or 0),
                 "timestamp": rec.timestamp,
                 "option_atr": option_atr,
                 "atr": option_atr,

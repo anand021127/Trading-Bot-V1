@@ -432,6 +432,9 @@ class TestMultiSymbolBacktest(unittest.TestCase):
 
         loader.resolve_contract.side_effect = mock_resolve
         loader.get_candle_at.side_effect = mock_candle
+        loader.get_contract_lot_size.side_effect = lambda c_key, und=None, *a, **k: (
+            65 if "NIFTY" in str(c_key) and "BANK" not in str(c_key) else 15
+        )
 
         c1 = generate_candles("NIFTY50", count=25)
         c2 = generate_candles("BANKNIFTY", count=25)

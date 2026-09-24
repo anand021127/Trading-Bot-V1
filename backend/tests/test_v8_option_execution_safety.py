@@ -84,23 +84,45 @@ class TestV8OptionExecutionSafety(unittest.TestCase):
         self.assertTrue(any("stale" in r.lower() for r in res.reasons))
 
     def test_04_invalid_strike_or_lot_size_rejection(self):
-        """Verify rejection of off-step strike or wrong lot size."""
-        res = validate_option_contract(
+        """Verify rejection of off-step strike or unresolved/invalid lot size.
+
+        Lot size is authoritative from contract metadata (exchange sizes change:
+        25/50/65/75 are all valid NIFTY lots). Reject only when metadata is
+        missing or lot_size <= 1 — never hardcode a single allowed lot.
+        """
+        # Off-step strike must be rejected
+        res_strike = validate_option_contract(
             underlying="NIFTY50",
             instrument_key="NSE_FO|52341",
             strike=24123.0,  # Invalid strike for NIFTY (must be step 50)
             option_type="CE",
             expiry_date=self.valid_expiry,
-            lot_size=50,     # Wrong lot size (must be 25)
+            lot_size=65,  # Valid metadata lot (not rejected)
             option_ltp=145.50,
             underlying_spot=24115.0,
             account_equity=100000.0,
-            quantity=50,
+            quantity=65,
             stop_loss=116.40,
         )
-        self.assertFalse(res.is_valid)
-        self.assertTrue(any("strike" in r.lower() for r in res.reasons))
-        self.assertTrue(any("lot size" in r.lower() for r in res.reasons))
+        self.assertFalse(res_strike.is_valid)
+        self.assertTrue(any("strike" in r.lower() for r in res_strike.reasons))
+
+        # Missing / invalid lot_size (<=1) must be rejected
+        res_lot = validate_option_contract(
+            underlying="NIFTY50",
+            instrument_key="NSE_FO|52341",
+            strike=24100.0,
+            option_type="CE",
+            expiry_date=self.valid_expiry,
+            lot_size=1,  # Invalid — metadata unresolved
+            option_ltp=145.50,
+            underlying_spot=24115.0,
+            account_equity=100000.0,
+            quantity=1,
+            stop_loss=116.40,
+        )
+        self.assertFalse(res_lot.is_valid)
+        self.assertTrue(any("lot size" in r.lower() for r in res_lot.reasons))
 
     def test_05_shadow_engine_lifecycle(self):
         """Verify shadow engine opens position and correctly exits on target hit."""

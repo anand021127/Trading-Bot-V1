@@ -237,7 +237,7 @@ class TradingEngine:
         exit_manager: Optional[ExitManager] = None,
         telegram_alerts: Optional[TelegramAlerts] = None,
         email_alerts: Optional[EmailAlerts] = None,
-        strategy_name: str = "ORB_TREND_FOLLOWING",
+        strategy_name: str = "V8_D_PULLBACK_ATM",
     ) -> None:
         self.client = client or UpstoxClient()
         _mode = (settings.mode or "").lower()

@@ -90,10 +90,12 @@ class V8DStrategy(Strategy):
 
     @staticmethod
     def get_lot_size(underlying: str) -> int:
-        """Return standard exchange lot size."""
-        if "BANK" in underlying.upper():
-            return 15
-        return 25
+        """DEPRECATED — do not use for sizing.
+
+        Lot size must come from contract metadata only. This helper returns 0
+        so any accidental caller fails the lot_size <= 1 rejection path.
+        """
+        return 0
 
     def detect_pullback_signal(
         self,
@@ -318,7 +320,9 @@ class V8DStrategy(Strategy):
 
         # 3. Resolve ATM Option Contract
         atm_strike = self.get_atm_strike(spot_price, underlying_symbol)
-        lot_size = self.get_lot_size(underlying_symbol)
+        # Lot size comes from broker contract metadata after resolution.
+        # Hardcoded get_lot_size is NOT used when metadata is present.
+        lot_size = 0
 
         candidate_contract = None
         opt_u = (opt_type or "").upper()
@@ -370,6 +374,17 @@ class V8DStrategy(Strategy):
             sig.rejected_reasons = rejection_reasons
             sig.entry_reason = "NO TRADE — " + "; ".join(rejection_reasons)
             return sig, decision_log
+
+        # Contract metadata is the sole source of lot_size for sizing (no hardcoded fallback).
+        try:
+            lot_size = int(candidate_contract.get("lot_size") or 0)
+        except (TypeError, ValueError):
+            lot_size = 0
+        if lot_size <= 1:
+            rejection_reasons.append(
+                "INVALID_LOT_SIZE — contract metadata missing or invalid lot_size; "
+                "refusing hardcoded fallback"
+            )
 
         opt_ltp = float(candidate_contract.get("ltp") or candidate_contract.get("close_price") or 0.0)
         if opt_ltp <= 0.0:

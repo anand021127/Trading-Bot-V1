@@ -88,6 +88,7 @@ def test_real_options_data_layer_validation() -> None:
         option_type="CE",
         instrument_key="NSE_FO|NIFTY2462724500CE",
         candles=sample_candles,
+        lot_size=65,  # explicit contract metadata (no INDEX_LOT_SIZES fallback)
     )
 
     engine = BacktestEngine(min_candles_required=2)
@@ -212,6 +213,7 @@ def test_zero_synthetic_option_pricing_guarantee() -> None:
         option_type="CE",
         instrument_key="NSE_FO|NIFTY2462724500CE",
         candles=[{"timestamp": "2024-06-25T09:15:00", "open": 100.0, "high": 110.0, "low": 95.0, "close": 105.0, "volume": 5000}],
+        lot_size=65,
     )
 
     spot_candles = [

@@ -24,6 +24,11 @@ import backend.strategy.trading_engine as te_module
 
 
 class TestShutdownIdempotency(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        te_module.settings.mode = "paper"
+        os.environ["TRADING_MODE"] = "paper"
+        os.environ["TRADING_STRATEGY"] = "V8_D_PULLBACK_ATM"
     def setUp(self) -> None:
         # Reset shutdown PID state before each test
         with _shutdown_lock:

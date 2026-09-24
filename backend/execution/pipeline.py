@@ -1,4 +1,7 @@
-"""Shared Strategy → Signal → Risk → Contract → Execution pipeline."""
+"""Shared Strategy → Signal → Risk → Contract → Execution pipeline.
+
+Paper and any future live path must submit through this single gate.
+"""
 from __future__ import annotations
 
 import logging
@@ -36,6 +39,7 @@ class ExecutionPipeline:
         client: Any = None,
         token: Optional[str] = None,
         require_live_token: bool = False,
+        state_provider: Optional[Callable[[], dict]] = None,
     ) -> None:
         self.strategy = load_strategy(strategy_name)
         self.risk = risk
@@ -46,6 +50,15 @@ class ExecutionPipeline:
         self.require_live_token = require_live_token
         self.intents = IdempotentOrderStore(db)
         self.kill = PersistentKillSwitch(db)
+        self.state_provider = state_provider
+
+    def _state(self) -> dict:
+        if self.state_provider is not None:
+            try:
+                return dict(self.state_provider() or {})
+            except Exception as exc:
+                logger.warning("state_provider failed: %s", exc)
+        return {}
 
     def submit_signal(self, signal: dict) -> PipelineResult:
         if self.kill.blocks_entries():
@@ -56,9 +69,40 @@ class ExecutionPipeline:
             except TokenGuardError as exc:
                 return PipelineResult(False, str(exc))
 
+        # Strategy identity — refuse non-configured strategy payloads
+        payload_strategy = str(signal.get("strategy") or signal.get("strategy_name") or "").strip()
+        if payload_strategy and payload_strategy != self.strategy.name:
+            return PipelineResult(
+                False,
+                f"INVALID_STRATEGY — pipeline expects {self.strategy.name}, got {payload_strategy}",
+            )
+
         broker_book = fetch_positions(self.client) if self.client is not None else PositionsResult(True, [], None)
         if self.client is not None and not broker_book.ok:
             return PipelineResult(False, f"broker_positions_unavailable:{broker_book.error}")
+
+        state = self._state()
+        open_positions = int(state.get("open_positions") or 0)
+        trades_today = int(state.get("trades_today") or 0)
+        equity = float(state.get("equity") or self.risk.capital)
+        daily_realized = float(state.get("daily_realized_pnl") or 0.0)
+        daily_loss_pct = float(state.get("daily_loss_pct") or 0.0)
+
+        # Central risk limits with live state
+        if open_positions >= self.risk.max_positions:
+            return PipelineResult(False, "MAX_POSITIONS")
+        if trades_today >= self.risk.max_daily_trades:
+            return PipelineResult(False, "MAX_DAILY_TRADES")
+        if daily_loss_pct >= self.risk.max_daily_loss_pct - 1e-12 and daily_realized < 0:
+            return PipelineResult(False, "MAX_DAILY_LOSS")
+
+        # Duplicate underlying protection when broker positions available
+        underlying = str(signal.get("underlying") or "")
+        if underlying and self.client is not None and broker_book.ok:
+            for p in broker_book.positions:
+                # Paper broker details may include underlying
+                if str(p.get("underlying") or "") == underlying and int(p.get("quantity") or 0) != 0:
+                    return PipelineResult(False, "DUPLICATE_POSITION")
 
         sid = make_signal_id(
             strategy=self.strategy.name,
@@ -70,29 +114,52 @@ class ExecutionPipeline:
         if remembered["duplicate"]:
             return PipelineResult(False, "duplicate_signal", signal_id=sid)
 
+        lot_size = int(signal.get("lot_size") or 0)
+        quantity = int(signal.get("quantity") or 0)
+        if lot_size <= 1:
+            return PipelineResult(False, "INVALID_LOT_SIZE", signal_id=sid)
+        if quantity <= 0 or quantity % lot_size != 0:
+            return PipelineResult(False, "INVALID_QUANTITY", signal_id=sid)
+
+        premium = float(signal.get("premium") or 0)
+        if premium <= 0:
+            return PipelineResult(False, "INVALID_CONTRACT", signal_id=sid)
+
+        # Sufficient equity for notional
+        notional = premium * quantity
+        if equity > 0 and notional - equity > 1e-6:
+            return PipelineResult(False, "INSUFFICIENT_EQUITY", signal_id=sid)
+
         val = validate_option_contract(
             underlying=str(signal.get("underlying") or "NIFTY50"),
             instrument_key=str(signal.get("instrument_key") or ""),
             strike=float(signal.get("strike") or 0),
             option_type=str(signal.get("option_type") or "CE"),
             expiry_date=str(signal.get("expiry") or ""),
-            lot_size=int(signal.get("lot_size") or 0),
-            option_ltp=float(signal.get("premium") or 0),
+            lot_size=lot_size,
+            option_ltp=premium,
             underlying_spot=float(signal.get("spot") or 0),
             quote_age_seconds=float(signal.get("quote_age_seconds") or 0),
-            quantity=int(signal.get("quantity") or 0),
+            quantity=quantity,
             stop_loss=float(signal.get("stop_loss") or 0),
         )
         if not val.is_valid:
             logger.info("REJECT signal_id=%s reasons=%s", sid, val.reasons)
-            return PipelineResult(False, ";".join(val.reasons), signal_id=sid)
+            reason = ";".join(val.reasons)
+            if "lot size" in reason.lower():
+                return PipelineResult(False, f"INVALID_LOT_SIZE:{reason}", signal_id=sid)
+            return PipelineResult(False, f"INVALID_CONTRACT:{reason}", signal_id=sid)
 
         guard = evaluate_pretrade_guard(
-            premium=float(signal.get("premium") or 0),
+            premium=premium,
             stop_loss=float(signal.get("stop_loss") or 0),
-            quantity=int(signal.get("quantity") or 0),
-            lot_size=int(signal.get("lot_size") or 0),
+            quantity=quantity,
+            lot_size=lot_size,
             config=self.risk,
+            open_positions=open_positions,
+            trades_today=trades_today,
+            equity=equity,
+            daily_realized_pnl=daily_realized,
         )
         if not guard.allowed:
             logger.info("REJECT signal_id=%s reasons=%s", sid, guard.reasons)
@@ -109,12 +176,8 @@ class ExecutionPipeline:
         return PipelineResult(True, "submitted", signal_id=sid, order=order)
 
     def submit_exit(self, exit_signal: dict) -> PipelineResult:
-        """Controlled exit path. Entries may be blocked; exits still go through
-        intentional order placement with idempotency. FULL_SYSTEM_STOP still
-        allows flatten exits so positions can be closed.
-        """
+        """Controlled exit path. FULL_SYSTEM_STOP still allows flatten exits."""
         level = self.kill.level()
-        # Only block exits if we cannot trust state — use same broker check
         broker_book = fetch_positions(self.client) if self.client is not None else PositionsResult(True, [], None)
         if self.client is not None and not broker_book.ok:
             return PipelineResult(False, f"broker_positions_unavailable:{broker_book.error}")

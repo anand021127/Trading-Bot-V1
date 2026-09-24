@@ -139,6 +139,12 @@ class PaperWorker:
                 self._write_hb("reconcile_error", str(exc))
                 return
 
+        # Evaluate open paper positions against latest option marks (real quotes only)
+        try:
+            self._evaluate_open_exits()
+        except Exception:
+            logger.exception("Paper exit evaluation failed")
+
         # Market-driven V8-D scan (real Upstox data when scanner is armed)
         if self.scanner is not None:
             try:
@@ -215,7 +221,43 @@ class PaperWorker:
             logger.exception("Test signal failed")
 
 
+
+    def _evaluate_open_exits(self) -> None:
+        """Push latest option LTP into the paper exit engine for each open position."""
+        assert self.runtime is not None
+        positions = list(self.runtime.broker.positions.items())
+        if not positions:
+            return
+        client = getattr(self.scanner, "data", None)
+        client = getattr(client, "client", None) if client is not None else None
+        for ik, pos in positions:
+            if int(pos.get("quantity") or 0) <= 0:
+                continue
+            mark = None
+            if client is not None and hasattr(client, "get_ltp"):
+                try:
+                    mark = client.get_ltp(ik)
+                except Exception:
+                    mark = None
+            if mark is None and hasattr(client, "get_market_quote_ltp"):
+                try:
+                    q = client.get_market_quote_ltp([ik])
+                    if isinstance(q, dict):
+                        mark = q.get(ik) or (q.get("data") or {}).get(ik)
+                except Exception:
+                    mark = None
+            if mark is None:
+                continue
+            try:
+                mark_f = float(mark)
+            except (TypeError, ValueError):
+                continue
+            if mark_f <= 0:
+                continue
+            self.runtime.on_option_quote(ik, mark_f)
+
     def _init_market_scanner(self) -> None:
+
         """Attach Upstox-backed scanner when a token is available; else leave offline."""
         from backend.paper.market_scan_loop import PaperMarketScanner, UpstoxMarketDataSource
         token = os.environ.get("UPSTOX_ACCESS_TOKEN", "").strip()

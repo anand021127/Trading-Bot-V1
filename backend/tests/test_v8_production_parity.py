@@ -58,11 +58,9 @@ class TestV8ProductionParity(unittest.TestCase):
         self.assertEqual(self.strategy.get_atm_strike(51299.0, "BANKNIFTY"), 51300)
 
     def test_03_lot_size_parity(self):
-        """Verify historical and exchange lot sizes."""
-        self.assertEqual(self.strategy.get_lot_size("NIFTY50"), 25)
-        self.assertEqual(self.strategy.get_lot_size("NIFTY 50"), 25)
-        self.assertEqual(self.strategy.get_lot_size("BANKNIFTY"), 15)
-        self.assertEqual(self.strategy.get_lot_size("NIFTY BANK"), 15)
+        """get_lot_size must not invent lots — metadata is authoritative."""
+        self.assertEqual(self.strategy.get_lot_size("NIFTY50"), 0)
+        self.assertEqual(self.strategy.get_lot_size("BANKNIFTY"), 0)
 
     def test_04_v8d_stop_and_target_parity(self):
         """Verify production stop/target formulas (stop_loss_pct=0.28, target_pct=0.42)."""

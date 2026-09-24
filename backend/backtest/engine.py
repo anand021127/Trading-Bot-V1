@@ -36,7 +36,7 @@ from backend.backtest.historical_contract_resolver import (
     get_nearest_expiry_for_date,
     build_trading_symbol,
 )
-from backend.backtest.options_data_layer import HistoricalOptionsDataLoader, INDEX_STRIKE_INTERVALS, INDEX_LOT_SIZES
+from backend.backtest.options_data_layer import HistoricalOptionsDataLoader, INDEX_STRIKE_INTERVALS
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +217,7 @@ class BacktestTrade:
     strike: Optional[float] = None
     option_type: str = ""
     expiry: str = ""
-    lot_size: int = 25
+    lot_size: int = 0
     number_of_lots: int = 1
     instrument_type: str = "INDEX_OPTION"
     stop_loss: float = 0.0
@@ -803,8 +803,8 @@ class BacktestEngine:
                         strike=position.get("strike"),
                         option_type=position.get("option_type", ""),
                         expiry=position.get("expiry", ""),
-                        lot_size=position.get("lot_size", INDEX_LOT_SIZES.get(sym.upper(), 25)),
-                        number_of_lots=position.get("number_of_lots", max(1, qty // max(1, position.get("lot_size", 25)))),
+                        lot_size=int(position.get("lot_size") or 0),
+                        number_of_lots=position.get("number_of_lots", max(1, qty // max(1, int(position.get("lot_size") or 1))) if int(position.get("lot_size") or 0) > 1 else 0),
                         instrument_type=inst_type.value,
                         stop_loss=position.get("stop_loss", 0.0),
                         target=position.get("target", 0.0),
@@ -1070,10 +1070,7 @@ class BacktestEngine:
                             except Exception:
                                 lot_size = None
 
-                        if lot_size is None or not isinstance(lot_size, int) or lot_size <= 1:
-                            from backend.backtest.options_data_layer import normalize_underlying
-                            lot_size = INDEX_LOT_SIZES.get(normalize_underlying(sym), 25)
-
+                        # Metadata only — never fall back to INDEX_LOT_SIZES / 25
                         if lot_size is None or not isinstance(lot_size, int) or lot_size <= 1:
                             result.contract_resolution_failures += 1
                             result.data_unavailable_count += 1
@@ -1345,8 +1342,8 @@ class BacktestEngine:
                     strike=pos.get("strike"),
                     option_type=pos.get("option_type", ""),
                     expiry=pos.get("expiry", ""),
-                    lot_size=pos.get("lot_size", INDEX_LOT_SIZES.get(sym.upper(), 25)),
-                    number_of_lots=pos.get("number_of_lots", max(1, qty // max(1, pos.get("lot_size", 25)))),
+                    lot_size=int(pos.get("lot_size") or 0),
+                    number_of_lots=pos.get("number_of_lots", max(1, qty // max(1, int(pos.get("lot_size") or 1))) if int(pos.get("lot_size") or 0) > 1 else 0),
                     instrument_type=inst_type.value,
                     stop_loss=pos.get("stop_loss", 0.0),
                     target=pos.get("target", 0.0),

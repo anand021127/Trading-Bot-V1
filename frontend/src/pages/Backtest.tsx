@@ -156,7 +156,7 @@ export default function Backtest() {
       <div>
         <h1 className="text-lg font-bold text-white">Backtest</h1>
         <p className="text-xs text-slate-500 mt-0.5">
-          Runs the option-premium strategy against broker-resolved contracts and real historical premium data.
+          Runs the selected strategy (default: V8-D Pullback ATM) against broker-resolved contracts and real historical premium data. No silent OPTION_PREMIUM fallback.
         </p>
       </div>
 

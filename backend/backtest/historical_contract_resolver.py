@@ -115,7 +115,7 @@ class HistoricalContract:
     expiry_date: str  # YYYY-MM-DD
     trading_symbol: str
     instrument_key: str  # Authoritative key from Upstox (e.g. NSE_FO|58422|03-10-2024)
-    lot_size: int = 25
+    lot_size: int = 0  # 0 = unresolved; metadata must set real lot
     verified: bool = False  # True if candle data was fetched and validated successfully
     candles: List[Dict[str, Any]] = field(default_factory=list)
 

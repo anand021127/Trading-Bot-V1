@@ -43,7 +43,7 @@ def _get_default_settings_dict():
             "use_ltp_when_no_quote": True,
         },
         "strategy": {
-            "name": "ORB_TREND_FOLLOWING",
+            "name": "V8_D_PULLBACK_ATM",
             "timeframe_entry": "5minute",
             "timeframe_trend": "15minute",
             "orb_window_start": "09:15",
@@ -184,6 +184,8 @@ class TestOAuthTokenPropagation(unittest.TestCase):
     """Test token propagation to TradingEngine and OrderManager."""
 
     def setUp(self):
+        import backend.strategy.trading_engine as te
+        te.settings.mode = "paper"
         self.old_token = "mock-old-expired-token-123"
         self.new_token = "mock-fresh-access-token-456"
 
