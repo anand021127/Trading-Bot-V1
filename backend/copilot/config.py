@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -30,6 +31,12 @@ class CopilotSettings:
     llm_base_url: str          # e.g. http://localhost:11434/v1 for Ollama
     llm_model: str
     llm_timeout_seconds: float
+    # Remote OpenAI-compatible provider ("openai" backend). The key is
+    # read from an env var name (never hard-coded) and is ONLY used in
+    # the Authorization header to the provider — it is never logged,
+    # never placed in context, and never exposed via any endpoint.
+    ai_api_key_env: str = "OPENAI_API_KEY"
+    ai_api_key: Optional[str] = None
     max_candle_age_seconds: float = 120.0  # COPILOT_MAX_CANDLE_AGE_SECONDS — underlying/premium candle staleness limit
     gap_threshold_pct: float = 0.3  # COPILOT_GAP_THRESHOLD_PCT — |gap_percent| at/above this is GAP_UP/GAP_DOWN, else FLAT
 
@@ -40,8 +47,11 @@ def load_copilot_settings() -> CopilotSettings:
         mode = "shadow"  # unrecognized -> fail safe to shadow, never to live
 
     backend = os.getenv("COPILOT_LLM_BACKEND", "none").strip().lower()
-    if backend not in ("none", "local_openai_compatible", "ollama"):
+    if backend not in ("none", "local_openai_compatible", "ollama", "openai"):
         backend = "none"  # unrecognized -> fail safe to the rule-based fallback
+
+    ai_key_env = os.getenv("COPILOT_AI_API_KEY_ENV", "OPENAI_API_KEY").strip() or "OPENAI_API_KEY"
+    ai_key = os.getenv(ai_key_env, "").strip() or None
 
     return CopilotSettings(
         enabled=_bool_env("COPILOT_ENABLED", False),
@@ -52,6 +62,8 @@ def load_copilot_settings() -> CopilotSettings:
         llm_base_url=os.getenv("COPILOT_LLM_BASE_URL", "http://localhost:11434/v1"),
         llm_model=os.getenv("COPILOT_LLM_MODEL", "llama3.1:8b"),
         llm_timeout_seconds=float(os.getenv("COPILOT_LLM_TIMEOUT_SECONDS", "8")),
+        ai_api_key_env=ai_key_env,
+        ai_api_key=ai_key,
         max_candle_age_seconds=float(os.getenv("COPILOT_MAX_CANDLE_AGE_SECONDS", "120")),
         gap_threshold_pct=float(os.getenv("COPILOT_GAP_THRESHOLD_PCT", "0.3")),
     )

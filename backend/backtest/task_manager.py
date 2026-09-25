@@ -36,6 +36,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from backend.backtest.historical_fetch import fetch_full_range_with_retry
+
 logger = logging.getLogger(__name__)
 
 STATUS_QUEUED = "QUEUED"
@@ -690,7 +692,10 @@ async def run_backtest_in_background(
                 underlying_candles: List[Dict[str, Any]] = []
                 if os.path.exists(local_file):
                     try:
-                        raw_data = load_dataset_safe(local_file, auto_repair=True)
+                        # Dataset load/repair is pure CPU over multi-MB JSON —
+                        # run it off the event loop so /status polling stays
+                        # responsive while a job is loading data.
+                        raw_data = await asyncio.to_thread(load_dataset_safe, local_file, True)
                         underlying_candles = [
                             c for c in raw_data
                             if start_date <= c.get("timestamp", "")[:10] <= end_date
@@ -702,11 +707,21 @@ async def run_backtest_in_background(
                         logger.warning("Could not read local data file %s: %s", local_file, e)
                         fetch_errors.append({"symbol": sym, "error": f"Error reading {local_file}: {e}"})
 
-                # 2. If not enough local candles, fetch from Upstox client
+                # 2. If not enough local candles, fetch from Upstox client.
+                # Bounded retry-with-backoff handles transient historical-API
+                # timeouts/rate limits WITHOUT aborting the whole job — and
+                # without ever substituting different data (only the same
+                # request is re-issued). Non-retriable errors (401/400, ...)
+                # still fail fast with the real reason.
                 if len(underlying_candles) < 60 and client is not None:
                     try:
+                        def _fetch_range() -> List[Dict[str, Any]]:
+                            return client.get_historical_candles_full_range(
+                                sym, interval, start_date, end_date,
+                            )
+
                         fetched = await asyncio.to_thread(
-                            client.get_historical_candles_full_range, sym, interval, start_date, end_date,
+                            fetch_full_range_with_retry, _fetch_range, symbol=sym,
                         )
                         if fetched and len(fetched) > len(underlying_candles):
                             underlying_candles = fetched
@@ -720,7 +735,9 @@ async def run_backtest_in_background(
                 underlying_candles.sort(key=lambda x: x.get("timestamp", ""))
                 symbol_candles[sym] = underlying_candles
 
-                trend_series = _build_trend_series(underlying_candles)
+                # EMA/choppiness trend-series build is O(n·period) CPU work
+                # over every candle — also kept off the event loop.
+                trend_series = await asyncio.to_thread(_build_trend_series, underlying_candles)
                 option_contexts[sym] = {
                     "underlying_trend_series": trend_series,
                     "symbol": sym,

@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 from unittest.mock import MagicMock
 
+import pytest
+
 from backend.copilot.alerts import AlertStateTracker
 from backend.copilot.config import load_copilot_settings
 from backend.copilot.conversational import chat, route_question, _extract_symbol
@@ -974,10 +976,18 @@ class TestOllamaConfig:
         adapter = get_llm_adapter(settings)
         assert isinstance(adapter, LocalOpenAICompatibleAdapter)
 
-    def test_ollama_unreachable_falls_back_safely_with_history(self):
-        """Requirement 13: conversational LLM failures fall back safely
-        — including when conversation history is present."""
+    def test_ollama_unreachable_raises_typed_error_with_history(self):
+        """Requirement 13 (updated): conversational LLM failures now raise
+        a TYPED provider error instead of silently returning a canned
+        fallback answer — the operator must be able to tell "provider
+        unreachable" from a real answer. Which-symbol identity questions
+        remain deterministic and never touch the network (separate test)."""
         from backend.copilot.llm_adapter import LocalOpenAICompatibleAdapter
+        from backend.copilot.provider_errors import (
+            AIProviderError,
+            AIProviderTimeoutError,
+            AIProviderUnavailableError,
+        )
         from backend.copilot.config import CopilotSettings
         from backend.copilot.conversation_state import ConversationTurn
         settings = CopilotSettings(enabled=True, mode="shadow", min_risk_reward=1.5, max_quote_age_seconds=30,
@@ -985,8 +995,12 @@ class TestOllamaConfig:
                                     llm_model="llama3.1:8b", llm_timeout_seconds=1)
         adapter = LocalOpenAICompatibleAdapter(settings)
         history = [ConversationTurn("user", "How is NIFTY?"), ConversationTurn("assistant", "...")]
-        answer = adapter.explain("Which market are you analyzing?", {"market_status": {"available": False, "reason": "x"}}, history=history)
-        assert "unavailable" in answer.lower() or "couldn't check" in answer.lower()
+        # An unreachable provider raises a TYPED error — unavailable
+        # (connection refused) or timeout (connection attempt times out)
+        # depending on the OS; NEVER a canned fallback answer.
+        with pytest.raises((AIProviderUnavailableError, AIProviderTimeoutError)) as exc_info:
+            adapter.explain("How is the market now?", {"market_status": {"available": False, "reason": "x"}}, history=history)
+        assert isinstance(exc_info.value, AIProviderError)
 
     def test_which_symbol_is_always_deterministic_even_with_ollama_configured(self):
         """The identity question must NEVER be handed to the LLM to

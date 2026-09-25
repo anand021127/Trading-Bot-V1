@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
-import { Play, BarChart2, RefreshCw, AlertTriangle, Info, Download } from 'lucide-react'
-import { runBacktest, getBacktestStatus, getBacktestResult, downloadBacktestResult } from '../api/endpoints'
+import { Play, BarChart2, RefreshCw, AlertTriangle, Info, Download, StopCircle } from 'lucide-react'
+import { runBacktest, getBacktestStatus, getBacktestResult, downloadBacktestResult, cancelBacktest } from '../api/endpoints'
 import { formatCurrency, pnlColor } from '../utils/formatters'
 import type { BacktestResponse } from '../types'
 
@@ -26,6 +26,58 @@ const defaultStartDate = new Date(today.getFullYear() - 1, today.getMonth(), tod
 
 function strategyParam(id: string): string[] { return [id] }
 
+/**
+ * Polling failure policy — this is the fix for "timeout of 30000ms exceeded"
+ * being reported while a backtest was still legitimately running.
+ *
+ * Every API call (start, poll, fetch result) is a SHORT request that
+ * comfortably fits in the 30s axios timeout. A single failed poll (network
+ * blip, backend GC pause, transient proxy hiccup) is therefore transient
+ * and must be RETRIED with backoff — never treated as the job failing.
+ * The job is only declared failed when the job is genuinely gone (404 —
+ * backend restarted) or the backend is unreachable for many consecutive
+ * polls. A running job is NEVER reported as a timeout.
+ */
+const POLL_MAX_CONSECUTIVE_FAILURES = 5
+const POLL_BASE_RETRY_MS = 2000
+
+type PollFailure = { kind: 'job_not_found' | 'backend_unreachable' | 'other'; message: string }
+
+function classifyPollFailure(e: unknown): PollFailure {
+  if (axios.isAxiosError(e)) {
+    if (e.response?.status === 404) {
+      return { kind: 'job_not_found', message: 'Backtest job not found — the backend may have restarted. Please run the backtest again.' }
+    }
+    if (e.code === 'ECONNABORTED') {
+      // Axios request timeout on a STATUS POLL — the status endpoint is a
+      // millisecond in-memory read, so this means network/backend trouble,
+      // NOT that the backtest itself timed out. Retry below.
+      return { kind: 'backend_unreachable', message: 'A status poll timed out — retrying; the backtest itself is unaffected.' }
+    }
+    if (!e.response) {
+      return { kind: 'backend_unreachable', message: 'Cannot reach the backend right now — retrying; the backtest itself is unaffected.' }
+    }
+    const detail = (e.response.data as { detail?: unknown } | undefined)?.detail
+    return { kind: 'other', message: typeof detail === 'string' ? detail : `Backend error ${e.response.status}` }
+  }
+  return { kind: 'other', message: e instanceof Error ? e.message : 'Unknown polling error.' }
+}
+
+/** Extract a human-readable message from an axios error, including FastAPI
+ * object-shaped `detail` payloads ({message, active_job_id, ...}). */
+function extractErrorMessage(e: unknown, fallback: string): string {
+  if (axios.isAxiosError(e)) {
+    const detail = (e.response?.data as { detail?: unknown } | undefined)?.detail
+    if (typeof detail === 'string') return detail
+    if (detail && typeof detail === 'object' && 'message' in detail) {
+      return String((detail as { message: unknown }).message)
+    }
+    if (e.response?.status === 409) return 'A backtest job is already running. Wait for it to finish or cancel it first.'
+    return e.message
+  }
+  return e instanceof Error ? e.message : fallback
+}
+
 export default function Backtest() {
   const [startDate, setStartDate]             = useState(defaultStartDate)
   const [endDate, setEndDate]                 = useState(defaultEndDate)
@@ -39,6 +91,10 @@ export default function Backtest() {
   const [taskId, setTaskId]                   = useState<string | null>(null)
   const [downloading, setDownloading]         = useState<'csv' | 'json' | null>(null)
   const [progress, setProgress]               = useState<{ phase?: string; symbol?: string; symbol_index?: number; total_symbols?: number; bar_index?: number; total_bars?: number; symbols_fetched?: number } | null>(null)
+  const [statusLabel, setStatusLabel] = useState<string | null>(null)
+  const [elapsed, setElapsed]         = useState<number | null>(null)
+  const [eta, setEta]                 = useState<number | null>(null)
+  const [cancelling, setCancelling]   = useState(false)
   const [tradeFilter, setTradeFilter]         = useState<'ALL' | 'WINS' | 'LOSSES'>('ALL')
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -59,9 +115,25 @@ export default function Backtest() {
       setTaskId(start.task_id)
       pollTask(start.task_id)
     } catch (e: unknown) {
-      const detail = axios.isAxiosError(e) ? e.response?.data?.detail : undefined
-      setError(typeof detail === 'string' ? detail : (e instanceof Error ? e.message : 'Backtest failed.'))
+      // Includes the duplicate-job 409 case: the backend returns an object
+      // detail with the active job's id — surface the real message.
+      setError(extractErrorMessage(e, 'Backtest failed.'))
       setRunning(false)
+    }
+  }
+
+  const handleCancel = async () => {
+    if (!taskId || cancelling) return
+    setCancelling(true)
+    setError(null)
+    try {
+      await cancelBacktest(taskId)
+      // Polling continues and will observe status==='cancelled' from the
+      // backend — the authoritative source — and stop there.
+    } catch (e: unknown) {
+      setError(extractErrorMessage(e, 'Could not cancel the backtest.'))
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -79,7 +151,7 @@ export default function Backtest() {
     }
   }
 
-  const pollTask = (taskId: string) => {
+  const pollTask = (taskId: string, failures = 0) => {
     const tick = async () => {
       try {
         const status = await getBacktestStatus(taskId)
@@ -88,20 +160,48 @@ export default function Backtest() {
           setResult(finalResult)
           setRunning(false)
           setProgress(null)
+          setStatusLabel('COMPLETED')
           return
         }
         if (status.status === 'failed') {
+          // Show the backend's REAL failure reason (error_details message
+          // when present) — never a generic timeout message.
           setError(status.error || 'Backtest failed.')
+          setRunning(false)
+          setProgress(null)
+          setStatusLabel('FAILED')
+          return
+        }
+        if (status.status === 'cancelled') {
+          setError('Backtest cancelled.')
+          setRunning(false)
+          setProgress(null)
+          setStatusLabel('CANCELLED')
+          return
+        }
+        setStatusLabel(status.status)
+        setProgress(status.progress ?? null)
+        setElapsed(status.elapsed_seconds ?? null)
+        setEta(status.estimated_remaining_seconds ?? null)
+        pollRef.current = setTimeout(() => pollTask(taskId, 0), 1000)
+      } catch (e) {
+        // A failed status poll is a CONNECTION problem, not a backtest
+        // failure. Retry with linear backoff; only give up after several
+        // consecutive failures (or a 404, meaning the job is genuinely
+        // gone). A still-running job is never reported as a timeout.
+        const failure = classifyPollFailure(e)
+        const nextCount = failure.kind === 'job_not_found' ? POLL_MAX_CONSECUTIVE_FAILURES : failures + 1
+        if (nextCount >= POLL_MAX_CONSECUTIVE_FAILURES) {
+          setError(
+            failure.kind === 'job_not_found'
+              ? failure.message
+              : `Lost connection to the backend while polling progress (${failure.message}) The backtest may still be running server-side — check the backend and refresh before starting a new one.`
+          )
           setRunning(false)
           setProgress(null)
           return
         }
-        setProgress(status.progress ?? null)
-        pollRef.current = setTimeout(tick, 1000)
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Lost connection while polling backtest progress.')
-        setRunning(false)
-        setProgress(null)
+        pollRef.current = setTimeout(() => pollTask(taskId, nextCount), POLL_BASE_RETRY_MS * nextCount)
       }
     }
     tick()
@@ -246,23 +346,40 @@ export default function Backtest() {
           </div>
         )}
 
-        <button onClick={handleRun} disabled={running || selectedSymbols.length === 0}
-          className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors">
-          {running ? <><RefreshCw size={14} className="animate-spin" /> Running backtest...</>
-                   : <><Play size={14} /> Run Backtest</>}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={handleRun} disabled={running || selectedSymbols.length === 0}
+            className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors">
+            {running ? <><RefreshCw size={14} className="animate-spin" /> Running backtest...</>
+                     : <><Play size={14} /> Run Backtest</>}
+          </button>
+          {running && taskId && (
+            <button onClick={handleCancel} disabled={cancelling}
+              className="flex items-center gap-2 px-4 py-2.5 border border-red-700/50 bg-red-950/30 hover:bg-red-950/60 disabled:opacity-50 disabled:cursor-not-allowed text-red-300 text-sm font-medium rounded-lg transition-colors">
+              {cancelling ? <><RefreshCw size={14} className="animate-spin" /> Cancelling...</>
+                          : <><StopCircle size={14} /> Cancel Backtest</>}
+            </button>
+          )}
+        </div>
 
-        {running && progress && (
-          <div className="text-xs text-slate-400 bg-[#0f1628] border border-[#1e2d45] rounded-lg p-3">
-            {progress.phase === 'fetching_data' && (
-              <span>Fetching real historical data — {progress.symbols_fetched ?? 0}/{progress.total_symbols ?? '?'} symbols done...</span>
+        {running && (
+          <div className="text-xs text-slate-400 bg-[#0f1628] border border-[#1e2d45] rounded-lg p-3 space-y-2">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span className="font-semibold text-slate-300">
+                {statusLabel === 'QUEUED' ? 'Queued…' : statusLabel === 'FETCHING_DATA' ? 'Fetching data…' : 'Running…'}
+              </span>
+              {elapsed !== null && <span>Elapsed: {elapsed.toFixed(0)}s</span>}
+              {eta !== null && eta > 0 && <span>Estimated remaining: ~{eta.toFixed(0)}s</span>}
+            </div>
+            {progress?.phase === 'fetching_data' && (
+              <div>Fetching real historical data — {progress.symbols_fetched ?? 0}/{progress.total_symbols ?? '?'} symbols done…</div>
             )}
-            {progress.phase === 'processing' && (
-              <span>
+            {progress?.phase === 'processing' && (
+              <div>
                 Processing {progress.symbol} ({progress.symbol_index}/{progress.total_symbols}) —
                 bar {progress.bar_index}/{progress.total_bars}
-              </span>
+              </div>
             )}
+            {progress?.phase === 'finalizing' && <div>Finalizing results…</div>}
           </div>
         )}
       </div>

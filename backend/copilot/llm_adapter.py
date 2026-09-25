@@ -7,9 +7,20 @@ Two backends:
   - LocalOpenAICompatibleAdapter: talks to a local OpenAI-chat-compatible
     server (Ollama `ollama serve`, llama.cpp's `server`, vLLM, etc.) over
     HTTP on localhost — genuinely zero API cost, runs on the operator's
-    own machine, no Anthropic/OpenAI key required. If that server isn't
-    reachable, it falls back to the rule-based adapter rather than
-    failing the whole request.
+    own machine, no API key required.
+  - RemoteOpenAICompatibleAdapter: talks to an OpenAI-compatible cloud
+    endpoint using a key from the environment (never hard-coded, never
+    logged, never sent anywhere but the provider).
+
+FAILURE CONTRACT (changed deliberately): a provider being unreachable,
+timing out, rejecting credentials, rate-limiting, or missing the model
+now RAISES a typed AIProviderError (see provider_errors.py). It is NO
+LONGER silently converted into a rule-based canned answer — an operator
+asking a live-data question must never be fooled into thinking a
+template answer came from their model. The rule-based adapter remains
+available explicitly (backend "none"), and the deterministic
+"which market are you analyzing?" memory answer still never touches
+the network.
 
 Neither adapter is ever given write access to anything — `explain()`
 takes already-computed structured data and returns a string. It cannot
@@ -22,6 +33,7 @@ construction, not just by prompting.
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -29,6 +41,11 @@ from typing import Any, Dict, List, Optional
 
 from backend.copilot.config import CopilotSettings, load_copilot_settings
 from backend.copilot.conversation_state import ConversationTurn
+from backend.copilot.provider_errors import (
+    AIProviderAuthError,
+    AIProviderError,
+    classify_provider_exception,
+)
 
 
 class LLMAdapter(ABC):
@@ -326,6 +343,49 @@ class RuleBasedFallbackAdapter(LLMAdapter):
         return f"Here's what I could verify:\n{body}"
 
 
+def _provider_chat(
+    messages: List[Dict[str, str]],
+    *,
+    base_url: str,
+    model: str,
+    timeout_seconds: float,
+    api_key: Optional[str] = None,
+) -> str:
+    """Single shared OpenAI-compatible chat-completions call.
+
+    Raises a typed AIProviderError subclass for every failure mode —
+    connection refused, timeout, 401/403, 404 model-missing, 429,
+    malformed response — instead of returning a fabricated answer.
+    The API key (when present) is used ONLY in the Authorization header
+    to the provider endpoint.
+    """
+    url = base_url.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": 400,
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"),
+        headers=headers, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as e:
+        raise classify_provider_exception(e)
+    except ValueError as e:  # json.JSONDecodeError and friends
+        raise AIProviderError(f"Malformed response from AI provider: {e}")
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise AIProviderError(f"Malformed response from AI provider: {e}")
+
+
 class LocalOpenAICompatibleAdapter(LLMAdapter):
     """Talks to a local OpenAI-chat-compatible HTTP server. Falls back to
     the rule-based adapter on any connection/timeout/parse error — a
@@ -383,28 +443,54 @@ class LocalOpenAICompatibleAdapter(LLMAdapter):
 
         messages = [{"role": "system", "content": system_prompt}] + history_messages + \
                    [{"role": "user", "content": user_prompt}]
-        payload = {
-            "model": self.settings.llm_model,
-            "messages": messages,
-            "temperature": 0.1,
-            "max_tokens": 400,
-        }
-        url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
-        try:
-            req = urllib.request.Request(
-                url, data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST",
+        return self._send_chat(messages)
+
+    def _send_chat(self, messages: List[Dict[str, str]]) -> str:
+        """Send the built messages to the configured provider. Raises a
+        typed AIProviderError subclass on ANY failure — provider problems
+        are surfaced honestly, never swapped for a canned answer."""
+        return _provider_chat(
+            messages,
+            base_url=self.settings.llm_base_url,
+            model=self.settings.llm_model,
+            timeout_seconds=self.settings.llm_timeout_seconds,
+            api_key=None,
+        )
+
+
+class RemoteOpenAICompatibleAdapter(LocalOpenAICompatibleAdapter):
+    """OpenAI-compatible cloud provider (default: api.openai.com/v1).
+
+    Inherits the deterministic which-symbol path and the grounded
+    message construction; only the transport differs — an API key from
+    the environment is required and sent solely as the provider
+    Authorization header. Missing key raises a typed auth error at ask
+    time so the UI can show a clear configuration message instead of a
+    fake answer.
+    """
+
+    DEFAULT_BASE_URL = "https://api.openai.com/v1"
+
+    def _send_chat(self, messages: List[Dict[str, str]]) -> str:
+        if not self.settings.ai_api_key:
+            raise AIProviderAuthError(
+                f"No API key configured for the remote AI provider. Set "
+                f"{self.settings.ai_api_key_env} in the backend environment."
             )
-            with urllib.request.urlopen(req, timeout=self.settings.llm_timeout_seconds) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"]
-        except (urllib.error.URLError, TimeoutError, KeyError, ValueError, OSError) as e:
-            fallback_text = self._fallback.explain(question, context)
-            return f"[local LLM unavailable ({e}) — showing raw verified data instead]\n{fallback_text}"
+        base_url = os.getenv("COPILOT_AI_BASE_URL", self.DEFAULT_BASE_URL).strip() or self.DEFAULT_BASE_URL
+        return _provider_chat(
+            messages,
+            base_url=base_url,
+            model=self.settings.llm_model,
+            timeout_seconds=self.settings.llm_timeout_seconds,
+            api_key=self.settings.ai_api_key,
+        )
 
 
 def get_llm_adapter(settings: CopilotSettings = None) -> LLMAdapter:
     settings = settings or load_copilot_settings()
     if settings.llm_backend in ("local_openai_compatible", "ollama"):
         return LocalOpenAICompatibleAdapter(settings)
+    if settings.llm_backend == "openai":
+        return RemoteOpenAICompatibleAdapter(settings)
     return RuleBasedFallbackAdapter()

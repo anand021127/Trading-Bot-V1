@@ -214,9 +214,7 @@ async def get_backtest_status(task_id: str) -> Dict[str, Any]:
     return task.to_status_dict()
 
 
-@router.post("/jobs/{job_id}/cancel")
-async def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
-    """Safely cancel a queued or running backtest job."""
+def _cancel_job(job_id: str) -> Dict[str, Any]:
     task = task_manager.get(job_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"No backtest job found with id {job_id}")
@@ -228,6 +226,18 @@ async def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
         "cancelled": cancelled,
         "message": "Backtest job was cancelled" if cancelled else "Job is already completed or stopped",
     }
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
+    """Safely cancel a queued or running backtest job."""
+    return _cancel_job(job_id)
+
+
+@router.post("/status/{task_id}/cancel")
+async def cancel_backtest_status(task_id: str) -> Dict[str, Any]:
+    """Cancel a queued or running backtest job (legacy /status path alias)."""
+    return _cancel_job(task_id)
 
 
 @router.get("/jobs/{job_id}/result")

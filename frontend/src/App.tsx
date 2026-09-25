@@ -14,6 +14,7 @@ const PaperTrading = lazy(() => import('./pages/PaperTrading'))
 const Backtest     = lazy(() => import('./pages/Backtest'))
 const Performance  = lazy(() => import('./pages/Performance'))
 const ApiTest      = lazy(() => import('./pages/ApiTest'))
+const Copilot      = lazy(() => import('./pages/Copilot'))
 const Settings     = lazy(() => import('./pages/Settings'))
 
 function PageSkeleton() {
@@ -60,6 +61,9 @@ export default function App() {
             } />
             <Route path="/performance" element={
               <Suspense fallback={<PageSkeleton />}><Performance /></Suspense>
+            } />
+            <Route path="/copilot" element={
+              <Suspense fallback={<PageSkeleton />}><Copilot /></Suspense>
             } />
             <Route path="/api-test" element={
               <Suspense fallback={<PageSkeleton />}><ApiTest /></Suspense>

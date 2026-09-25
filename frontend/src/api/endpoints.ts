@@ -115,12 +115,24 @@ export const runBacktest = (params: BacktestRequest) =>
   api.post<{ task_id: string; status: string; message: string }>('/api/backtest/run', params).then(r => r.data)
 
 export const getBacktestStatus = (taskId: string) =>
-  api.get<{ task_id: string; status: string; progress: Record<string, unknown>; error: string | null; elapsed_seconds: number }>(
+  api.get<{
+    task_id: string; status: string; progress: Record<string, unknown>
+    error: string | null; error_details?: { code?: string; message?: string } | null
+    progress_percent: number; current_symbol: string; current_phase: string
+    completed_symbols: number; total_symbols: number
+    elapsed_seconds: number; estimated_remaining_seconds: number | null
+    trades_taken: number; candles_processed: number; result_ready: boolean
+  }>(
     `/api/backtest/status/${taskId}`,
   ).then(r => r.data)
 
 export const getBacktestResult = (taskId: string) =>
   api.get<BacktestResponse>(`/api/backtest/result/${taskId}`).then(r => r.data)
+
+export const cancelBacktest = (taskId: string) =>
+  api.post<{ task_id: string; cancelled: boolean; status: string; message: string }>(
+    `/api/backtest/status/${taskId}/cancel`, { reason: 'user_cancelled' },
+  ).then(r => r.data)
 
 export const downloadBacktestResult = async (taskId: string, format: 'csv' | 'json' = 'csv') => {
   const response = await api.get(`/api/backtest/download/${taskId}`, {

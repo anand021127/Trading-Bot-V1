@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, ClipboardList, FileText,
   BarChart2, PieChart, Wrench, Settings, Menu, X, Wifi, WifiOff, Radar, Table2,
-  AlertTriangle, KeyRound, Moon, RefreshCw, Download, Sparkles, Smartphone, Zap,
+  AlertTriangle, KeyRound, Moon, RefreshCw, Download, Sparkles, Smartphone, Zap, Bot,
 } from 'lucide-react'
 import { useState } from 'react'
 import { Toaster } from 'react-hot-toast'
@@ -17,6 +17,7 @@ const navItems = [
   { to: '/trade-history', icon: ClipboardList, label: 'Trade History' },
   { to: '/paper-trading', icon: FileText, label: 'Paper Trading' },
   { to: '/backtest', icon: BarChart2, label: 'Backtest' },
+  { to: '/copilot', icon: Bot, label: 'Copilot AI' },
   { to: '/performance', icon: PieChart, label: 'Performance' },
   { to: '/api-test', icon: Wrench, label: 'API Test' },
   { to: '/settings', icon: Settings, label: 'Settings' },
