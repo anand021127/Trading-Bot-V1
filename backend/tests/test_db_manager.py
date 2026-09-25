@@ -24,7 +24,9 @@ def test_database_manager_creates_tables_and_persists_trade() -> None:
 
     trades = manager.list_trades()
     assert len(trades) == 1
-    assert trades[0].symbol == "NIFTY"
+    # list_trades returns full row dicts (superset of the old dataclass) so
+    # the common trade metadata model reaches the API unchanged.
+    assert trades[0]["symbol"] == "NIFTY"
 
 
 def test_database_manager_upserts_position() -> None:

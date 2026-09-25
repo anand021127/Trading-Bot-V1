@@ -572,7 +572,7 @@ def run_full_reconciliation_audit():
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Missing source file: {csv_path}")
 
-    with open(csv_path, "r") as fp:
+    with open(csv_path, "r", encoding="utf-8") as fp:
         raw_trades = list(csv.DictReader(fp))
 
     trades_by_variant: Dict[str, List[Dict[str, Any]]] = {}
@@ -832,7 +832,7 @@ def run_full_reconciliation_audit():
     # WRITE OUTPUT ARTIFACTS
     # =========================================================================
     json_out_path = os.path.join(ROOT_DIR, "strategy_v8_capital_reconciliation.json")
-    with open(json_out_path, "w") as fp:
+    with open(json_out_path, "w", encoding="utf-8") as fp:
         json.dump(reconciliation_results, fp, indent=2)
     print(f"Written {json_out_path}")
 
@@ -844,7 +844,7 @@ def run_full_reconciliation_audit():
         "max_lots", "max_allocation_pct", "max_account_risk_pct", "accounting_valid"
     ]
     csv_out_path = os.path.join(ROOT_DIR, "strategy_v8_capital_reconciliation.csv")
-    with open(csv_out_path, "w", newline="") as fp:
+    with open(csv_out_path, "w", newline="", encoding="utf-8") as fp:
         writer = csv.DictWriter(fp, fieldnames=csv_fieldnames)
         writer.writeheader()
         writer.writerows(all_reconciliation_csv_rows)
@@ -980,7 +980,7 @@ def write_markdown_report(res: Dict[str, Any]):
     ])
 
     md_out_path = os.path.join(ROOT_DIR, "strategy_v8_capital_reconciliation.md")
-    with open(md_out_path, "w") as fp:
+    with open(md_out_path, "w", encoding="utf-8") as fp:
         fp.write("\n".join(md_lines))
     print(f"Written {md_out_path}")
 

@@ -4,6 +4,8 @@ export interface Trade {
   symbol: string
   mode?: 'paper' | 'live'
   side?: string
+  strategy?: string
+  status?: string
   entry_time?: string
   exit_time?: string | null
   entry_price?: number
@@ -34,6 +36,18 @@ export interface Trade {
   max_favorable?: number | null
   max_adverse?: number | null
   conditions_checked?: Record<string, boolean> | null
+  // ONE common trade metadata model (identical columns for paper/live/backtest)
+  underlying_symbol?: string | null
+  option_type?: 'CE' | 'PE' | string | null
+  strike_price?: number | null
+  expiry?: string | null
+  instrument_key?: string | null
+  lot_size?: number | null
+  capital_used?: number | null
+  entry_timestamp?: string | null
+  exit_timestamp?: string | null
+  order_id?: string | null
+  signal_id?: string | null
 }
 
 export interface Position {
@@ -55,6 +69,16 @@ export interface Position {
   orb_low?: number
   trend_bias?: string
   mode?: string
+  // common trade metadata model (open positions)
+  underlying_symbol?: string | null
+  option_type?: string | null
+  strike_price?: number | null
+  expiry?: string | null
+  instrument_key?: string | null
+  lot_size?: number | null
+  capital_used?: number | null
+  trade_id?: string | null
+  strategy?: string | null
 }
 
 export interface LiveQuote {
@@ -418,6 +442,14 @@ export interface LivePositionDetail {
   current_pnl_pct: number | null
   mode: string
   entry_time: string | null
+  // common trade metadata model
+  underlying_symbol?: string | null
+  option_type?: string | null
+  strike_price?: number | null
+  expiry?: string | null
+  instrument_key?: string | null
+  lot_size?: number | null
+  capital_used?: number | null
 }
 
 // ── Health Monitoring ───────────────────────────────────────────────────

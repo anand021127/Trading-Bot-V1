@@ -18,6 +18,11 @@ class Trade:
     status: str = "open"
     pnl: Optional[float] = None
     notes: str = ""
+    # The ONE common trade metadata model (backend/domain/trade_metadata.py):
+    # underlying_symbol, option_type, strike_price, expiry, instrument_key,
+    # lot_size, capital_used, order_id, signal_id. Written identically by the
+    # PAPER, LIVE and BACKTEST execution paths; absent keys persist as NULL.
+    trade_metadata: dict = field(default_factory=dict)
 
 
 @dataclass

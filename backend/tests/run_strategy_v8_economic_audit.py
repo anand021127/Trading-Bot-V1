@@ -70,13 +70,13 @@ def run_v8_economic_audit():
     if not os.path.exists(json_path) or not os.path.exists(csv_path):
         raise FileNotFoundError(f"Required research files {json_path} or {csv_path} not found.")
 
-    with open(json_path, "r") as fp:
+    with open(json_path, "r", encoding="utf-8") as fp:
         research_json = json.load(fp)
 
     trades_by_variant: Dict[str, List[Dict[str, Any]]] = {}
     all_trades: List[Dict[str, Any]] = []
 
-    with open(csv_path, "r") as fp:
+    with open(csv_path, "r", encoding="utf-8") as fp:
         reader = csv.DictReader(fp)
         for row in reader:
             row["entry_premium"] = float(row["entry_premium"])
@@ -860,13 +860,13 @@ def run_v8_economic_audit():
     # Save outputs
     # 1. JSON
     audit_json_file = os.path.join(ROOT_DIR, "strategy_v8_economic_audit.json")
-    with open(audit_json_file, "w") as fp:
+    with open(audit_json_file, "w", encoding="utf-8") as fp:
         json.dump(audit_results, fp, indent=2)
     print(f"Written {audit_json_file}")
 
     # 2. CSV
     audit_csv_file = os.path.join(ROOT_DIR, "strategy_v8_economic_audit.csv")
-    with open(audit_csv_file, "w", newline="") as fp:
+    with open(audit_csv_file, "w", newline="", encoding="utf-8") as fp:
         fieldnames = [
             "variant", "trade_number", "date", "period", "underlying", "option_type",
             "capital_before", "quantity", "number_of_lots", "entry_premium", "position_value",
@@ -1002,7 +1002,7 @@ def generate_economic_audit_markdown(audit_data: Dict[str, Any]):
 - **Action:** Live trading code remains strictly unmodified. Position sizing architecture must be updated to enforce strict dual-constraint position sizing (`min(risk_based_lots, capital_allocation_lots)`) before any future paper trading consideration.
 """
 
-    with open(os.path.join(ROOT_DIR, "strategy_v8_economic_audit.md"), "w") as fp:
+    with open(os.path.join(ROOT_DIR, "strategy_v8_economic_audit.md"), "w", encoding="utf-8") as fp:
         fp.write(md)
     print(f"Written {os.path.join(ROOT_DIR, 'strategy_v8_economic_audit.md')}")
 

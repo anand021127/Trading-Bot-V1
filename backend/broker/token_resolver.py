@@ -422,11 +422,16 @@ def persist_upstox_token(
     try:
         from backend.database.db_manager import DatabaseManager
         db = DatabaseManager()
-        db.save_token(clean_token, verified=True, verified_at=v_at, source=v_src)
-        if uname:
-            db.save_setting("upstox_user_name", uname)
-        if uid:
-            db.save_setting("upstox_user_id", uid)
+        try:
+            db.save_token(clean_token, verified=True, verified_at=v_at, source=v_src)
+            if uname:
+                db.save_setting("upstox_user_name", uname)
+            if uid:
+                db.save_setting("upstox_user_id", uid)
+        finally:
+            # Close the handle — leaked open SQLite files block clean
+            # teardown of temp dirs (Windows PermissionError) and hold WAL.
+            db.close()
     except Exception:
         pass
 
@@ -454,13 +459,15 @@ def persist_upstox_token(
             except Exception:
                 pass
 
-        # 4. Atomically update all candidate .env files
-        for env_p in DEFAULT_REPO_DOTENV_PATHS:
-            try:
-                if os.path.exists(os.path.dirname(env_p)):
-                    update_dotenv_file(env_p, {"UPSTOX_ACCESS_TOKEN": clean_token})
-            except Exception:
-                pass
+        # 4. Environment files are NOT auto-rewritten with the access token.
+        #     Hardening: persist_upstox_token() used to append
+        #     UPSTOX_ACCESS_TOKEN to every candidate .env path it could find,
+        #     including the developer's repo checkout — scattering the live
+        #     bearer credential across plaintext files and risking accidental
+        #     commits. The canonical stores are now SQLite (verified flag)
+        #     plus the JSON token file under data/, both of which are
+        #     .gitignored. update_dotenv_file() is retained for explicit
+        #     operator workflows only.
 
     return True
 

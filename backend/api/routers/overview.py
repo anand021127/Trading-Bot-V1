@@ -47,8 +47,27 @@ def _is_market_open() -> bool:
 
 
 def _serialize_position(row: Any) -> Dict[str, Any]:
-    d = dict(row) if hasattr(row, "keys") else row.__dict__
+    d = dict(row) if hasattr(row, "keys") else dict(getattr(row, "__dict__", {}))
     d.pop("_sa_instance_state", None)
+    # Common trade metadata model — open positions surface the same contract
+    # identity as Trade History (from the extra state persisted at entry).
+    extra = d.pop("extra", None)
+    if not isinstance(extra, dict):
+        extra = {}
+    d["underlying_symbol"] = d.get("underlying_symbol") or extra.get("underlying")
+    d["option_type"] = d.get("option_type") or extra.get("option_type")
+    if d.get("strike_price") is None:
+        d["strike_price"] = extra.get("strike")
+    d["expiry"] = d.get("expiry") or extra.get("expiry")
+    d["lot_size"] = d.get("lot_size") or extra.get("lot_size")
+    d["trade_id"] = d.get("trade_id") or extra.get("trade_id")
+    d["strategy"] = d.get("strategy") or extra.get("strategy")
+    entry_price = float(d.get("average_price") or 0)
+    qty = int(d.get("quantity") or 0)
+    d["entry_price"] = entry_price
+    # Capital actually deployed = entry price × executed quantity (the ONE
+    # common definition — never allocation or account capital).
+    d["capital_used"] = round(entry_price * qty, 2) if entry_price > 0 and qty > 0 else None
     return d
 
 

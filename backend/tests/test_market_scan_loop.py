@@ -269,7 +269,7 @@ def test_full_path_market_scan_to_sqlite_trade():
     positions = db.get_open_positions()
     assert len(trades) >= 1
     assert len(positions) >= 1
-    assert trades[0].strategy == "V8_D_PULLBACK_ATM"
+    assert trades[0]["strategy"] == "V8_D_PULLBACK_ATM"
 
 
 def test_real_v8d_evaluates_without_crash_on_fresh_bars():

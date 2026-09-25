@@ -5,7 +5,8 @@ import { usePolling } from '../hooks/usePolling'
 import StatusBadge from '../components/StatusBadge'
 import {
   formatCurrency, formatDate, formatTime, formatDuration,
-  formatR, pnlColor, pnlBg,
+  formatR, formatStrike, formatContractLabel, formatQty,
+  pnlColor, pnlBg,
 } from '../utils/formatters'
 import type { Trade } from '../types'
 
@@ -16,8 +17,8 @@ export default function TradeHistory() {
   const [trades, setTrades] = useState<Trade[]>([])
   const [summary, setSummary] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [error, setError] = useState(null as string | null)
+  const [expandedId, setExpandedId] = useState(null as string | null)
   const [page, setPage] = useState(1)
   const [totalCount, setTotalCount] = useState(0)
 
@@ -81,7 +82,9 @@ export default function TradeHistory() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-bold text-white">Trade History</h1>
-          <p className="text-xs text-slate-500 mt-0.5">Complete log of all executed trades with indicators</p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            What was traded · which strike · which option · which expiry · quantity · capital used
+          </p>
         </div>
         <button
           onClick={handleExport}
@@ -159,10 +162,9 @@ export default function TradeHistory() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-500 border-b border-[#1e2d45] bg-[#0f1628]/50">
-                  {['#','Date','Symbol','Mode','Entry Time','Entry Price','Exit Time','Exit Price',
-                    'Qty','Duration','Init SL','Final SL','Stage','ORB H','ORB L',
-                    'ATR','RSI','CI','Vol Ratio','EMA20','EMA50','Trend',
-                    'Exit Reason','Gross P&L','Charges','Net P&L','P&L (R)','MFE','MAE',''].map(h => (
+                  {['#', 'Date', 'Symbol', 'Strike / Option', 'Expiry', 'Qty', 'Lot Size',
+                    'Entry', 'Capital Used', 'Exit', 'Gross P&L', 'Charges', 'Net P&L',
+                    'Strategy', 'Status', ''].map(h => (
                     <th key={h} className="text-left px-2.5 py-2 font-medium whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -173,6 +175,10 @@ export default function TradeHistory() {
                   const isExpanded = expandedId === id
                   const netPnl = t.net_pnl ?? t.pnl
                   const charges = (t.brokerage ?? 0) + (t.stt ?? 0)
+                  const underlying = t.underlying_symbol ?? t.symbol
+                  const contract = formatContractLabel(t.strike_price, t.option_type)
+                  const isHistorical = t.strike_price == null && !t.option_type
+                  const qtyLabel = formatQty(t.quantity)
                   return (
                     <>
                       <tr
@@ -182,41 +188,71 @@ export default function TradeHistory() {
                       >
                         <td className="px-2.5 py-2 text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
                         <td className="px-2.5 py-2 text-slate-400 whitespace-nowrap">{formatDate(t.entry_time ?? t.timestamp)}</td>
-                        <td className="px-2.5 py-2 font-semibold text-white">{t.symbol}</td>
-                        <td className="px-2.5 py-2"><StatusBadge status={(t.mode ?? 'paper').toUpperCase()} /></td>
-                        <td className="px-2.5 py-2 text-slate-400 whitespace-nowrap">{formatTime(t.entry_time ?? t.timestamp)}</td>
-                        <td className="px-2.5 py-2 text-white">₹{(t.entry_price ?? t.price ?? 0).toFixed(2)}</td>
-                        <td className="px-2.5 py-2 text-slate-400 whitespace-nowrap">{formatTime(t.exit_time)}</td>
+                        <td className="px-2.5 py-2 font-semibold text-white">{underlying}</td>
+                        <td className="px-2.5 py-2 whitespace-nowrap">
+                          <span className={isHistorical ? 'text-slate-600 italic' : 'font-semibold text-sky-300'}>{contract}</span>
+                        </td>
+                        <td className="px-2.5 py-2 text-slate-400 whitespace-nowrap">{t.expiry ?? 'N/A'}</td>
+                        <td className="px-2.5 py-2 text-slate-300">{qtyLabel}</td>
+                        <td className="px-2.5 py-2 text-slate-400">{t.lot_size ?? 'N/A'}</td>
+                        <td className="px-2.5 py-2 text-white">{formatCurrency(t.entry_price ?? t.price)}</td>
+                        <td className="px-2.5 py-2 font-medium text-amber-300 whitespace-nowrap" title="Capital actually deployed = entry price × executed quantity">
+                          {formatCurrency(t.capital_used)}
+                        </td>
                         <td className="px-2.5 py-2">{t.exit_price ? `₹${t.exit_price.toFixed(2)}` : '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-300">{t.quantity}</td>
-                        <td className="px-2.5 py-2 text-slate-400 whitespace-nowrap">{formatDuration(t.trade_duration_min)}</td>
-                        <td className="px-2.5 py-2 text-red-400">{t.initial_stop ? `₹${t.initial_stop.toFixed(2)}` : '—'}</td>
-                        <td className="px-2.5 py-2 text-amber-400">{t.final_stop ? `₹${t.final_stop.toFixed(2)}` : '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-400">{t.stage_at_exit ?? '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-400">{t.orb_high ? `₹${t.orb_high.toFixed(0)}` : '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-400">{t.orb_low ? `₹${t.orb_low.toFixed(0)}` : '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-400">{t.atr_at_entry?.toFixed(2) ?? '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-400">{t.rsi_at_entry?.toFixed(1) ?? '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-400">{t.choppiness_at_entry?.toFixed(1) ?? '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-400">{t.volume_ratio?.toFixed(2) ?? '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-400">{t.ema20_at_entry?.toFixed(2) ?? '—'}</td>
-                        <td className="px-2.5 py-2 text-slate-400">{t.ema50_at_entry?.toFixed(2) ?? '—'}</td>
-                        <td className="px-2.5 py-2"><StatusBadge status={t.trend_bias ?? 'NEUTRAL'} /></td>
-                        <td className="px-2.5 py-2 text-slate-400 whitespace-nowrap">{(t.exit_reason ?? '—').replace(/_/g, ' ')}</td>
                         <td className={`px-2.5 py-2 font-medium ${pnlColor(t.gross_pnl)}`}>{formatCurrency(t.gross_pnl)}</td>
                         <td className="px-2.5 py-2 text-slate-500">{charges > 0 ? formatCurrency(charges) : '—'}</td>
                         <td className={`px-2.5 py-2 font-semibold ${pnlColor(netPnl)}`}>{formatCurrency(netPnl)}</td>
-                        <td className={`px-2.5 py-2 font-medium ${pnlColor(t.pnl_r)}`}>{formatR(t.pnl_r)}</td>
-                        <td className="px-2.5 py-2 text-emerald-400/70">{t.max_favorable ? `₹${t.max_favorable.toFixed(2)}` : '—'}</td>
-                        <td className="px-2.5 py-2 text-red-400/70">{t.max_adverse ? `₹${t.max_adverse.toFixed(2)}` : '—'}</td>
+                        <td className="px-2.5 py-2 text-slate-400 whitespace-nowrap">{t.strategy || '—'}</td>
+                        <td className="px-2.5 py-2"><StatusBadge status={(t.status || 'open').toUpperCase()} /></td>
                         <td className="px-2.5 py-2 text-slate-500">
                           {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                         </td>
                       </tr>
                       {isExpanded && (
                         <tr key={`${id}-detail`} className="border-b border-[#1e2d45] bg-[#0f1628]/50">
-                          <td colSpan={30} className="px-4 py-4">
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                          <td colSpan={16} className="px-4 py-4">
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs">
+                              <div>
+                                <div className="text-slate-500 font-medium uppercase tracking-widest mb-2">Execution</div>
+                                <div className="space-y-1 text-slate-400">
+                                  <div className="flex justify-between gap-4"><span>Underlying</span><span className="text-slate-300">{underlying ?? 'N/A'}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Contract</span><span className={isHistorical ? 'text-slate-600 italic' : 'text-slate-300'}>{contract}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Expiry</span><span className="text-slate-300">{t.expiry ?? 'N/A'}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Instrument Key</span><span className="font-mono text-slate-300 text-[10px]">{t.instrument_key ?? 'N/A'}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Executed Qty</span><span className="text-slate-300">{qtyLabel}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Lot Size</span><span className="text-slate-300">{t.lot_size ?? 'N/A'}</span></div>
+                                  <div className="flex justify-between gap-4">
+                                    <span>Capital Used</span>
+                                    <span className="text-amber-300 font-medium">{formatCurrency(t.capital_used)}</span>
+                                  </div>
+                                  <div className="text-[10px] text-slate-600 mt-1">capital used = entry price × executed qty</div>
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-slate-500 font-medium uppercase tracking-widest mb-2">Entry / Exit</div>
+                                <div className="space-y-1 text-slate-400">
+                                  <div className="flex justify-between gap-4"><span>Entry Price</span><span className="text-slate-300">{formatCurrency(t.entry_price ?? t.price)}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Entry Time</span><span className="text-slate-300 whitespace-nowrap">{t.entry_time ?? t.timestamp ? formatTime(t.entry_time ?? t.timestamp) : 'N/A'}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Exit Price</span><span className="text-slate-300">{t.exit_price ? formatCurrency(t.exit_price) : 'N/A'}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Exit Time</span><span className="text-slate-300 whitespace-nowrap">{t.exit_time ? formatTime(t.exit_time) : '—'}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Duration</span><span className="text-slate-300">{formatDuration(t.trade_duration_min)}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Exit Reason</span><span className="text-slate-300">{(t.exit_reason ?? '—').replace(/_/g, ' ')}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Order ID</span><span className="font-mono text-slate-300 text-[10px]">{t.order_id ?? 'N/A'}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Trade ID</span><span className="font-mono text-slate-300 text-[10px]">{id ? String(id).slice(0, 16) : 'N/A'}...</span></div>
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-slate-500 font-medium uppercase tracking-widest mb-2">P&L Breakdown</div>
+                                <div className="space-y-1 text-slate-400">
+                                  <div className="flex justify-between gap-4"><span>Gross P&L</span><span className={`font-medium ${pnlColor(t.gross_pnl)}`}>{formatCurrency(t.gross_pnl)}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Charges</span><span className="text-slate-300">{charges > 0 ? formatCurrency(charges) : '—'}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Net P&L</span><span className={`font-semibold ${pnlColor(netPnl)}`}>{formatCurrency(netPnl)}</span></div>
+                                  <div className="flex justify-between gap-4"><span>P&L in R</span><span className={`font-medium ${pnlColor(t.pnl_r)}`}>{formatR(t.pnl_r)}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Initial SL</span><span className="text-red-400">{t.initial_stop ? `₹${t.initial_stop.toFixed(2)}` : '—'}</span></div>
+                                  <div className="flex justify-between gap-4"><span>Final SL</span><span className="text-amber-400">{t.final_stop ? `₹${t.final_stop.toFixed(2)}` : '—'}</span></div>
+                                </div>
+                              </div>
                               <div>
                                 <div className="text-slate-500 font-medium uppercase tracking-widest mb-2">Entry Conditions</div>
                                 {t.conditions_checked ? (
@@ -229,28 +265,6 @@ export default function TradeHistory() {
                                     ))}
                                   </div>
                                 ) : <span className="text-slate-600">No condition data</span>}
-                              </div>
-                              <div>
-                                <div className="text-slate-500 font-medium uppercase tracking-widest mb-2">Trade Details</div>
-                                <div className="space-y-1 text-slate-400">
-                                  <div className="flex justify-between"><span>Trade ID</span><span className="font-mono text-slate-300 text-[10px]">{id?.slice(0, 16)}...</span></div>
-                                  <div className="flex justify-between"><span>ORB Range</span><span className="text-slate-300">{t.orb_high && t.orb_low ? `₹${t.orb_low.toFixed(2)} – ₹${t.orb_high.toFixed(2)}` : '—'}</span></div>
-                                  <div className="flex justify-between"><span>ATR at entry</span><span className="text-slate-300">{t.atr_at_entry?.toFixed(2) ?? '—'}</span></div>
-                                  <div className="flex justify-between"><span>RSI at entry</span><span className="text-slate-300">{t.rsi_at_entry?.toFixed(1) ?? '—'}</span></div>
-                                  <div className="flex justify-between"><span>Choppiness</span><span className={`${(t.choppiness_at_entry ?? 0) > 61.8 ? 'text-red-400' : 'text-emerald-400'}`}>{t.choppiness_at_entry?.toFixed(1) ?? '—'}</span></div>
-                                  <div className="flex justify-between"><span>Volume Ratio</span><span className="text-slate-300">{t.volume_ratio?.toFixed(2) ?? '—'}×</span></div>
-                                </div>
-                              </div>
-                              <div>
-                                <div className="text-slate-500 font-medium uppercase tracking-widest mb-2">Exit Summary</div>
-                                <div className="space-y-1 text-slate-400">
-                                  <div className="flex justify-between"><span>Exit Reason</span><span className="text-slate-300">{(t.exit_reason ?? '—').replace(/_/g, ' ')}</span></div>
-                                  <div className="flex justify-between"><span>Stage at Exit</span><span className="text-slate-300">Stage {t.stage_at_exit ?? '—'}</span></div>
-                                  <div className="flex justify-between"><span>Max Gain (MFE)</span><span className="text-emerald-400">{t.max_favorable ? `₹${t.max_favorable.toFixed(2)}` : '—'}</span></div>
-                                  <div className="flex justify-between"><span>Max Loss (MAE)</span><span className="text-red-400">{t.max_adverse ? `₹${t.max_adverse.toFixed(2)}` : '—'}</span></div>
-                                  <div className="flex justify-between"><span>Net P&L</span><span className={`font-semibold ${pnlColor(netPnl)}`}>{formatCurrency(netPnl)}</span></div>
-                                  <div className="flex justify-between"><span>P&L in R</span><span className={`font-semibold ${pnlColor(t.pnl_r)}`}>{formatR(t.pnl_r)}</span></div>
-                                </div>
                               </div>
                             </div>
                           </td>

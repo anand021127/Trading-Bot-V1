@@ -96,6 +96,7 @@ class TestUpstoxV3SemiAutomatedAuth(unittest.TestCase):
                 except Exception: pass
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp_dir.name, "test_v3_trading.db")
+        self._db = None  # closed in tearDown BEFORE temp_dir.cleanup()
 
         # Mock Upstox HTTP Server
         self.server = HTTPServer(("127.0.0.1", 0), MockUpstoxV3Handler)
@@ -104,6 +105,11 @@ class TestUpstoxV3SemiAutomatedAuth(unittest.TestCase):
         self.server_thread.start()
 
     def tearDown(self):
+        # Windows teardown hygiene: close SQLite handles before cleanup()
+        # (an open handle makes TemporaryDirectory.cleanup() raise WinError 32).
+        if self._db is not None:
+            self._db.close()
+            self._db = None
         self.server.shutdown()
         self.server.server_close()
         self.temp_dir.cleanup()
@@ -136,7 +142,8 @@ class TestUpstoxV3SemiAutomatedAuth(unittest.TestCase):
 
     def test_webhook_token_verification_and_persistence(self):
         """Test that incoming webhook token is validated against /v2/user/profile before SQLite persistence."""
-        db = DatabaseManager(db_path=self.db_path)
+        self._db = DatabaseManager(db_path=self.db_path)
+        db = self._db
         db.init_db()
 
         # 1. Incoming payload from Upstox Notifier Webhook
@@ -170,7 +177,8 @@ class TestUpstoxV3SemiAutomatedAuth(unittest.TestCase):
 
     def test_invalid_webhook_token_rejected_and_not_persisted(self):
         """Test that invalid webhook token (HTTP 401) is rejected and NEVER persisted."""
-        db = DatabaseManager(db_path=self.db_path)
+        self._db = DatabaseManager(db_path=self.db_path)
+        db = self._db
         db.init_db()
 
         invalid_token = INVALID_V3_TOKEN

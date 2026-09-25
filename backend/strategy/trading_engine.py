@@ -30,6 +30,7 @@ from backend.broker.upstox_client import UpstoxClient
 from backend.config.settings import load_settings
 from backend.database.db_manager import DatabaseManager
 from backend.database.models import Position, Trade
+from backend.domain.trade_metadata import normalize_trade_metadata
 from backend.indicators.atr import calculate_atr
 from backend.indicators.choppiness import choppiness_index
 from backend.indicators.ema import calculate_ema
@@ -346,18 +347,38 @@ class TradingEngine:
             for pos in local_positions:
                 stop_loss = round(pos.average_price * (1.0 - settings.risk.max_risk_per_trade_pct), 2)
                 target = round(pos.average_price * (1.0 + settings.risk.max_risk_per_trade_pct * 1.5), 2)
+                # Rehydrate the common trade metadata persisted at entry
+                # (positions.extra) so exits update the ORIGINAL trade row
+                # with its full contract identity instead of a synthetic one.
+                extra = getattr(pos, "extra", None) or {}
+                if not isinstance(extra, dict):
+                    extra = {}
+                if extra.get("trade_id"):
+                    trade_id = str(extra["trade_id"])
+                else:
+                    trade_id = f"RECOVERED-{pos.symbol}"
+                if extra.get("stop_loss"):
+                    stop_loss = float(extra["stop_loss"])
+                if extra.get("target"):
+                    target = float(extra["target"])
                 self._open_positions[pos.symbol] = {
-                    "trade_id": f"RECOVERED-{pos.symbol}",
+                    "trade_id": trade_id,
                     "entry_price": pos.average_price,
                     "stop_loss": stop_loss,
                     "target": target,
                     "trailing_stop": stop_loss,
-                    "strategy_name": self.strategy_name or "V8_D_PULLBACK_ATM",
+                    "strategy_name": extra.get("strategy") or self.strategy_name or "V8_D_PULLBACK_ATM",
                     "quantity": pos.quantity,
                     "requested_quantity": pos.quantity,
                     "side": pos.side,
                     "entry_time": pos.entry_time.isoformat() if hasattr(pos.entry_time, "isoformat") else str(pos.entry_time),
                     "contract_instrument_key": pos.symbol if "|" in pos.symbol else None,
+                    "contract_info": {
+                        "option_type": extra.get("option_type"),
+                        "strike": extra.get("strike"),
+                        "lot_size": extra.get("lot_size"),
+                    } if (extra.get("option_type") or extra.get("strike") or extra.get("lot_size")) else {},
+                    "expiry_date": extra.get("expiry"),
                 }
                 if "|" in pos.symbol:
                     self._subscribe_option_contract(pos.symbol)
@@ -1153,6 +1174,26 @@ class TradingEngine:
             # V21-FINAL Item 3: Subscribe to option contract for live ticks
             self._subscribe_option_contract(contract_instrument_key)
 
+            # ONE common trade metadata model — built from the authoritative
+            # broker-resolved contract (selected_contract) + the ACTUAL fill
+            # (actual_price × actual_qty). The same columns the paper and
+            # backtest paths write; capital_used is recomputed from executed
+            # fill data inside normalize_trade_metadata, never allocation.
+            live_meta = normalize_trade_metadata({
+                "underlying": signal.symbol,
+                "option_type": selected_contract.get("option_type"),
+                "strike": selected_contract.get("strike"),
+                "expiry": contract_metadata.get("expiry"),
+                "instrument_key": contract_instrument_key,
+                "entry_price": actual_price,
+                "quantity": actual_qty,
+                "lot_size": lot_size,
+                "entry_timestamp": datetime.now(timezone.utc).isoformat(),
+                "strategy": signal.strategy_name,
+                "status": "open",
+                "trade_id": trade_id,
+                "order_id": order.id,
+            })
             trade = Trade(
                 id=trade_id, symbol=signal.symbol, side="long", quantity=actual_qty,
                 price=actual_price,
@@ -1160,6 +1201,16 @@ class TradingEngine:
                 status="filled", pnl=None,
                 notes=f"setup_score={signal.confidence:.1f} strategy={signal.strategy_name} "
                       f"instrument={contract_instrument_key}",
+                trade_metadata={
+                    "underlying_symbol": live_meta["underlying_symbol"],
+                    "option_type": live_meta["option_type"],
+                    "strike_price": live_meta["strike_price"],
+                    "expiry": live_meta["expiry"],
+                    "instrument_key": live_meta["instrument_key"],
+                    "lot_size": live_meta["lot_size"],
+                    "capital_used": live_meta["capital_used"],
+                    "order_id": live_meta["order_id"],
+                },
             )
             self.db_manager.insert_trade(trade)
             # ROOT CAUSE FIX: previously nothing ever populated the
@@ -1221,10 +1272,24 @@ class TradingEngine:
                 "order_id": order.id,
                 "fill_details": order.fill_details,
             }
+            # Persist the common metadata with the position so a restart can
+            # rehydrate the full contract identity (same mechanism as paper).
             self.db_manager.upsert_position(Position(
                 symbol=signal.symbol, quantity=actual_qty,
                 average_price=actual_price,
                 entry_time=datetime.now(timezone.utc), side="long", unrealized_pnl=0.0,
+                extra={
+                    "stop_loss": signal.stop_loss,
+                    "target": signal.target,
+                    "lot_size": lot_size,
+                    "trade_id": trade_id,
+                    "strategy": signal.strategy_name,
+                    "underlying": signal.symbol,
+                    "option_type": selected_contract.get("option_type"),
+                    "strike": selected_contract.get("strike"),
+                    "expiry": contract_metadata.get("expiry"),
+                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                },
             ))
 
             self.risk_manager.record_trade_opened()
@@ -1600,6 +1665,7 @@ class TradingEngine:
                     trade_duration_min=trade_duration_min,
                     final_stop=pos.get("trailing_stop", pos.get("stop_loss")),
                     stage_at_exit=1,
+                    order_id=(str(order.id) if (order is not None and getattr(order, "id", None)) else None),
                 )
             except Exception as e:
                 # Same principle as entry-detail persistence: a logging
@@ -1733,6 +1799,15 @@ class TradingEngine:
                 ),
                 "instrument_key": contract_key,
                 "expiry": pos.get("expiry_date"),
+                # Common trade metadata model (same fields as Trade History):
+                "underlying_symbol": symbol,
+                "option_type": contract_info.get("option_type"),
+                "strike_price": contract_info.get("strike"),
+                "lot_size": contract_info.get("lot_size"),
+                "capital_used": (
+                    round(pos["entry_price"] * pos["quantity"], 2)
+                    if pos["entry_price"] and pos["entry_price"] > 0 and pos["quantity"] > 0 else None
+                ),
                 "bid": bid_price,
                 "ask": ask_price,
                 "spread_pct": spread_pct,

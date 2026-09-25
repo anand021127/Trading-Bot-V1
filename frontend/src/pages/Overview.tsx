@@ -462,7 +462,7 @@ export default function Overview() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-500 border-b border-[#1e2d45]">
-                  {['Symbol','Entry Time','Entry Price','Current','Chg%','Qty','Init SL','Curr SL','Stage','Unrealised P&L','R','Duration'].map(h => (
+                  {['Symbol','Contract','Expiry','Entry Time','Entry Price','Qty','Capital Used','Current','Chg%','Init SL','Curr SL','Stage','Unrealised P&L','R','Duration'].map(h => (
                     <th key={h} className="text-left px-3 py-2 font-medium whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -475,14 +475,24 @@ export default function Overview() {
                   const livePct = ep ? ((livePrice - ep) / ep) * 100 : 0
                   const initSl = pos.initial_stop ?? 0
                   const liveR = initSl && ep ? livePnl / ((ep - initSl) * pos.quantity) : null
+                  const hasContract = pos.strike_price != null || !!pos.option_type
                   return (
                     <tr key={pos.symbol} className={`border-b border-[#1e2d45] last:border-0 hover:bg-[#1a2235] ${livePnl >= 0 ? 'bg-emerald-950/5' : 'bg-red-950/5'}`}>
-                      <td className="px-3 py-2.5 font-semibold text-white">{pos.symbol}</td>
+                      <td className="px-3 py-2.5 font-semibold text-white">{pos.underlying_symbol ?? pos.symbol}</td>
+                      <td className={`px-3 py-2.5 whitespace-nowrap ${hasContract ? 'font-semibold text-sky-300' : 'text-slate-600'}`}>
+                        {hasContract
+                          ? `${pos.strike_price != null ? pos.strike_price.toLocaleString('en-IN') : ''} ${pos.option_type ?? ''}`.trim()
+                          : 'N/A'}
+                      </td>
+                      <td className="px-3 py-2.5 text-slate-400 whitespace-nowrap">{pos.expiry ?? 'N/A'}</td>
                       <td className="px-3 py-2.5 text-slate-400">{formatTime(pos.entry_time)}</td>
                       <td className="px-3 py-2.5">₹{ep.toFixed(2)}</td>
+                      <td className="px-3 py-2.5 text-slate-300">{pos.quantity}</td>
+                      <td className="px-3 py-2.5 text-amber-300 whitespace-nowrap" title="Capital actually deployed = entry price × executed quantity">
+                        {formatCurrency(pos.capital_used)}
+                      </td>
                       <td className="px-3 py-2.5 font-medium text-white">₹{livePrice.toFixed(2)}</td>
                       <td className={`px-3 py-2.5 font-medium ${pnlColor(livePct)}`}>{formatPercent(livePct)}</td>
-                      <td className="px-3 py-2.5 text-slate-300">{pos.quantity}</td>
                       <td className="px-3 py-2.5 text-red-400">₹{initSl.toFixed(2)}</td>
                       <td className="px-3 py-2.5 text-amber-400">₹{(pos.trailing_stop ?? initSl).toFixed(2)}</td>
                       <td className="px-3 py-2.5">

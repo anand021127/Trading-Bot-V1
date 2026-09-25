@@ -116,15 +116,26 @@ export default function PaperTrading() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-500 border-b border-[#1e2d45] bg-[#0f1628]/50">
-                  {['Symbol','Strategy','Entry','Target','Stop Loss','Trailing SL','Current Price','Current P&L'].map(h => (
-                    <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
+                  {['Symbol','Contract','Expiry','Qty','Lot','Capital Used','Strategy','Entry','Target','Stop Loss','Trailing SL','Current Price','Current P&L'].map(h => (
+                    <th key={h} className="text-left px-3 py-2 font-medium whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {positions.map(p => (
                   <tr key={p.symbol} className="border-b border-[#1e2d45] last:border-0 hover:bg-[#1a2235]">
-                    <td className="px-3 py-2.5 text-white font-medium">{p.symbol}</td>
+                    <td className="px-3 py-2.5 text-white font-medium">{p.underlying_symbol ?? p.symbol}</td>
+                    <td className="px-3 py-2.5 font-semibold text-sky-300 whitespace-nowrap">
+                      {p.strike_price != null || p.option_type
+                        ? `${p.strike_price != null ? p.strike_price.toLocaleString('en-IN') : ''} ${p.option_type ?? ''}`.trim()
+                        : <span className="text-slate-600">N/A</span>}
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-400 whitespace-nowrap">{p.expiry ?? 'N/A'}</td>
+                    <td className="px-3 py-2.5 text-slate-300">{p.quantity}</td>
+                    <td className="px-3 py-2.5 text-slate-400">{p.lot_size ?? 'N/A'}</td>
+                    <td className="px-3 py-2.5 text-amber-300 font-medium whitespace-nowrap" title="Capital actually deployed = entry price × executed quantity">
+                      {formatCurrency(p.capital_used)}
+                    </td>
                     <td className="px-3 py-2.5 text-slate-400">{p.strategy_used}</td>
                     <td className="px-3 py-2.5 text-slate-300">{formatCurrency(p.entry_price)}</td>
                     <td className="px-3 py-2.5 text-emerald-400">{p.target ? formatCurrency(p.target) : '—'}</td>

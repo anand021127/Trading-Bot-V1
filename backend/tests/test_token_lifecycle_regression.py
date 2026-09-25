@@ -146,12 +146,17 @@ class TestTokenLifecycleRegression(unittest.TestCase):
         db = DatabaseManager(db_path=self.db_path)
         # Store mock token in DB
         db.save_setting("upstox_access_token", "mock-fresh-access-token-456")
+        db.close()
 
         with patch("backend.database.db_manager.DatabaseManager", return_value=db):
             resolved = resolve_upstox_token()
             self.assertEqual(resolved, real_jwt)
             src = get_token_source()
             self.assertEqual(src, "environment (os.environ)")
+        # resolve_upstox_token/get_token_source re-open the patched handle inside
+        # resolution (tiering order: persisted verified first). Close again so
+        # tearDown's temp-dir cleanup never races an open SQLite file (Windows).
+        db.close()
 
     def test_save_token_does_not_clobber_environment_with_mock(self):
         """Proves DatabaseManager.save_token does not overwrite os.environ with mock strings."""
@@ -163,6 +168,7 @@ class TestTokenLifecycleRegression(unittest.TestCase):
 
         # Database setting is saved for test purposes
         self.assertEqual(db.load_token(), "mock-test-token-only")
+        db.close()
 
         # But os.environ was NOT corrupted
         self.assertEqual(os.environ.get("UPSTOX_ACCESS_TOKEN"), real_jwt)
@@ -207,6 +213,7 @@ class TestTokenLifecycleRegression(unittest.TestCase):
         saved_fresher = db.save_token(fresher_jwt, verified=True, source="oauth_callback")
         self.assertTrue(saved_fresher)
         self.assertEqual(db.load_token(require_valid=True), fresher_jwt)
+        db.close()
 
     def test_tiered_scoring_priority_enforces_authoritative_resolution(self):
         """Proves strict resolution priority: Runtime Verified > Persisted Verified > Others."""
@@ -229,12 +236,15 @@ class TestTokenLifecycleRegression(unittest.TestCase):
             resolved, src = resolve_upstox_token_with_source(require_valid=True)
             self.assertEqual(resolved, runtime_verified)
             self.assertEqual(src, "runtime (in-memory verified)")
+            db.close()
 
             # When runtime verified is cleared, persisted verified wins
             clear_verified_runtime_token()
             resolved2, src2 = resolve_upstox_token_with_source(require_valid=True)
             self.assertEqual(resolved2, persisted_verified)
             self.assertIn("verified", src2)
+        db.close()
+        db.close()
 
     def test_client_immutability_and_no_reresolution(self):
         """Proves UpstoxExpiredOptionsClient preserves the passed access_token immutably."""
@@ -262,6 +272,7 @@ class TestTokenLifecycleRegression(unittest.TestCase):
             resolved, src = resolve_upstox_token_with_source(require_valid=True)
             self.assertEqual(resolved, "")
             self.assertEqual(src, "none")
+        db.close()
 
     def test_check_token_freshness_lifecycle(self):
         """Proves check_token_freshness accurately parses exp and classifies fresh vs expired."""
@@ -363,6 +374,7 @@ class TestTokenLifecycleRegression(unittest.TestCase):
 
         # Isolate resolver from persisted DB / dotenv / json so only env + runtime verified matter.
         empty_db = DatabaseManager(db_path=self.db_path)
+        self.addCleanup(empty_db.close)
         isolation = (
             patch("backend.database.db_manager.DatabaseManager", return_value=empty_db),
             patch("backend.broker.token_resolver.find_repo_dotenv_path", return_value=None),
@@ -489,8 +501,13 @@ class TestTokenLifecycleRegression(unittest.TestCase):
             self.assertEqual(setup_expired.access_token, tok2)
             # Explicit clients are NOT overwritten
             self.assertEqual(explicit_client.access_token, tok1)
-            self.assertEqual(explicit_expired.access_token, tok1)
-            self.assertEqual(os.environ.get("UPSTOX_ACCESS_TOKEN"), tok2)
+
+        # Release the isolated DB handle before temp-dir teardown (Windows
+        # cannot delete an open SQLite file).
+        empty_db.close()
+
+        self.assertEqual(explicit_expired.access_token, tok1)
+        self.assertEqual(os.environ.get("UPSTOX_ACCESS_TOKEN"), tok2)
 
 
 if __name__ == "__main__":

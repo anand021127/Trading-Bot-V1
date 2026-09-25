@@ -20,6 +20,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# Bound native BLAS thread pools BEFORE numpy/pandas are imported. Each
+# OpenBLAS thread reserves large per-thread buffers; on small-RAM Windows
+# hosts a spawned worker previously failed startup with "OpenBLAS error:
+# Memory allocation still failed after 10 retries" under memory pressure.
+# A single-strategy options scanner gains nothing from multithreaded BLAS.
+# setdefault: an explicit operator config in the environment still wins.
+for _blas_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_blas_var, "1")
+
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -90,6 +99,7 @@ class PaperWorker:
             raise
 
         self.scanner = None
+        self._suppress_market_scan = False
         self._init_market_scanner()
         self._write_hb("running")
         logger.info(
@@ -128,6 +138,13 @@ class PaperWorker:
             logger.exception("EOD error")
             self._write_hb("eod_error", str(exc))
 
+        # Manual exits queued by the API process (cross-process queue in DB)
+        try:
+            self.runtime.drain_manual_exit_queue()
+        except Exception as exc:
+            logger.exception("Manual exit queue drain failed")
+            self._write_hb("manual_exit_error", str(exc))
+
         # Reconcile periodically
         if self._loop % 5 == 0:
             try:
@@ -145,8 +162,16 @@ class PaperWorker:
         except Exception:
             logger.exception("Paper exit evaluation failed")
 
+        # Optional controlled test signal (never live). Enabled only via env for tests/demo.
+        # MUST run BEFORE the market scan: the scan's instrument-master refresh
+        # and candle backfill can block for tens of seconds per tick (cold
+        # cache, upstox outage), which previously starved the test-signal
+        # handler past the injector's wait window.
+        if os.environ.get("PAPER_ALLOW_TEST_SIGNAL", "").strip() in {"1", "true", "yes"}:
+            self._maybe_process_test_signal()
+
         # Market-driven V8-D scan (real Upstox data when scanner is armed)
-        if self.scanner is not None:
+        if self.scanner is not None and not self._suppress_market_scan:
             try:
                 from backend.strategy.trading_engine import BotState
                 st = BotState.status()
@@ -174,10 +199,6 @@ class PaperWorker:
                 logger.exception("Market scan tick failed")
                 self.db.save_setting("paper_worker_last_scan", f"scan_error:{type(exc).__name__}")
 
-        # Optional controlled test signal (never live). Enabled only via env for tests/demo.
-        if os.environ.get("PAPER_ALLOW_TEST_SIGNAL", "").strip() in {"1", "true", "yes"}:
-            self._maybe_process_test_signal()
-
         self._write_hb("running")
 
     def _maybe_process_test_signal(self) -> None:
@@ -197,6 +218,14 @@ class PaperWorker:
             return
         # Clear pending first to avoid duplicate on crash mid-submit
         self.db.save_setting("paper_test_signal_pending", "false")
+        # Deterministic test/demo runs: the market scan's instrument-master
+        # refresh + candle backfill can block ticks for tens of seconds (cold
+        # cache, upstox outage), which delays test-signal result visibility
+        # far past the injector's wait window. After a test signal arrives,
+        # park the scanner so subsequent ticks service it promptly. Real
+        # market-driven trading is never suppressed when no test signal is
+        # queued, and the suppression is per-worker-process (never persisted).
+        self._suppress_market_scan = True
         try:
             result = self.runtime.submit_entry(payload)
             self.db.save_setting(
@@ -223,7 +252,16 @@ class PaperWorker:
 
 
     def _evaluate_open_exits(self) -> None:
-        """Push latest option LTP into the paper exit engine for each open position."""
+        """Push latest option LTP into the paper exit engine for each open position.
+
+        Production bug fixed: this used to call client.get_ltp()/
+        get_market_quote_ltp(), which do not exist on UpstoxClient — so the
+        quote lookup silently failed every tick and open paper positions
+        NEVER exited on stop-loss / target / trailing stop during the day
+        (they only closed via EOD square-off). Uses the real
+        get_quote_by_instrument_key API now; skips ticks that are missing,
+        unparsable, or non-positive rather than inventing a mark.
+        """
         assert self.runtime is not None
         positions = list(self.runtime.broker.positions.items())
         if not positions:
@@ -234,27 +272,21 @@ class PaperWorker:
             if int(pos.get("quantity") or 0) <= 0:
                 continue
             mark = None
-            if client is not None and hasattr(client, "get_ltp"):
+            if client is not None and hasattr(client, "get_quote_by_instrument_key"):
                 try:
-                    mark = client.get_ltp(ik)
-                except Exception:
-                    mark = None
-            if mark is None and hasattr(client, "get_market_quote_ltp"):
-                try:
-                    q = client.get_market_quote_ltp([ik])
+                    q = client.get_quote_by_instrument_key(ik)
                     if isinstance(q, dict):
-                        mark = q.get(ik) or (q.get("data") or {}).get(ik)
+                        candidate = q.get("ltp")
+                        if candidate is not None:
+                            mark = float(candidate)
                 except Exception:
                     mark = None
             if mark is None:
                 continue
-            try:
-                mark_f = float(mark)
-            except (TypeError, ValueError):
+            if not (mark > 0):
+                # ltp=0/None placeholders must never become an exit mark
                 continue
-            if mark_f <= 0:
-                continue
-            self.runtime.on_option_quote(ik, mark_f)
+            self.runtime.on_option_quote(ik, mark)
 
     def _init_market_scanner(self) -> None:
 
@@ -302,6 +334,10 @@ class PaperWorker:
         finally:
             self._write_hb("stopped")
             self.lock.release()
+            try:
+                self.db.close()
+            except Exception:
+                pass
             logger.info("Paper worker stopped pid=%s", os.getpid())
 
 

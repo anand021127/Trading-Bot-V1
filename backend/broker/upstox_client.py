@@ -744,6 +744,18 @@ class UpstoxClient:
             "is_amo": False,
         }
         url = f"{self.base_url}/order/place"
+        # ── hard offline guard (defense in depth) ─────────────────────────
+        # place_order is the ONLY method in this client that can move real
+        # money. In offline/test mode the paper pipeline must never be able
+        # to reach it, even through a mis-wired client.
+        if os.environ.get("TRADING_BOT_OFFLINE_TESTS") == "1" and os.environ.get("ALLOW_LIVE_UPSTOX") != "1":
+            raise UpstoxAPIError(
+                503,
+                "Blocked live Upstox ORDER placement during offline tests. "
+                "Set ALLOW_LIVE_UPSTOX=1 for explicit live-order tests.",
+            )
+        if self._session is None or requests is None:
+            raise UpstoxAPIError(500, "Live order placement requires the requests library")
         r = self._session.post(url, json=payload, headers=self._headers(), timeout=self.timeout)
         data = r.json()
         if r.status_code == 200 and data.get("status") == "success":

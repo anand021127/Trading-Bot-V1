@@ -101,6 +101,7 @@ class TestUpstoxV3TokenApprovalSuite(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp_dir.name, "test_v3.db")
+        self._db = None  # closed in tearDown BEFORE temp_dir.cleanup()
         
         # Reset in-memory auth state
         _auth_state["status"] = "IDLE"
@@ -111,6 +112,11 @@ class TestUpstoxV3TokenApprovalSuite(unittest.TestCase):
         _auth_state["token_present"] = False
 
     def tearDown(self):
+        # Windows teardown hygiene: close SQLite handles before cleanup()
+        # (an open handle makes TemporaryDirectory.cleanup() raise WinError 32).
+        if self._db is not None:
+            self._db.close()
+            self._db = None
         self.temp_dir.cleanup()
 
     # --- TEST A: V3 Auth Request Success ---
@@ -209,7 +215,8 @@ class TestUpstoxV3TokenApprovalSuite(unittest.TestCase):
     @patch.dict(os.environ, {"UPSTOX_CLIENT_ID": "test_cid_123"})
     def test_webhook_receiver_success(self):
         """Test D: Webhook saves token to DatabaseManager, settings, and updates status."""
-        db = DatabaseManager(db_path=self.db_path)
+        self._db = DatabaseManager(db_path=self.db_path)
+        db = self._db
         db.init_db()
 
         with patch.object(upstox_v3_auth, "_db", db):

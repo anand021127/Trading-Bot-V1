@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -31,11 +32,31 @@ def _is_market_open() -> bool:
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:
-    d = dict(row) if hasattr(row, "keys") else {}
+    """Serialize a DB row / dataclass for the API.
+
+    Regression fix: dataclass rows (list_trades returns Trade objects on the
+    legacy path, list_positions returns Position) have no ``keys`` method, so
+    dict(row) silently failed and this returned {} — the API served empty
+    objects. Dataclasses are now serialized via asdict; everything else as
+    before. list_trades now returns full row dicts (superset incl. the common
+    trade metadata model), so every field reaches the frontend unchanged.
+    """
+    if is_dataclass(row) and not isinstance(row, type):
+        d = asdict(row)
+    else:
+        d = dict(row) if hasattr(row, "keys") else {}
     d.pop("_sa_instance_state", None)
     for k in ("entry_time", "exit_time", "timestamp", "created_at"):
         if isinstance(d.get(k), datetime):
             d[k] = d[k].isoformat()
+    # Contract field aliases: the canonical metadata model names these
+    # entry_timestamp/exit_timestamp while the trades table (one schema for
+    # paper/live/backtest) stores them as entry_time/exit_time. Expose both
+    # names so every consumer of the contract reads the same fields.
+    if "entry_timestamp" not in d:
+        d["entry_timestamp"] = d.get("entry_time")
+    if "exit_timestamp" not in d:
+        d["exit_timestamp"] = d.get("exit_time")
     return d
 
 
@@ -159,9 +180,11 @@ async def export_trades_csv(
         rows = []
 
     cols = [
-        "id","symbol","mode","entry_time","exit_time","entry_price","exit_price",
-        "quantity","initial_stop","final_stop","exit_reason","gross_pnl","net_pnl",
-        "brokerage","stt","pnl_r","trade_duration_min","stage_at_exit",
+        "id","symbol","underlying_symbol","option_type","strike_price","expiry",
+        "instrument_key","mode","entry_time","exit_time","entry_price","exit_price",
+        "quantity","lot_size","capital_used","initial_stop","final_stop","exit_reason",
+        "gross_pnl","net_pnl","brokerage","stt","pnl_r","trade_duration_min",
+        "stage_at_exit","order_id","signal_id",
         "orb_high","orb_low","atr_at_entry","rsi_at_entry","choppiness_at_entry",
         "volume_ratio","ema20_at_entry","ema50_at_entry","trend_bias",
         "max_favorable","max_adverse",
@@ -192,15 +215,74 @@ async def get_trade(trade_id: str) -> Dict[str, Any]:
 
 @router.get("/positions")
 async def get_positions() -> List[Dict[str, Any]]:
+    """Open positions from the durable ledger with the common trade metadata
+    model (underlying / strike / CE-PE / expiry / lot size / capital used).
+    Metadata comes from positions.extra (persisted at entry); capital_used is
+    the actually-deployed capital = average entry price × executed quantity.
+    """
     try:
-        return [_row_to_dict(r) for r in db.list_positions()]
+        out: List[Dict[str, Any]] = []
+        for r in db.list_positions():
+            d = _row_to_dict(r)
+            extra = d.pop("extra", None)
+            if not isinstance(extra, dict):
+                extra = {}
+            d["underlying_symbol"] = d.get("underlying_symbol") or extra.get("underlying")
+            d["option_type"] = d.get("option_type") or extra.get("option_type")
+            if d.get("strike_price") is None:
+                d["strike_price"] = extra.get("strike")
+            d["expiry"] = d.get("expiry") or extra.get("expiry")
+            d["lot_size"] = d.get("lot_size") or extra.get("lot_size")
+            d["trade_id"] = d.get("trade_id") or extra.get("trade_id")
+            d["strategy"] = d.get("strategy") or extra.get("strategy")
+            entry_price = float(d.get("average_price") or 0)
+            qty = int(d.get("quantity") or 0)
+            d["entry_price"] = entry_price
+            d["capital_used"] = round(entry_price * qty, 2) if entry_price > 0 and qty > 0 else None
+            out.append(d)
+        return out
     except Exception:
         return []
 
 
 @router.post("/positions/{symbol}/exit")
 async def manual_exit_position(symbol: str) -> Dict[str, Any]:
-    return {"status": "exit_queued", "symbol": symbol, "reason": "MANUAL_EXIT"}
+    """Queue a manual exit for the paper worker to execute.
+
+    Production bug fixed: this endpoint previously returned
+    {"status": "exit_queued"} without doing anything — no position was ever
+    closed. The API process does not own PaperBroker (the worker process
+    does), so the exit request is persisted to a durable queue that the
+    worker drains on its next tick and executes through the idempotent
+    paper exit path. Duplicate requests are deduplicated by the queue.
+    """
+    from backend.paper.paper_runtime import PaperTradingRuntime
+
+    runtime: Optional[PaperTradingRuntime] = None
+    try:
+        import backend.api.routers.bot_control as bot_control_module
+        runtime = bot_control_module.get_paper_runtime()
+    except Exception:
+        runtime = None
+    if runtime is None:
+        try:
+            import backend.api.main as main_mod
+            runtime = getattr(getattr(main_mod, "app", None), "state", None)
+            runtime = getattr(runtime, "paper_runtime", None) if runtime is not None else None
+        except Exception:
+            runtime = None
+    if runtime is None or not isinstance(runtime, PaperTradingRuntime):
+        return {
+            "status": "exit_failed",
+            "symbol": symbol,
+            "reason": "MANUAL_EXIT",
+            "error": "paper_runtime_not_attached",
+        }
+    # Accept either the raw instrument key or the ledger symbol.
+    result = runtime.queue_manual_exit(symbol, reason="MANUAL_EXIT")
+    if result.get("queued"):
+        return {"status": "exit_queued", "symbol": symbol, "reason": "MANUAL_EXIT"}
+    return {"status": "exit_failed", "symbol": symbol, "reason": "MANUAL_EXIT", "detail": result.get("reason")}
 
 
 @router.get("/positions/live")

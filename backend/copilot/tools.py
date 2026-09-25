@@ -427,7 +427,10 @@ class CopilotTools:
         try:
             today = datetime.now(timezone.utc).date().isoformat()
             trades = self.db_manager.list_trades(date_from=today, date_to=today)
-            realized = sum(float(getattr(t, "pnl", 0) or (t["pnl"] if "pnl" in t.keys() else 0) or 0) for t in trades)
+            realized = 0.0
+            for t in trades:
+                row = dict(t) if hasattr(t, "keys") else {}
+                realized += float(row.get("pnl") or 0.0)
             return {"available": True, "date": today, "trades_today": len(trades), "realized_pnl": realized}
         except Exception as e:
             return _unavailable(f"Failed to compute daily P&L: {e}")

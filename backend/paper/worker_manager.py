@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from backend.database.db_manager import DatabaseManager
-from backend.paper.worker_lock import WorkerLock
+from backend.paper.worker_lock import WorkerLock, pid_is_alive
 from backend.strategy.trading_engine import BotState
 
 HB_KEY = "paper_worker_heartbeat"
@@ -37,13 +37,8 @@ def _lock_path(db_path: str) -> str:
 
 
 def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    """Cross-platform liveness check (see worker_lock.pid_is_alive)."""
+    return pid_is_alive(pid)
 
 
 def worker_status() -> Dict[str, Any]:
@@ -63,7 +58,7 @@ def worker_status() -> Dict[str, Any]:
         except Exception:
             age = None
     lock = WorkerLock(_lock_path(db.db_path))
-    return {
+    result = {
         "success": True,
         "worker_alive": alive,
         "worker_pid": pid if alive else None,
@@ -76,6 +71,11 @@ def worker_status() -> Dict[str, Any]:
         "bot_state": BotState.status(),
         "database_path": db.db_path,
     }
+    # Close the short-lived handle: this process is transient (one bridge
+    # invocation), and leaked open SQLite files block temp-dir cleanup on
+    # Windows (PermissionError WinError 32) in e2e tests.
+    db.close()
+    return result
 
 
 def start_worker(wait_seconds: float = 8.0) -> Dict[str, Any]:
@@ -165,24 +165,27 @@ def stop_worker() -> Dict[str, Any]:
     db = _db()
     BotState._db = db
     BotState.stop("Manual stop via dashboard")
-    st = worker_status()
-    pid = st.get("worker_pid")
-    if pid and _pid_alive(int(pid)):
-        try:
-            os.kill(int(pid), signal.SIGTERM)
-        except OSError as exc:
-            return {"success": False, "message": f"kill failed: {exc}", **worker_status()}
-        # wait for exit
-        for _ in range(25):
-            time.sleep(0.2)
-            if not _pid_alive(int(pid)):
-                break
-        else:
+    try:
+        st = worker_status()
+        pid = st.get("worker_pid")
+        if pid and _pid_alive(int(pid)):
             try:
-                os.kill(int(pid), signal.SIGKILL)
-            except OSError:
-                pass
-    db.save_setting(STATUS_KEY, "stopped")
+                os.kill(int(pid), signal.SIGTERM)
+            except OSError as exc:
+                return {"success": False, "message": f"kill failed: {exc}", **worker_status()}
+            # wait for exit
+            for _ in range(25):
+                time.sleep(0.2)
+                if not _pid_alive(int(pid)):
+                    break
+            else:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except OSError:
+                    pass
+        db.save_setting(STATUS_KEY, "stopped")
+    finally:
+        db.close()
     return {"success": True, "message": "Paper worker stopped", **worker_status()}
 
 
@@ -210,6 +213,7 @@ def kill_worker() -> Dict[str, Any]:
             except OSError:
                 pass
     db.save_setting(STATUS_KEY, "killed")
+    db.close()
     return {
         "success": True,
         "message": "EMERGENCY KILL ACTIVATED. Paper worker stopped.",

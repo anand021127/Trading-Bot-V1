@@ -13,6 +13,12 @@ import tempfile
 import uuid
 
 os.environ.setdefault("PYTEST_RUNNING", "1")
+# Bound native BLAS thread pools before numpy is imported anywhere in the
+# test process: each OpenBLAS thread reserves large per-thread buffers and on
+# small-RAM Windows hosts subprocesses spawned by e2e tests previously died
+# with "OpenBLAS error: Memory allocation still failed after 10 retries".
+for _blas_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_blas_var, "1")
 os.environ.setdefault("TRADING_BOT_OFFLINE_TESTS", "1")
 os.environ.setdefault("TRADING_MODE", "paper")
 os.environ.setdefault("TRADING_STRATEGY", "V8_D_PULLBACK_ATM")

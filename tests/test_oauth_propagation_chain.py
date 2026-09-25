@@ -82,6 +82,7 @@ class TestOAuthPropagationChain(unittest.TestCase):
         os.environ["UPSTOX_ACCESS_TOKEN"] = "old_stale_env_token_7f5e5b"
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp_dir.name, "test_trading.db")
+        self._db = None  # closed in tearDown BEFORE temp_dir.cleanup()
 
         # Mock Upstox HTTP Server
         self.server = HTTPServer(("127.0.0.1", 0), MockUpstoxHandler)
@@ -90,20 +91,29 @@ class TestOAuthPropagationChain(unittest.TestCase):
         self.server_thread.start()
 
     def tearDown(self):
+        # Windows teardown hygiene: an open SQLite handle makes
+        # TemporaryDirectory.cleanup() fail with PermissionError (WinError 32).
+        # The env restore must run FIRST — previously cleanup() raised before
+        # these lines, leaking UPSTOX_ACCESS_TOKEN into the rest of the suite.
+        if self.orig_env is not None:
+            os.environ["UPSTOX_ACCESS_TOKEN"] = self.orig_env
+        else:
+            os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
+        if self._db is not None:
+            self._db.close()
+            self._db = None
         self.server.shutdown()
+        self.server.server_close()
         self.temp_dir.cleanup()
         for p in ["upstox_token.json", "data/upstox_token.json"]:
             if os.path.exists(p):
                 try: os.remove(p)
                 except Exception: pass
-        if self.orig_env is not None:
-            os.environ["UPSTOX_ACCESS_TOKEN"] = self.orig_env
-        else:
-            os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
 
     def test_full_oauth_propagation_chain(self):
         """Test full OAuth flow: exchange -> verification -> SQLite persistence -> propagation."""
-        db = DatabaseManager(db_path=self.db_path)
+        self._db = DatabaseManager(db_path=self.db_path)
+        db = self._db
         db.init_db()
 
         # 1. Verify initial fallback: SQLite is empty
@@ -148,7 +158,8 @@ class TestOAuthPropagationChain(unittest.TestCase):
 
     def test_failed_verification_does_not_persist(self):
         """Ensure invalid tokens (HTTP 401) are NOT saved to persistent storage."""
-        db = DatabaseManager(db_path=self.db_path)
+        self._db = DatabaseManager(db_path=self.db_path)
+        db = self._db
         db.init_db()
 
         invalid_token = "invalid_token_xyz"

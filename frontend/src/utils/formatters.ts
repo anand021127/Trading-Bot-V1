@@ -49,6 +49,34 @@ export const formatVolume = (v: number): string => {
   return `${v}`
 }
 
+// ── Common trade metadata model display helpers ────────────────────────────
+// Absent historical metadata renders as N/A — never an invented value.
+
+export const HISTORICAL_NOTE = 'N/A / Historical metadata unavailable'
+
+export const formatStrike = (value: number | string | null | undefined): string => {
+  if (value == null || value === '') return 'N/A'
+  const n = Number(value)
+  if (Number.isNaN(n)) return 'N/A'
+  return n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
+}
+
+export const formatContractLabel = (
+  strike: number | string | null | undefined,
+  optionType: string | null | undefined,
+): string => {
+  const hasStrike = strike != null && strike !== ''
+  const hasType = !!optionType
+  if (!hasStrike && !hasType) return HISTORICAL_NOTE
+  if (!hasStrike) return String(optionType)
+  return `${formatStrike(strike)} ${optionType ?? ''}`.trim()
+}
+
+export const formatQty = (value: number | null | undefined): string => {
+  if (value == null) return 'N/A'
+  return `${value} qty`
+}
+
 export const pnlColor = (value: number | null | undefined): string => {
   if (value == null) return 'text-slate-400'
   return value >= 0 ? 'text-emerald-400' : 'text-red-400'

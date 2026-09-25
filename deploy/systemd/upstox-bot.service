@@ -1,0 +1,56 @@
+# =============================================================================
+# Trading-Bot-V1 — systemd unit (Ubuntu production server)
+#
+# Install:
+#   sudo cp deploy/systemd/upstox-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now upstox-bot.service
+#
+# This service starts the FastAPI backend (uvicorn) in PAPER MODE. The paper
+# worker is started on demand via the dashboard Start button (node_bridge →
+# worker_manager), or manually with:
+#   sudo -u ubuntu DATABASE_PATH=/opt/trading-bot/data/trading_bot.db \
+#        TRADING_MODE=paper TRADING_STRATEGY=V8_D_PULLBACK_ATM \
+#        UPSTOX_ORDER_PRODUCT=I \
+#        /opt/trading-bot/venv/bin/python backend/paper/paper_worker.py
+#
+# SAFETY: the unit refuses to configure anything but paper mode. Live trading
+# remains blocked by application-level gates (bot_control / node_bridge /
+# PaperTradingRuntime all refuse TRADING_MODE=live START).
+# =============================================================================
+
+[Unit]
+Description=Trading-Bot-V1 backend (PAPER MODE — Upstox index options)
+Documentation=file:///opt/trading-bot/PRODUCTION_DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/trading-bot
+EnvironmentFile=/opt/trading-bot/.env
+Environment=TRADING_MODE=paper
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/trading-bot/venv/bin/uvicorn backend.api.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# ── Hardening ────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/trading-bot/data /opt/trading-bot/logs
+LimitNOFILE=8192
+
+# Logging → journald (journalctl -u upstox-bot.service)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=upstox-bot
+
+[Install]
+WantedBy=multi-user.target

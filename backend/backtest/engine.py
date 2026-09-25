@@ -248,6 +248,20 @@ class BacktestTrade:
             "exit_price": self.exit_price,
             "quantity": self.quantity,
             "lot_size": self.lot_size,
+            # Common trade metadata model (same fields as paper/live trades):
+            # capital_used is the actual deployed capital = entry_price ×
+            # executed quantity — never the configured backtest account
+            # capital and never the risk allocation.
+            "underlying_symbol": self.underlying or self.symbol,
+            "strike_price": self.strike,
+            "capital_used": (
+                round(float(self.entry_price) * int(self.quantity), 2)
+                if (self.entry_price and self.entry_price > 0 and self.quantity and self.quantity > 0)
+                else None
+            ),
+            "status": "closed" if self.exit_time else "open",
+            "entry_timestamp": self.entry_time,
+            "exit_timestamp": self.exit_time or None,
             "number_of_lots": self.number_of_lots,
             "instrument_type": self.instrument_type,
             "stop_loss": self.stop_loss,

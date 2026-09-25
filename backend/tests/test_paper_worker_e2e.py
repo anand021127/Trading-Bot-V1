@@ -133,6 +133,7 @@ def test_test_signal_reaches_pipeline_and_sqlite():
 
             db = DatabaseManager(db_path=path)
             raw = db.get_setting("paper_test_signal_result", "")
+            db.close()  # leaked handles block temp-dir cleanup on Windows
             if raw:
                 result = json.loads(raw)
                 break

@@ -18,6 +18,8 @@ from backend.backtest.engine import CostConfig
 from backend.broker.positions_api import fetch_positions
 from backend.config.strategy_registry import load_strategy
 from backend.database.db_manager import DatabaseManager
+from backend.database.models import Position, Trade
+from backend.domain.trade_metadata import normalize_trade_metadata
 from backend.execution.eod import is_past_square_off
 from backend.execution.kill_switch import PersistentKillSwitch
 from backend.execution.pipeline import ExecutionPipeline
@@ -29,6 +31,8 @@ from backend.strategy.exit_manager import TrailingStopManager
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
+
+_PENDING_EXIT_KEY = "paper_pending_exit_queue"
 
 
 class PaperStartupError(RuntimeError):
@@ -110,7 +114,62 @@ class PaperTradingRuntime:
         except Exception as exc:
             logger.warning("Paper startup hydrate deferred: %s", exc)
         self._pending_entry_meta: Dict[str, Any] = {}
+        self._restore_persistent_day_state()
         self._log_startup()
+
+    # ── durable in-memory trading-state recovery (restart safety) ───────────
+    def _restore_persistent_day_state(self) -> None:
+        """Restore realized equity and today's risk counters from SQLite.
+
+        Restart-safety: without this, a worker restart after a loss would
+        silently reset realized_equity back to starting capital and zero
+        trades_today — letting the bot trade past MAX_TRADES_PER_DAY and
+        MAX_DAILY_LOSS purely by restarting.
+        """
+        try:
+            snap = self.db.get_setting("paper_equity_snapshot", "")
+            if snap:
+                data = json.loads(snap)
+                self.realized_equity = float(data.get("realized_equity", self.starting_capital))
+                self.realized_pnl_total = float(data.get("realized_pnl_total", 0.0))
+                self.charges_total = float(data.get("charges_total", 0.0))
+                self._trade_day = data.get("trade_day") or None
+                self.trades_today = int(data.get("trades_today", 0))
+                self.daily_realized_pnl = float(data.get("daily_realized_pnl", 0.0))
+        except Exception as exc:
+            logger.warning("Could not restore persistent equity state: %s", exc)
+        # daily_counters is the authoritative durable source for the day's
+        # risk counters; reconcile in-memory state against it.
+        day = self.now_fn().date().isoformat()
+        counters = self.db.get_daily_counters(day)
+        if self._trade_day != day:
+            # New calendar day: counters restart from the new day's durable row
+            # (which begins at zero). Equity / realized totals carry over.
+            self._trade_day = day
+            self.trades_today = counters["trades_taken"]
+            self.daily_realized_pnl = counters["realized_pnl"]
+        else:
+            if counters["trades_taken"] > self.trades_today:
+                self.trades_today = counters["trades_taken"]
+            self.daily_realized_pnl = counters["realized_pnl"]
+        logger.info(
+            "Paper state restored: equity=%.2f trades_today=%d day=%s",
+            self.realized_equity, self.trades_today, day,
+        )
+
+    def _persist_day_state(self) -> None:
+        """Persist equity + day counters so a crash cannot reset risk state."""
+        try:
+            self.db.save_setting("paper_equity_snapshot", json.dumps({
+                "realized_equity": self.realized_equity,
+                "realized_pnl_total": self.realized_pnl_total,
+                "charges_total": self.charges_total,
+                "trade_day": self._trade_day or self.now_fn().date().isoformat(),
+                "trades_today": self.trades_today,
+                "daily_realized_pnl": self.daily_realized_pnl,
+            }))
+        except Exception as exc:
+            logger.warning("Could not persist equity snapshot: %s", exc)
 
     def _log_startup(self) -> None:
         logger.info("ACTIVE STRATEGY: %s", self.env["strategy"])
@@ -159,8 +218,11 @@ class PaperTradingRuntime:
         day = self.now_fn().date().isoformat()
         if self._trade_day != day:
             self._trade_day = day
+            # Durable counters are per-day rows; the new day naturally starts at
+            # zero. In-memory counters reset to match the new day's ledger row.
             self.trades_today = 0
             self.daily_realized_pnl = 0.0
+            self._persist_day_state()
 
     def _place(self, signal: dict, signal_id: str) -> Order:
         book = fetch_positions(self.broker)
@@ -203,10 +265,29 @@ class PaperTradingRuntime:
         }.get(order.status, OrderStatus.UNKNOWN)
 
         if not is_exit and status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED) and order.filled_qty > 0:
-            from backend.database.models import Position, Trade
-
             trade_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc)
+            # ONE common trade metadata model — built from the authoritative
+            # contract metadata the signal carried + the ACTUAL simulated fill
+            # (order.avg_price × order.filled_qty). normalize_trade_metadata
+            # recomputes capital_used = entry_price × executed_quantity and
+            # leaves anything genuinely absent as NULL (never invented).
+            trade_meta = normalize_trade_metadata({
+                "underlying": signal.get("underlying"),
+                "option_type": signal.get("option_type"),
+                "strike": signal.get("strike"),
+                "expiry": signal.get("expiry"),
+                "instrument_key": order.instrument_key,
+                "entry_price": order.avg_price,
+                "quantity": order.filled_qty,
+                "lot_size": signal.get("lot_size"),
+                "entry_timestamp": meta.get("entry_time") or now.isoformat(),
+                "strategy": self.env["strategy"],
+                "status": "open",
+                "trade_id": trade_id,
+                "order_id": order.order_id,
+                "signal_id": signal_id,
+            })
             self.db.insert_trade(
                 Trade(
                     id=trade_id,
@@ -219,8 +300,44 @@ class PaperTradingRuntime:
                     status="filled",
                     pnl=None,
                     notes=f"signal_id={signal_id} instrument={order.instrument_key}",
+                    trade_metadata={
+                        "underlying_symbol": trade_meta["underlying_symbol"],
+                        "option_type": trade_meta["option_type"],
+                        "strike_price": trade_meta["strike_price"],
+                        "expiry": trade_meta["expiry"],
+                        "instrument_key": trade_meta["instrument_key"],
+                        "lot_size": trade_meta["lot_size"],
+                        "capital_used": trade_meta["capital_used"],
+                        "order_id": trade_meta["order_id"],
+                        "signal_id": trade_meta["signal_id"],
+                    },
                 )
             )
+            # Extended entry details (entry_price/entry_time columns) — same
+            # as the live path; keeps Trade History consistent across modes.
+            try:
+                self.db.record_trade_entry_details(
+                    trade_id=trade_id,
+                    entry_time=trade_meta["entry_timestamp"] or now.isoformat(),
+                    entry_price=order.avg_price,
+                )
+            except Exception:
+                logger.debug("record_trade_entry_details failed", exc_info=True)
+            # Persist the FULL exit-risk state with the position so a restart
+            # can restore SL/target/lot/trade_id exactly (production incident:
+            # restart lost stop/target and exits mis-behaved until a quote fix).
+            extra = {
+                "stop_loss": float(signal.get("stop_loss") or 0),
+                "target": float(signal.get("target") or 0),
+                "lot_size": int(signal.get("lot_size") or 0),
+                "trade_id": trade_id,
+                "strategy": self.env["strategy"],
+                "underlying": signal.get("underlying"),
+                "option_type": signal.get("option_type"),
+                "strike": signal.get("strike"),
+                "expiry": signal.get("expiry"),
+                "entry_time": meta.get("entry_time") or now.isoformat(),
+            }
             self.db.upsert_position(
                 Position(
                     symbol=order.instrument_key,
@@ -228,6 +345,7 @@ class PaperTradingRuntime:
                     average_price=order.avg_price,
                     entry_time=now,
                     instrument_key=order.instrument_key,
+                    extra=extra,
                 )
             )
             # Enrich broker position with SL/target from signal
@@ -240,8 +358,17 @@ class PaperTradingRuntime:
                 pos["lot_size"] = int(signal.get("lot_size") or pos.get("lot_size") or 0)
                 pos["trade_id"] = trade_id
                 pos["strategy"] = self.env["strategy"]
+                pos["underlying"] = signal.get("underlying")
+                pos["option_type"] = signal.get("option_type")
+                pos["strike"] = signal.get("strike")
+                pos["expiry"] = signal.get("expiry")
             self._roll_day_if_needed()
             self.trades_today += 1
+            try:
+                self.db.add_daily_trades(self._trade_day or self.now_fn().date().isoformat(), 1)
+            except Exception:
+                logger.warning("Could not persist daily trade counter", exc_info=True)
+            self._persist_day_state()
 
         self._audit({
             "signal_id": signal_id,
@@ -271,6 +398,85 @@ class PaperTradingRuntime:
         safe = {k: v for k, v in row.items() if "token" not in str(k).lower()}
         self.db.save_setting("last_audit", json.dumps(safe, default=str))
         logger.info("PAPER_AUDIT %s", json.dumps(safe, default=str))
+
+    # ── cross-process manual exit queue (API → worker) ─────────────────────
+    def queue_manual_exit(self, instrument_key: str, reason: str = "MANUAL_EXIT") -> Dict[str, Any]:
+        """Queue a manual exit for the paper worker to execute.
+
+        Production bug fixed: POST /api/positions/{symbol}/exit used to return
+        {"status": "exit_queued"} while doing literally nothing — no position
+        was ever closed, and the open position silently stayed open (or closed
+        only at EOD). Two hard requirements drove this design:
+        1. Only the worker process may execute exits (it owns PaperBroker and
+           the risk engine) — so the API enqueues and the worker drains.
+        2. The exit executes through the worker's normal exit path, which is
+           idempotent (duplicate exits for an already-closed position are
+           no-ops), so a duplicated queue entry cannot double-exit.
+        """
+        ik = str(instrument_key or "").strip()
+        if not ik:
+            return {"queued": False, "reason": "instrument_key_required"}
+        raw = self.db.get_setting(_PENDING_EXIT_KEY, "") or "[]"
+        try:
+            queue = json.loads(raw)
+            if not isinstance(queue, list):
+                queue = []
+        except Exception:
+            queue = []
+        if any(isinstance(e, dict) and e.get("instrument_key") == ik for e in queue):
+            return {"queued": False, "reason": "exit_already_pending", "instrument_key": ik}
+        queue.append({
+            "instrument_key": ik,
+            "reason": reason or "MANUAL_EXIT",
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        })
+        self.db.save_setting(_PENDING_EXIT_KEY, json.dumps(queue))
+        logger.info("Manual exit queued for %s (reason=%s)", ik, reason)
+        return {"queued": True, "instrument_key": ik, "reason": reason or "MANUAL_EXIT"}
+
+    def drain_manual_exit_queue(self) -> int:
+        """Worker-side: execute any queued manual exits exactly once."""
+        raw = self.db.get_setting(_PENDING_EXIT_KEY, "") or "[]"
+        if not raw or raw == "[]":
+            return 0
+        try:
+            queue = json.loads(raw)
+            if not isinstance(queue, list):
+                queue = []
+        except Exception:
+            self.db.save_setting(_PENDING_EXIT_KEY, "[]")
+            return 0
+        executed = 0
+        for item in queue:
+            if not isinstance(item, dict):
+                continue
+            ik = str(item.get("instrument_key") or "").strip()
+            if not ik:
+                continue
+            reason = str(item.get("reason") or "MANUAL_EXIT")
+            pos = self.broker.positions.get(ik)
+            if pos is None or pos.get("closed") or int(pos.get("quantity") or 0) <= 0:
+                # Already closed (e.g. EOD or SL ran first) — idempotent no-op.
+                logger.info("Manual exit skipped (position not open): %s", ik)
+                continue
+            mark = float(pos.get("mark_price") or 0)
+            if mark <= 0:
+                mark = float(pos.get("entry_price") or pos.get("average_price") or 0)
+            if mark <= 0:
+                # No valid mark ever seen — refuse to invent an exit price.
+                logger.warning("Manual exit refused for %s: no valid mark available", ik)
+                continue
+            result = self._execute_exit(
+                instrument_key=ik,
+                exit_price=mark,
+                reason=reason,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+            if result:
+                executed += 1
+        if queue:
+            self.db.save_setting(_PENDING_EXIT_KEY, "[]")
+        return executed
 
     def submit_entry(self, signal: dict) -> Any:
         if self.kill.blocks_entries():
@@ -418,15 +624,25 @@ class PaperTradingRuntime:
         except Exception:
             pass
 
-        # Persist exit on trade if supported
+        # Persist exit on the SAME trade row created at entry — the common
+        # metadata model's entry columns (strike/option_type/expiry/lot_size/
+        # instrument_key/capital_used) are left untouched so the closed trade
+        # keeps its original entry identity. Only exit-side fields are written
+        # (whitelist in update_trade_exit), with net P&L persisted for Trade
+        # History (previously pnl= was passed and silently dropped by the
+        # whitelist, leaving net_pnl NULL and status stuck at 'filled').
         try:
             if hasattr(self.db, "update_trade_exit") and pos.get("trade_id"):
                 self.db.update_trade_exit(
                     pos["trade_id"],
                     exit_price=px,
                     exit_time=timestamp or datetime.now(timezone.utc).isoformat(),
-                    pnl=net,
                     exit_reason=reason,
+                    gross_pnl=gross,
+                    net_pnl=net,
+                    brokerage=charges.get("brokerage"),
+                    stt=charges.get("stt"),
+                    order_id=order.order_id,
                 )
         except Exception:
             logger.debug("update_trade_exit not available or failed", exc_info=True)
@@ -436,6 +652,11 @@ class PaperTradingRuntime:
         self.charges_total = round(self.charges_total + total_cost, 2)
         self._roll_day_if_needed()
         self.daily_realized_pnl = round(self.daily_realized_pnl + net, 2)
+        try:
+            self.db.add_daily_realized_pnl(self._trade_day or self.now_fn().date().isoformat(), net)
+        except Exception:
+            logger.warning("Could not persist daily realized P&L", exc_info=True)
+        self._persist_day_state()
 
         summary = {
             "instrument_key": instrument_key,
@@ -496,14 +717,26 @@ class PaperTradingRuntime:
                 et = pos.entry_time
                 entry_time = et.isoformat() if hasattr(et, "isoformat") else str(et)
             extra = getattr(pos, "extra", None) or {}
+            if not isinstance(extra, dict):
+                extra = {}
+            # Full exit-risk restoration: SL/target/lot/trade_id must survive the
+            # restart or the position would exit at wrong levels / double-log P&L.
             self.broker.restore_position(
                 instrument_key=ik,
                 quantity=qty,
                 average_price=float(pos.average_price or 0),
-                entry_time=entry_time,
+                entry_time=entry_time or str(extra.get("entry_time") or ""),
                 meta={
-                    "strategy": self.env.get("strategy", "V8_D_PULLBACK_ATM"),
-                    **(extra if isinstance(extra, dict) else {}),
+                    "stop_loss": extra.get("stop_loss", 0),
+                    "target": extra.get("target", 0),
+                    "trailing_stop": extra.get("trailing_stop", extra.get("stop_loss", 0)),
+                    "lot_size": extra.get("lot_size", 0),
+                    "trade_id": extra.get("trade_id", ""),
+                    "strategy": extra.get("strategy", self.env.get("strategy", "V8_D_PULLBACK_ATM")),
+                    "underlying": extra.get("underlying", ""),
+                    "option_type": extra.get("option_type", ""),
+                    "strike": extra.get("strike"),
+                    "expiry": extra.get("expiry", ""),
                 },
             )
             restored += 1

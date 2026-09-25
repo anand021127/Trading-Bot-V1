@@ -122,19 +122,32 @@ def cmd_reset_kill() -> dict:
 def cmd_trades() -> dict:
     db = _db()
     rows = []
-    for t in db.list_trades():
+    for t in db.list_trades():  # full row dicts incl. common metadata model
+        ts = t.get("timestamp")
         rows.append({
-            "id": t.id,
-            "symbol": t.symbol,
-            "side": t.side,
-            "quantity": t.quantity,
-            "price": t.price,
-            "entry_price": t.price,
-            "timestamp": t.timestamp.isoformat() if hasattr(t.timestamp, "isoformat") else str(t.timestamp),
-            "strategy": t.strategy,
-            "status": t.status,
-            "net_pnl": t.pnl,
-            "notes": t.notes,
+            "id": t.get("id"),
+            "symbol": t.get("symbol"),
+            "side": t.get("side"),
+            "quantity": t.get("quantity"),
+            "price": t.get("price"),
+            "entry_price": t.get("entry_price") or t.get("price"),
+            "timestamp": ts,
+            "strategy": t.get("strategy"),
+            "status": t.get("status"),
+            "net_pnl": t.get("net_pnl") if t.get("net_pnl") is not None else t.get("pnl"),
+            "notes": t.get("notes"),
+            # common trade metadata model — same fields as the HTTP API
+            "underlying_symbol": t.get("underlying_symbol"),
+            "option_type": t.get("option_type"),
+            "strike_price": t.get("strike_price"),
+            "expiry": t.get("expiry"),
+            "instrument_key": t.get("instrument_key"),
+            "lot_size": t.get("lot_size"),
+            "capital_used": t.get("capital_used"),
+            "entry_time": t.get("entry_time"),
+            "exit_time": t.get("exit_time"),
+            "exit_price": t.get("exit_price"),
+            "exit_reason": t.get("exit_reason"),
         })
     return {"trades": rows, "total_count": len(rows), "summary": {}}
 
