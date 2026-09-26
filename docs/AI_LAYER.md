@@ -111,7 +111,7 @@ rows, _ = build_dataset(candles, symbol='NIFTY50')
 
 # Run the AI layer's own tests
 python3 run_all_tests.py         # full suite (project convention)
-python3 pytest.py backend/tests/test_ai_layer.py -v   # just the AI layer
+python3 -m pytest backend/tests/test_ai_layer.py -v   # just the AI layer
 
 # Enable shadow mode (observe only, never blocks trades)
 # in .env: AI_ENABLED=true, AI_MODE=shadow

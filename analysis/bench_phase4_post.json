@@ -1,0 +1,35 @@
+{
+  "1d": {
+    "bars": 75,
+    "seconds": 0.1,
+    "trades": 0,
+    "net_pnl": 0,
+    "accuracy": 0.0,
+    "pf": 0.0,
+    "validity": "INCONCLUSIVE",
+    "coverage": 100.0,
+    "signals": 0
+  },
+  "5d": {
+    "bars": 375,
+    "seconds": 0.2,
+    "trades": 0,
+    "net_pnl": 0,
+    "accuracy": 0.0,
+    "pf": 0.0,
+    "validity": "INCONCLUSIVE",
+    "coverage": 100.0,
+    "signals": 0
+  },
+  "25d": {
+    "bars": 1650,
+    "seconds": 1.53,
+    "trades": 0,
+    "net_pnl": 0,
+    "accuracy": 0.0,
+    "pf": 0.0,
+    "validity": "INCONCLUSIVE",
+    "coverage": 100.0,
+    "signals": 0
+  }
+}

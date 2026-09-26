@@ -335,9 +335,14 @@ def execute_shadow_session():
     print(f"11. Contracts Passed 12 Safety Guardrails: {len(validated_contracts)} / {len(atm_contracts_to_watch)}")
 
     # Step 9: Market Status Evaluation & Strategy Evaluation
-    # Determine if active market session or market closed
+    # Determine if active market session or market closed — via the ONE
+    # authoritative exchange calendar (weekends + official NSE/BSE holidays).
     now_utc = datetime.now(timezone.utc)
-    is_weekend = now_utc.weekday() in (5, 6)  # Saturday / Sunday
+    try:
+        from backend.market.calendar import exchange_calendar
+        is_weekend = not exchange_calendar.is_trading_day(now_utc.date())
+    except Exception:
+        is_weekend = now_utc.weekday() in (5, 6)  # Saturday / Sunday
     
     signals_generated = 0
     signals_rejected = 0

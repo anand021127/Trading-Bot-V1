@@ -17,11 +17,14 @@ template pretending to be the model.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from backend.copilot.provider_errors import AIProviderError
 from backend.copilot.secret_guard import collect_secret_values, redact_text
@@ -74,6 +77,17 @@ class ChatJob:
         return out
 
 
+# Module-level adapter resolver — defaults to the real settings-driven
+# resolution. Tests may replace it (deterministic fake adapters) without
+# patching thread-local imports.
+def _default_adapter_resolver():
+    from backend.copilot.llm_adapter import get_llm_adapter
+    return get_llm_adapter
+
+
+_adapter_resolver = _default_adapter_resolver
+
+
 class ChatJobManager:
     def __init__(self) -> None:
         self._jobs: Dict[str, ChatJob] = {}
@@ -116,7 +130,6 @@ class ChatJobManager:
         def _run() -> None:
             from backend.copilot.llm_adapter import (
                 RuleBasedFallbackAdapter,
-                get_llm_adapter,
             )
             from backend.copilot.secret_guard import collect_process_secrets
 
@@ -137,7 +150,10 @@ class ChatJobManager:
                     job.status = STATUS_CANCELLED
                     job.completed_at = time.monotonic()
                     return
-                adapter = get_llm_adapter()
+                # Overridable adapter resolution seam (module-level so tests
+                # can inject a deterministic adapter without patching deep
+                # imports inside this thread).
+                adapter = _adapter_resolver()()
                 if isinstance(adapter, RuleBasedFallbackAdapter):
                     job.status = STATUS_FAILED
                     job.error_code = "PROVIDER_NOT_CONFIGURED"
@@ -151,6 +167,24 @@ class ChatJobManager:
                 if job.cancel_event.is_set():
                     job.status = STATUS_CANCELLED
                 else:
+                    # GROUNDING GUARD: the deterministic context is the
+                    # authority. An LLM answer that contradicts it (claims
+                    # trades when there are none, denies having data it was
+                    # given, claims execution authority) is DISCARDED and the
+                    # verified deterministic explanation is served instead.
+                    from backend.copilot.grounding_guard import (
+                        check_grounding,
+                        deterministic_fallback,
+                    )
+                    violations = check_grounding(answer, job.resolved_context)
+                    if violations:
+                        logger.warning(
+                            "COPILOT_GROUNDING_DISCARD job_id=%s violations=%s",
+                            job.job_id, [v["type"] for v in violations],
+                        )
+                        answer = deterministic_fallback(
+                            job.question, job.resolved_context, violations
+                        )
                     secrets = collect_secret_values(collect_process_secrets())
                     job.answer = redact_text(answer, secrets)
                     job.status = STATUS_COMPLETED

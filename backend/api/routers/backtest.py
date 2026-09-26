@@ -32,12 +32,19 @@ from backend.backtest.task_manager import (
     STATUS_FAILED,
     STATUS_CANCELLED,
 )
+from backend.backtest.job_store import job_store
 from backend.config.settings import load_settings
 from backend.config.universe_config import VALID_OPTION_INDICES
 from backend.database.db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+from fastapi import Depends
+
+from backend.api.control_auth import require_control_token
+
+# State-changing endpoints (run/cancel): guarded by the optional control
+# token (no-op unless CONTROL_TOKEN is set).
+router = APIRouter(dependencies=[Depends(require_control_token)])
 settings = load_settings()
 db = DatabaseManager(db_path=settings.database.path)
 
@@ -148,6 +155,8 @@ async def _create_and_start_backtest(request: BacktestRequest) -> JSONResponse:
         end_date=end_date,
         interval=request.interval,
         prevent_duplicates=True,
+        strategies=strategies,
+        capital=capital,
     )
 
     bg_task = asyncio.create_task(run_backtest_in_background(
@@ -185,7 +194,22 @@ async def start_backtest(request: BacktestRequest) -> JSONResponse:
 
 @router.get("/jobs/active")
 async def get_active_backtest_job() -> Dict[str, Any]:
-    """Returns information about any currently active backtest job or the latest job."""
+    """Returns information about any currently active backtest job or the latest job.
+
+    Reads the DURABLE store first: after a backend restart the in-memory
+    mirrors are empty, but completed/failed/cancelled/interrupted results
+    must remain retrievable (and a leftover active row is impossible — the
+    startup recovery marks it INTERRUPTED_BY_RESTART)."""
+    from backend.backtest.status import ACTIVE_STATUSES
+    try:
+        row = job_store.get_active()
+        if row is not None and row.get("status") in ACTIVE_STATUSES:
+            return {"active": True, "job": _row_to_status(row)}
+        latest = job_store.get_latest()
+        if latest is not None:
+            return {"active": False, "job": _row_to_status(latest)}
+    except Exception:
+        logger.exception("BACKTEST_JOBS_ACTIVE durable read failed — falling back to memory")
     active = task_manager.get_active_task()
     if active is not None:
         return {"active": True, "job": active.to_status_dict()}
@@ -196,22 +220,84 @@ async def get_active_backtest_job() -> Dict[str, Any]:
     }
 
 
+def _row_to_status(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Durable row -> the API status shape (same keys as BacktestTask.to_status_dict)."""
+    created = row.get("created_at") or ""
+    updated = row.get("updated_at") or created
+    from datetime import datetime as _dt
+    try:
+        elapsed = round(max(0.0, (_dt.fromisoformat(updated) - _dt.fromisoformat(created)).total_seconds()), 1)
+    except Exception:
+        elapsed = 0.0
+    result = row.get("result") or {}
+    prog = row.get("progress") or {}
+    trades_count = result.get("trades_taken") or len(result.get("trade_log") or []) if isinstance(result, dict) else 0
+    candles = (result or {}).get("total_candles_scanned") if isinstance(result, dict) else None
+    return {
+        "job_id": row.get("job_id"),
+        "task_id": row.get("job_id"),
+        "status": row.get("status"),
+        "progress_percent": row.get("progress_percent", 0.0),
+        "current_symbol": row.get("current_symbol") or "",
+        "completed_symbols": len(row.get("symbols") or []) if row.get("status") == "COMPLETED" else 0,
+        "total_symbols": len(row.get("symbols") or []),
+        "elapsed_seconds": elapsed,
+        "estimated_remaining_seconds": row.get("eta_seconds"),
+        "current_phase": row.get("phase") or row.get("status"),
+        "result_ready": row.get("status") == "COMPLETED" and bool(result),
+        "trades_taken": trades_count,
+        "candles_processed": candles or row.get("processed_bars") or 0,
+        "completed_at": row.get("completed_at"),
+        "error": row.get("error"),
+        "progress": prog,
+        "strategies": row.get("strategies") or [],
+        "durable": True,
+    }
+
+
+@router.post("/jobs/recover")
+async def recover_backtest_jobs() -> Dict[str, Any]:
+    """Run restart recovery now and report what was recovered.
+
+    Normally recovery happens automatically at process startup; this endpoint
+    exists so an operator (or the UI after a reconnect) can verify/force it.
+    """
+    try:
+        recovered = job_store.recover_interrupted()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Recovery failed: {exc}")
+    return {"recovered": recovered, "status": "OK", "count": len(recovered)}
+
+
 @router.get("/jobs/{job_id}")
 async def get_backtest_job_status(job_id: str) -> Dict[str, Any]:
-    """Poll backtest job status and execution progress."""
+    """Poll backtest job status and execution progress.
+
+    Falls back to the durable store so polling keeps working (and returns the
+    preserved result/error) after a backend restart or process eviction."""
     task = task_manager.get(job_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"No backtest job found with id {job_id}")
-    return task.to_status_dict()
+    if task is not None:
+        return task.to_status_dict()
+    try:
+        row = job_store.get(job_id)
+    except Exception:
+        logger.exception("BACKTEST_JOB_STATUS durable read failed job_id=%s", job_id)
+        row = None
+    if row is not None:
+        return _row_to_status(row)
+    raise HTTPException(status_code=404, detail=f"No backtest job found with id {job_id}")
 
 
 @router.get("/status/{task_id}")
 async def get_backtest_status(task_id: str) -> Dict[str, Any]:
     """Backward-compatible endpoint for polling status."""
     task = task_manager.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"No backtest task found with id {task_id}")
-    return task.to_status_dict()
+    if task is not None:
+        return task.to_status_dict()
+    row = job_store.get(task_id)
+    if row is not None:
+        return _row_to_status(row)
+    raise HTTPException(status_code=404, detail=f"No backtest task found with id {task_id}")
 
 
 def _cancel_job(job_id: str) -> Dict[str, Any]:
@@ -242,10 +328,41 @@ async def cancel_backtest_status(task_id: str) -> Dict[str, Any]:
 
 @router.get("/jobs/{job_id}/result")
 async def get_backtest_job_result(job_id: str) -> Dict[str, Any]:
-    """Fetch completed results for a backtest job."""
+    """Fetch completed results for a backtest job.
+
+    Falls back to the durable store so completed/failed/cancelled results
+    remain retrievable after a backend restart. INTERRUPTED_BY_RESTART jobs
+    are reported honestly (never as COMPLETED)."""
+    from backend.backtest.status import INTERRUPTED_BY_RESTART, is_terminal
     task = task_manager.get(job_id)
     if task is None:
-        raise HTTPException(status_code=404, detail=f"No backtest job found with id {job_id}")
+        row = job_store.get(job_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No backtest job found with id {job_id}")
+        status = row.get("status") or ""
+        if status == STATUS_FAILED:
+            raise HTTPException(status_code=502, detail=row.get("error") or "Backtest failed")
+        if status == STATUS_CANCELLED:
+            raise HTTPException(status_code=400, detail="Backtest was cancelled")
+        if status == INTERRUPTED_BY_RESTART:
+            return {
+                "job_id": job_id,
+                "task_id": job_id,
+                "status": status,
+                "error": row.get("error"),
+                "message": "The backend restarted while this job was running — the job was interrupted and must be re-run. No partial result is reported.",
+            }
+        if status != STATUS_COMPLETED:
+            if is_terminal(status):
+                raise HTTPException(status_code=500, detail=f"Backtest ended in unexpected state {status}")
+            return {
+                "job_id": job_id,
+                "task_id": job_id,
+                "status": status,
+                "progress": row.get("progress") or {},
+                "message": "Backtest still running — poll /api/backtest/jobs/{job_id} until status is 'COMPLETED'.",
+            }
+        return row.get("result") or {}
     if task.status in (STATUS_FAILED, "failed"):
         raise HTTPException(status_code=502, detail=task.error or "Backtest failed")
     if task.status in (STATUS_CANCELLED, "cancelled"):

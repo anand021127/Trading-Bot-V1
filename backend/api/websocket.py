@@ -146,12 +146,10 @@ def unsubscribe_option_contract(instrument_key: str) -> None:
 
 
 def _is_market_open() -> bool:
-    now = datetime.now(IST)
-    if now.weekday() >= 5:
-        return False
-    open_t  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
-    close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
-    return open_t <= now <= close_t
+    """Delegates to the ONE authoritative exchange calendar (weekends,
+    official NSE/BSE holidays, special sessions) — no local weekday math."""
+    from backend.market.calendar import is_market_open_now
+    return is_market_open_now()
 
 
 def _get_bot_state() -> Dict[str, Any]:

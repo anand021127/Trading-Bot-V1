@@ -5,6 +5,9 @@ import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 from unittest import mock
 
 from backend.paper.market_scan_loop import (
@@ -171,7 +174,9 @@ def test_scan_no_trade_when_stale_data():
         "DATABASE_PATH": path,
         "RISK_PER_TRADE_PCT": "0.025",
     }
-    now = datetime.now(timezone.utc)
+    # Pinned to a known trading day (Fri 2026-09-18) so the calendar's
+    # market_closed gate (weekends/holidays) cannot depend on the wall clock.
+    now = datetime(2026, 9, 18, 10, 0, tzinfo=IST)
     stale = [{
         "timestamp": (now - timedelta(hours=5)).isoformat(),
         "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1,
@@ -239,7 +244,8 @@ def test_full_path_market_scan_to_sqlite_trade():
             log = type("L", (), {"decision": "ACCEPTED"})()
             return sig, log
 
-    now = datetime.now(timezone.utc)
+    # Pinned to a known trading day (Fri 2026-09-18) for calendar determinism.
+    now = datetime(2026, 9, 18, 10, 0, tzinfo=IST)
     candles = []
     for i in range(70):
         # last bar timestamp == now so quote_age < 30s for contract validator
@@ -274,7 +280,8 @@ def test_full_path_market_scan_to_sqlite_trade():
 
 def test_real_v8d_evaluates_without_crash_on_fresh_bars():
     """Real V8-D strategy runs on synthetic bars; may or may not signal."""
-    now = datetime.now(timezone.utc)
+    # Pinned to a known trading day (Fri 2026-09-18) for calendar determinism.
+    now = datetime(2026, 9, 18, 10, 0, tzinfo=IST)
     candles = _bars_for_ce_signal(80)
     # freshen timestamps
     for i, c in enumerate(candles):

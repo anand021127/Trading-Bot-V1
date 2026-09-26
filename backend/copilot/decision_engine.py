@@ -280,6 +280,52 @@ def build_trade_plan_from_signal(
     return result
 
 
+def build_trade_plan_for_symbol_v8d(tools: Any, symbol: str, candles: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """V8-D-identity trade plan for the Copilot.
+
+    Uses `engine.evaluate_configured_strategy(symbol)` — the SAME evaluator
+    the production paper scanner runs — so the Copilot's displayed decision
+    comes from the configured production strategy (TRADING_STRATEGY), with
+    the strategy identity carried in the payload. No OPTION_PREMIUM path is
+    touched here and no hidden fallback exists: if the configured strategy
+    is not V8-D, the payload says exactly what is configured.
+    """
+    if tools.engine is None or not hasattr(tools.engine, "evaluate_configured_strategy"):
+        return {"available": False, "reason": "No trading engine (with evaluate_configured_strategy) attached."}
+    configured = getattr(tools.engine, "strategy_name", None) or ""
+    try:
+        signal = tools.engine.evaluate_configured_strategy(symbol)
+    except Exception as e:  # noqa: BLE001 — surfaced, never hidden
+        return {"available": False, "reason": f"evaluate_configured_strategy({symbol!r}) failed: {e}"}
+    sig_strategy = getattr(signal, "strategy_name", "") or configured or "UNCONFIGURED"
+    sig_rejections = list(getattr(signal, "rejected_reasons", []) or [])
+    sig_value = getattr(signal, "signal", "NONE")
+    if sig_value == "NONE" or sig_rejections:
+        return {
+            "available": True,
+            "strategy": sig_strategy,
+            "strategy_confirmation": (
+                f"{sig_strategy} (engine.evaluate_configured_strategy — "
+                "the configured production strategy path)"
+                if sig_strategy == "V8_D_PULLBACK_ATM"
+                else f"{sig_strategy} (NOT the production V8-D strategy)"
+            ),
+            "analysis": None,
+            "decision": "SKIP" if sig_value == "NONE" else str(sig_value),
+            "trade_plan": None,
+            "validation": None,
+            "reason": "; ".join(sig_rejections) or getattr(signal, "entry_reason", "no qualifying setup"),
+        }
+    # A qualifying V8-D signal: reuse the shared TradePlan builder so risk
+    # validation/preview semantics stay identical to the legacy path.
+    plan_out = build_trade_plan_from_signal(signal, candles=candles or [], stale_fallback=False)
+    plan_out["strategy"] = sig_strategy
+    plan_out["strategy_confirmation"] = (
+        f"{sig_strategy} (engine.evaluate_configured_strategy — the configured production strategy path)"
+    )
+    return plan_out
+
+
 def build_trade_plan_for_symbol(tools: Any, symbol: str, candles: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """The REAL option TradePlan pipeline, on demand: fetches a fresh
     signal itself via `engine.evaluate_option_premium(symbol)` — the exact

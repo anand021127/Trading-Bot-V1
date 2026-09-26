@@ -120,3 +120,147 @@ Full-suite evidence: `python -m pytest backend/tests -q --tb=no -p no:cacheprovi
   here too; worker e2e tests pass (~72 s).
 * pytest must be invoked with `-p no:cacheprovider` against OneDrive-synced paths
   to avoid watcher contention (documented in runbook troubleshooting).
+
+---
+
+# ADDENDUM — Phase 3 (Copilot + Backtest) verification pass, 2026-09-25
+
+Scope: final audit of the async Copilot chat + background backtest phase that was
+already implemented on disk when this pass started (root cause of the reported
+"timeout of 30000ms exceeded" class of UI failures: synchronous provider/loop
+work inside single HTTP requests — replaced by 202 + job-id + short-poll on both
+the Copilot chat and backtest paths).
+
+## What this pass verified (all evidence from real runs)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Async chat jobs: submit→202→poll→complete/cancel | PASS | `backend/tests/test_copilot_api_regression.py` (24 tests: job lifecycle, typed provider errors, secret redaction end-to-end, honest PROVIDER_NOT_CONFIGURED path — no canned fake answers) |
+| Provider failure contract is TYPED, never a fake answer | PASS | `provider_errors.py` + `llm_adapter.py` raise `AIProviderError` subclasses (unreachable/timeout/auth/rate-limit/model-missing); `RuleBasedFallbackAdapter` remains explicit via `COPILOT_LLM_BACKEND=none` only |
+| Context grounding + secret redaction before provider | PASS | `context.py` builds question-relevant Bot/Trade/Backtest contexts from real tool outputs; `secret_guard.py` value+key redaction applied to context AND final answer |
+| Backtest async job lifecycle (QUEUED→FETCHING_DATA→RUNNING→COMPLETED/FAILED/CANCELLED) | PASS | `backend/tests/test_backtest_async_regression.py` + `test_backtest_cancel_and_restart.py` + `tests/test_backtest_lifecycle.py` (35 tests) |
+| Backtest cancellation actually stops work | PASS | cooperative `_cancelled` flag checked at fetch/symbol/simulation boundaries + `asyncio` task cancel; status flips to CANCELLED and work returns |
+| Completed/failed/cancelled states render truthfully in frontend | PASS | `Backtest.tsx` polls `/api/backtest/jobs/{id}`, maps COMPLETED/FAILED/CANCELLED to distinct UI states and shows the backend's real `error_details` message; retries transient poll failures only |
+| No synthetic data / no silent OPTION_PREMIUM fallback in backtest | PASS | missing symbols → `DATA_UNAVAILABLE` fail-closed; incomplete bars → `BACKTEST_INCOMPLETE` fail-closed; strategy list must come from the registry or explicitly named strategies (400 otherwise) |
+| Transient historical-API failures retried without data substitution | PASS | `historical_fetch.py` bounded retry/backoff (3 attempts, 429/5xx/timeout only; 401/400 fail fast); re-issues the SAME request — no alternate source |
+| Copilot page wired to async job API | **FIXED** | `Copilot.tsx` created the assistant placeholder with a client-generated UUID but matched poll updates by the SERVER's job id — the answer would never render (stuck "Thinking…"). Placeholder is now re-keyed to the server job id before polling |
+| Stale docstring contradicting failure contract | **FIXED** | `LocalOpenAICompatibleAdapter` docstring claimed "falls back to rule-based on error" — code raises typed errors; docstring corrected, no behavior change |
+| ONE test runner | **FIXED** | `run_all_tests.py` was a second, diverging framework (probed a nonexistent `_is_fixture` attr, crashed on real pytest fixtures: `Failed: Fixture "memory_db" called directly`). Now a thin wrapper over true pytest with the same offline/paper isolation envs; `python run_all_tests.py` → 721 passed |
+| Full backend suite | PASS | `python -m pytest backend/tests -q` → **721 passed, 0 failed, 0 errors** (85 s) |
+| Root integration suite | PASS | `python run_all_tests.py tests` → 30 passed |
+| Frontend typecheck + build | PASS | `tsc --noEmit` clean; `vite build` ✓ 8.56 s |
+| Strategy/mode/product invariants untouched | PASS | `TRADING_MODE=paper`, `TRADING_STRATEGY=V8_D_PULLBACK_ATM`, `UPSTOX_ORDER_PRODUCT=I`; `v8d_strategy.py` not modified in this pass |
+| Secrets in deliverable | PASS | tracked-files scan + full ZIP scan: no tokens/keys/.env/token-store/db; ZIP hits were prose false positives ("risk-capped") and variable-passing (`request_token_approval(client_secret=client_secret)`) |
+
+## Copilot decision authority (re-verified)
+
+* Every chat job resolves context deterministically FIRST (`route_question` +
+  `build_context` over real tool outputs); the provider receives already-computed
+  data and returns prose. It has no tool access, no execution path, and cannot
+  flip a decision — LLM output is explanation only.
+* No Copilot endpoint places, modifies, or cancels orders; the async job worker
+  only formats context and calls the provider.
+
+## Remaining limitations (unchanged, honest)
+
+* NSE holiday calendar not modeled (stale-data gate is the paper-mode protection;
+  required before live — same as phase 1 finding).
+* Chat/backtest jobs are in-memory in the API process (single-process deployment;
+  a backend restart loses job history — reported truthfully via 404 + UI guidance).
+* Live trading remains BLOCKED by design pending the dedicated live release.
+
+---
+
+# ADDENDUM 2 — Phase 4 (infrastructure gaps) delivery, 2026-09-26
+
+Closes the three gaps this report previously listed as known limitations:
+the exchange holiday calendar, in-memory backtest job state, and the missing
+full-stack CI. All evidence below is from real runs on 2026-09-26.
+
+## Gap 1 — Authoritative exchange session/holiday calendar
+
+`backend/market/calendar.py` is the ONE authoritative source for trading-day,
+session-time, and expiry decisions. All production modules now delegate to it:
+paper scan gate (`market_scan_loop.py`), live/paper session manager (which also
+gained the previously-missing `is_market_open` — a latent `AttributeError` in
+the live path — and a working `is_entry_window`), market-data websocket client,
+overview/trading/websocket routers, diagnostics, backtest coverage math, and
+expiry resolution (`get_nearest_expiry_for_date` now holiday-shifts). Copilot
+market-status answers are grounded via the same tools.
+
+* Verified holiday tables for **2024 (NSE circular CMTR59722), 2025, 2026** —
+  corroborated across independent published calendars; no guessed dates.
+* Special sessions: Muhurat trading 2024-11-01 / 2025-10-21 / 2026-11-08
+  (18:15–19:15 IST, published timings) and the 2025-02-01 Budget Saturday.
+* Expiry holiday-shift rule: shift BACKWARD to the previous trading day.
+* IST is the only trading timezone; naive timestamps treated as IST; UTC
+  boundary tests pin the date-flip behavior.
+* **FAIL-CLOSED**: an unverified year raises `CalendarDataError` — never
+  silently weekend-only. Extending the calendar = append one table.
+* The 32-test suite (`test_exchange_calendar.py`) pins weekends, holidays for
+  all three years, expiry shifts, month/year boundaries, IST/UTC boundaries,
+  special sessions, and the fail-closed rule.
+* Effect on results: trading results are bitwise unchanged; coverage math is
+  corrected (holidays no longer counted as requested trading days — see
+  benchmark verdict below). Legacy `weekday()` checks remain ONLY as
+  documented fail-safe fallbacks inside try/except blocks.
+
+## Gap 2 — Durable backtest job state
+
+`backend/backtest/job_store.py` (SQLite, WAL, busy_timeout, per-update
+transactions, idempotent upserts) persists every contract field: job_id,
+status, phase, strategies, symbols, dates, interval, capital, timestamps,
+progress, processed/total bars, bars_per_second, ETA, current symbol/timestamp,
+result, error, error_details, cancel flag.
+
+* **Restart recovery**: at startup (and via `POST /api/backtest/jobs/recover`)
+  any job left active is marked `INTERRUPTED_BY_RESTART` — never COMPLETED.
+* Completed/failed/cancelled results remain retrievable after restart; status
+  polling and `/jobs/active` fall back to the durable row when memory is empty.
+* Duplicate jobs are DB-enforced across restarts (partial-unique index on the
+  active-state set).
+* New states honored end-to-end: `RESOLVING_CONTRACTS` (fetch→simulate
+  bracket) and `FINALIZING`; bars/second + ETA computed from the row's own
+  `started_at` and persisted.
+* 15-test restart suite (`test_backtest_job_store.py`) + 9 contract tests.
+
+## Gap 3 — Full-stack CI
+
+`.github/workflows/ci.yml` (YAML-validated) runs on push/PR to main:
+backend suite **and** root integration tests under enforced paper/offline env
+(`ALLOW_LIVE_UPSTOX=0`, empty token — CI can never place an order); frontend
+`npm ci` → `tsc --noEmit` → eslint → `vite build` → output existence check;
+repo hygiene (`git diff --check`, conflict markers, tracked secret-file scan,
+credential-literal scan, JWT-shape scan, packaging exclusion rule).
+Fails on test/type/build errors and on any secret detection. The legacy
+partial workflows remain for their specific deploy roles; CI is the gate.
+
+## Status enum contract
+
+`backend/backtest/status.py` defines the 9 authoritative values
+(QUEUED, FETCHING_DATA, RESOLVING_CONTRACTS, RUNNING, FINALIZING, COMPLETED,
+FAILED, CANCELLED, INTERRUPTED_BY_RESTART) with terminal/active partitioning
+and lowercase normalization. The frontend `BacktestStatus` union in
+`frontend/src/types/index.ts` must mirror it exactly — enforced by a test that
+parses the TS source and diffs it against the backend set.
+
+## Backtest UI
+
+`Backtest.tsx` now recovers the latest durable job on mount (auto-resumes
+polling an active job; re-hydrates a COMPLETED result; shows FAILED/CANCELLED/
+INTERRUPTED banners with the backend's real reason), labels every state from
+the shared map (including INTERRUPTED and RESOLVING_CONTRACTS), and can never
+show "Running…" when the backend reports a terminal state (statuses are
+compared as exact enum values).
+
+## No-regression evidence
+
+| Check | Result |
+|---|---|
+| Backend suite | **777 passed, 0 failed, 0 errors, 0 skipped** (89 s) — includes 56 new Phase 4 tests |
+| Root integration suite | 30 passed |
+| Frontend typecheck | clean |
+| Frontend production build | ✓ 7.3 s |
+| Frontend lint | 0 errors (23 pre-existing warnings, untouched) |
+| Benchmarks NIFTY50 V8-D 5min 1d/5d/25d | trades/net_pnl/accuracy/PF/validity/signals **identical to pre-change baseline**; 25d coverage 95.7→100.0 solely from the holiday correction (PASS by design: coverage may only improve via verified-holiday removal, never degrade) |
+| Safety invariants | TRADING_MODE=paper · TRADING_STRATEGY=V8_D_PULLBACK_ATM · UPSTOX_ORDER_PRODUCT=I · `v8d_strategy.py` byte-identical to HEAD · no synthetic data paths · no silent OPTION_PREMIUM fallback · no LLM execution authority |

@@ -387,9 +387,10 @@ def _provider_chat(
 
 
 class LocalOpenAICompatibleAdapter(LLMAdapter):
-    """Talks to a local OpenAI-chat-compatible HTTP server. Falls back to
-    the rule-based adapter on any connection/timeout/parse error — a
-    local model being offline must never break the Copilot."""
+    """Talks to a local OpenAI-chat-compatible HTTP server. Provider
+    failures (unreachable, timeout, auth, malformed response) RAISE a
+    typed AIProviderError — they are surfaced to the operator honestly,
+    never swapped for a canned answer."""
 
     def __init__(self, settings: CopilotSettings) -> None:
         self.settings = settings
@@ -425,9 +426,10 @@ class LocalOpenAICompatibleAdapter(LLMAdapter):
         )
 
         if intent in ("GENERAL", "EDUCATION"):
-            # Conversational/educational — no live data involved, so the
-            # LLM can just answer naturally. Still deterministic-safe: if
-            # it's unreachable, falls back to the same canned responses.
+            # Conversational/educational — no live data involved. Provider
+            # failures still raise typed errors (never canned answers); the
+            # rule-based adapter remains available explicitly via backend
+            # "none" for operators who want zero-dependency replies.
             system_prompt = base_system + (
                 "\n\nThis particular message is general conversation or an educational "
                 "question — you were NOT given any live market data for it. If asked "

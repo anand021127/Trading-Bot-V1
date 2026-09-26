@@ -1,0 +1,68 @@
+{
+  "measurement": "PHASE 5.1 \u00a723 \u2014 AI decision latency vs real local Ollama llama3.2:1b",
+  "date": "2026-09-26",
+  "provider": "ollama:ollama (OpenAI-compatible http://localhost:11434/v1)",
+  "model": "llama3.2:1b (1.2B params, Q8_0, temperature=0, max_tokens=128, JSON response format)",
+  "timeout_seconds": 20.0,
+  "configured_default_timeout_seconds": 20.0,
+  "runs": [
+    {
+      "run": 1,
+      "phase": "cold_first_call",
+      "decision": "REJECT",
+      "latency_ms": 20093.8,
+      "success": false,
+      "timeout_seconds": 20.0
+    },
+    {
+      "run": 2,
+      "phase": "warm",
+      "decision": "APPROVE",
+      "latency_ms": 4338.4,
+      "success": true,
+      "timeout_seconds": 20.0
+    },
+    {
+      "run": 3,
+      "phase": "warm",
+      "decision": "APPROVE",
+      "latency_ms": 3809.1,
+      "success": true,
+      "timeout_seconds": 20.0
+    },
+    {
+      "run": 4,
+      "phase": "warm",
+      "decision": "APPROVE",
+      "latency_ms": 3814.5,
+      "success": true,
+      "timeout_seconds": 20.0
+    },
+    {
+      "run": 5,
+      "phase": "warm",
+      "decision": "APPROVE",
+      "latency_ms": 3846.8,
+      "success": true,
+      "timeout_seconds": 20.0
+    },
+    {
+      "run": 6,
+      "phase": "warm",
+      "decision": "APPROVE",
+      "latency_ms": 3869.5,
+      "success": true,
+      "timeout_seconds": 20.0
+    }
+  ],
+  "cold_first_call_ms": 20093.8,
+  "warm_min_ms": 3809.1,
+  "warm_median_ms": 3846.8,
+  "warm_max_ms": 4338.4,
+  "verdict": "PASS \u2014 warm p100 < 20s timeout; trading loop never blocks indefinitely (timeout fail-closed to AI_TIMEOUT \u2192 NO TRADE)",
+  "notes": [
+    "Latency is inference-bound on CPU; a 10s default timed out valid calls, so the default timeout is 20s.",
+    "Model repetition loops are bounded by max_tokens=128 (worst case ~15s) instead of 256 (~31s).",
+    "Every failure mode observed (timeout, invalid JSON, repetition-loop truncation) produced REJECT + typed reason code \u2014 fail-closed verified against the real model."
+  ]
+}

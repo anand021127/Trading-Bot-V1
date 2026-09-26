@@ -288,6 +288,42 @@ export interface Settings {
 export type AppSettingsResponse = Settings
 export type HealthStatus = { status: string; mode?: string; timestamp?: string }
 
+/**
+ * The ONE authoritative backtest job status union — mirrors
+ * backend/backtest/status.py exactly. Backend and frontend must use only
+ * these values; adding a lifecycle state means updating BOTH files.
+ */
+export type BacktestStatus =
+  | 'QUEUED'
+  | 'FETCHING_DATA'
+  | 'RESOLVING_CONTRACTS'
+  | 'RUNNING'
+  | 'FINALIZING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'INTERRUPTED_BY_RESTART'
+
+export const BACKTEST_TERMINAL_STATUSES: readonly BacktestStatus[] = [
+  'COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED_BY_RESTART',
+]
+
+export const BACKTEST_ACTIVE_STATUSES: readonly BacktestStatus[] = [
+  'QUEUED', 'FETCHING_DATA', 'RESOLVING_CONTRACTS', 'RUNNING', 'FINALIZING',
+]
+
+export const BACKTEST_STATUS_LABELS: Record<BacktestStatus, string> = {
+  QUEUED: 'Queued…',
+  FETCHING_DATA: 'Fetching data…',
+  RESOLVING_CONTRACTS: 'Resolving historical contracts…',
+  RUNNING: 'Running…',
+  FINALIZING: 'Finalizing results…',
+  COMPLETED: 'COMPLETED',
+  FAILED: 'FAILED',
+  CANCELLED: 'CANCELLED',
+  INTERRUPTED_BY_RESTART: 'INTERRUPTED — backend restarted mid-job',
+}
+
 export interface BacktestRequest {
   start_date?: string
   end_date?: string

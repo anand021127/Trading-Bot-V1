@@ -12,7 +12,13 @@ from fastapi import APIRouter
 
 from backend.paper.status_calculator import compute_paper_status
 
-router = APIRouter()
+from fastapi import Depends
+
+from backend.api.control_auth import require_control_token
+
+# State-changing endpoints: guarded by the optional control token
+# (no-op unless CONTROL_TOKEN is set).
+router = APIRouter(dependencies=[Depends(require_control_token)])
 
 
 def _paper_runtime() -> Any:

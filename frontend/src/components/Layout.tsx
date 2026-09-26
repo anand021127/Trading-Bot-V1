@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, ClipboardList, FileText,
-  BarChart2, PieChart, Wrench, Settings, Menu, X, Wifi, WifiOff, Radar, Table2,
+  BarChart2, PieChart, Wrench, Settings, Menu, X, WifiOff, Radar, Table2,
   AlertTriangle, KeyRound, Moon, RefreshCw, Download, Sparkles, Smartphone, Zap, Bot,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -31,7 +31,7 @@ const bottomBarItems = [
   { to: '/settings', icon: Settings, label: 'Settings' },
 ]
 
-function StatusBadge({ status, isMarketOpen, onFixAuth }: { status: ConnectionState; isMarketOpen: boolean; onFixAuth?: () => void }) {
+function StatusBadge({ status, isMarketOpen: _isMarketOpen, onFixAuth }: { status: ConnectionState; isMarketOpen: boolean; onFixAuth?: () => void }) {
   switch (status) {
     case 'CONNECTED':
       return (

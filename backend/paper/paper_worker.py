@@ -306,6 +306,21 @@ class PaperWorker:
             from backend.broker.upstox_client import UpstoxClient
             client = UpstoxClient(access_token=token)
             data = UpstoxMarketDataSource(client)
+            # PHASE 5.1: AI trading decision engine — shares the worker's DB
+            # (durable ai_decisions table + latency telemetry). Disabled by
+            # default (AI_DECISION_ENABLED=false → V8-D-only scan); when
+            # enabled it gates every V8-D BUY before the hard risk gates.
+            ai_engine = None
+            ai_note = "disabled"
+            try:
+                from backend.ai_decision.decision_engine import AITradingDecisionEngine
+                ai_engine = AITradingDecisionEngine(db=self.db)
+                ai_note = "enabled" if ai_engine.enabled else "disabled"
+            except Exception as exc:
+                logger.warning("AI decision engine init failed: %s", type(exc).__name__)
+                ai_note = f"init_failed:{type(exc).__name__}"
+                ai_engine = None
+            self.db.save_setting("ai_decision_layer", ai_note)
             self.scanner = PaperMarketScanner(
                 data=data,
                 strategy=self.runtime.strategy,
@@ -313,9 +328,14 @@ class PaperWorker:
                 account_equity=float(os.environ.get("TRADING_CAPITAL", "100000")),
                 max_candle_age_seconds=float(os.environ.get("PAPER_MAX_CANDLE_AGE_SEC", "900")),
                 min_bars=int(os.environ.get("PAPER_MIN_CANDLE_BARS", "60")),
+                ai_engine=ai_engine,
+                ai_decision_pipeline_strategy=os.environ.get("TRADING_STRATEGY", "V8_D_PULLBACK_ATM"),
             )
             self.db.save_setting("paper_worker_market_scan", "enabled")
-            logger.info("Market-driven V8-D scanner enabled for %s", self.scanner.underlying)
+            logger.info(
+                "Market-driven V8-D scanner enabled for %s (AI decision layer: %s)",
+                self.scanner.underlying, ai_note,
+            )
         except Exception as exc:
             logger.warning("Could not init market scanner: %s", type(exc).__name__)
             self.db.save_setting("paper_worker_market_scan", f"init_failed:{type(exc).__name__}")

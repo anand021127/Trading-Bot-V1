@@ -38,14 +38,30 @@ from typing import Any, Dict, List, Optional
 
 from backend.backtest.historical_fetch import fetch_full_range_with_retry
 
+# The ONE authoritative backtest status enum (single source of truth for the
+# API wire values). task_manager re-exports them for backward compatibility.
+from backend.backtest.status import (
+    QUEUED as STATUS_QUEUED,
+    FETCHING_DATA as STATUS_FETCHING_DATA,
+    RESOLVING_CONTRACTS as STATUS_RESOLVING_CONTRACTS,
+    RUNNING as STATUS_RUNNING,
+    FINALIZING as STATUS_FINALIZING,
+    COMPLETED as STATUS_COMPLETED,
+    FAILED as STATUS_FAILED,
+    CANCELLED as STATUS_CANCELLED,
+    INTERRUPTED_BY_RESTART as STATUS_INTERRUPTED_BY_RESTART,
+    is_terminal as status_is_terminal,
+    is_active as status_is_active,
+)
+
+# In-memory mirrors of the durable rows (fast polling without a SQLite read
+# per request). The DB (job_store) is authoritative for restart recovery and
+# for job identities; these mirrors are rebuilt from the DB at startup.
+
 logger = logging.getLogger(__name__)
 
-STATUS_QUEUED = "QUEUED"
-STATUS_FETCHING_DATA = "FETCHING_DATA"
-STATUS_RUNNING = "RUNNING"
-STATUS_COMPLETED = "COMPLETED"
-STATUS_FAILED = "FAILED"
-STATUS_CANCELLED = "CANCELLED"
+# STATUS_* constants now come from backend.backtest.status (bound in the
+# import block above) — the ONE authoritative enum. Do not re-define them here.
 
 # Tasks older than this are evicted on the next cleanup pass so the
 # in-memory store doesn't grow unbounded across a long-lived process.
@@ -373,9 +389,31 @@ class BacktestTask:
 
 
 class BacktestTaskManager:
-    def __init__(self) -> None:
+    """Durable backtest job manager.
+
+    Lifecycle + progress now live in SQLite (backend/backtest/job_store.py):
+      - every create/progress/terminal transition is persisted (WAL, one
+        transaction per update, idempotent upserts)
+      - a backend restart marks jobs left active as INTERRUPTED_BY_RESTART
+        (never COMPLETED) and historical results remain retrievable
+      - the in-memory `self._tasks` mirror exists only to keep the legacy
+        BacktestTask surface (progress dicts, download generation) working
+        for the running process; the DB row is authoritative across restarts
+    """
+
+    def __init__(self, store: Optional[Any] = None) -> None:
+        from backend.backtest.job_store import job_store as _default_store
+        self._store = store if store is not None else _default_store
         self._tasks: Dict[str, BacktestTask] = {}
         self._running_asyncio_tasks: set = set()
+        # Restart recovery: any job the DB still lists as active died with
+        # the previous process — mark it INTERRUPTED_BY_RESTART once.
+        try:
+            recovered = self._store.recover_interrupted()
+            if recovered:
+                logger.info("BACKTEST_RECOVERY task_manager recovered=%d", len(recovered))
+        except Exception:
+            logger.exception("BACKTEST_RECOVERY failed during task_manager init")
 
     def _evict_old_tasks(self) -> None:
         cutoff = time.monotonic() - TASK_RETENTION_SECONDS
@@ -424,6 +462,8 @@ class BacktestTaskManager:
         end_date: str = "",
         interval: str = "",
         prevent_duplicates: bool = False,
+        strategies: Optional[List[str]] = None,
+        capital: Optional[float] = None,
     ) -> BacktestTask:
         self._evict_old_tasks()
         if prevent_duplicates:
@@ -439,10 +479,33 @@ class BacktestTaskManager:
             interval=interval,
             current_symbol=symbols[0] if symbols else "",
         )
+        task.strategies = list(strategies or [])
+        # Durable row FIRST (DB-enforced duplicate protection across restarts):
+        # if another active row exists, refuse in-memory too and translate to
+        # the legacy DuplicateJobError contract (the API maps it to 409).
+        try:
+            self._store.create_job(
+                job_id=task.task_id,
+                strategies=list(strategies or []),
+                symbols=task.symbols,
+                start_date=start_date,
+                end_date=end_date,
+                interval=interval,
+                capital=capital,
+            )
+        except Exception as exc:
+            # Import inside to avoid a hard module cycle at import time.
+            from backend.backtest.job_store import DuplicateActiveJobError
+            if isinstance(exc, DuplicateActiveJobError):
+                active = self._store.get_active()
+                raise DuplicateJobError(
+                    active_job_id=active["job_id"] if active else "unknown"
+                ) from exc
+            raise
         self._tasks[task.task_id] = task
         logger.info(
-            "BACKTEST_JOB_CREATED job_id=%s symbols=%s start_date=%s end_date=%s interval=%s",
-            task.task_id, task.symbols, start_date, end_date, interval,
+            "BACKTEST_JOB_CREATED job_id=%s symbols=%s strategies=%s start_date=%s end_date=%s interval=%s capital=%s",
+            task.task_id, task.symbols, strategies, start_date, end_date, interval, capital,
         )
         return task
 
@@ -452,15 +515,26 @@ class BacktestTaskManager:
     def cancel(self, task_id: str, reason: str = "User cancelled backtest") -> Optional[BacktestTask]:
         task = self._tasks.get(task_id)
         if task is None:
+            # Unknown in-memory: may be a job from a previous process whose
+            # durable row still exists — cancel it in the DB if still active.
+            row = self._store.get(task_id)
+            if row is not None and status_is_active(row["status"]):
+                self._store.request_cancel(task_id)
+                self._store.update_status(task_id, STATUS_CANCELLED)
             return None
         task.cancel(reason=reason)
+        try:
+            self._store.request_cancel(task_id)
+            self._store.update_status(task_id, STATUS_CANCELLED)
+        except Exception:
+            logger.exception("BACKTEST_JOB_PERSIST_FAILED job_id=%s (cancel)", task_id)
         return task
 
     def update_progress(self, task_id: str, progress: Dict[str, Any], status: Optional[str] = None) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
-        if task.status in (STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED):
+        if task.status in (STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_INTERRUPTED_BY_RESTART):
             return
         task.progress = progress
         if status:
@@ -487,6 +561,13 @@ class BacktestTaskManager:
             pct = 30.0 + (float(bar_idx) / max(1.0, float(tot_bars))) * 70.0
             task.progress_percent = min(99.0, max(task.progress_percent, round(pct, 1)))
         task.updated_at = time.monotonic()
+        # Persist progress (single-row idempotent upsert in a transaction).
+        try:
+            self._store.update_progress(task_id, dict(progress))
+            if status:
+                self._store.update_status(task_id, status)
+        except Exception:
+            logger.exception("BACKTEST_JOB_PERSIST_FAILED job_id=%s (progress)", task_id)
 
     def complete(
         self,
@@ -563,6 +644,10 @@ class BacktestTaskManager:
                 "trades_so_far": trades_count,
             }
         task.updated_at = now_mono
+        try:
+            self._store.set_result(task_id, result)
+        except Exception:
+            logger.exception("BACKTEST_JOB_PERSIST_FAILED job_id=%s (result)", task_id)
 
         logger.info("BACKTEST_PHASE: COMPLETED job_id=%s elapsed=%.1f trades=%d", task_id, elapsed, trades_count)
         logger.info("BACKTEST_COMPLETED job_id=%s elapsed=%.1f trades=%d", task_id, elapsed, trades_count)
@@ -581,7 +666,6 @@ class BacktestTaskManager:
         else:
             task.error = str(error)
             task.error_details = {"code": "BACKTEST_INCOMPLETE", "message": str(error)}
-
         task.result = None
         if progress:
             task.progress = dict(progress)
@@ -594,6 +678,10 @@ class BacktestTaskManager:
         safe_error = task.error or "Unknown error"
         logger.error("BACKTEST_PHASE: FAILED job_id=%s error=%s", task_id, safe_error)
         logger.error("BACKTEST_FAILED job_id=%s error=%s", task_id, safe_error)
+        try:
+            self._store.set_error(task_id, safe_error, task.error_details)
+        except Exception:
+            logger.exception("BACKTEST_JOB_PERSIST_FAILED job_id=%s (error)", task_id)
 
 
 # Module-level singleton — same pattern as the rest of this codebase.
@@ -783,6 +871,13 @@ async def run_backtest_in_background(
             logger.info("BACKTEST_JOB_CANCELLED job_id=%s reason='Cancelled before simulation'", task_id)
             return
 
+        # RESOLVING_CONTRACTS: authoritative enum state between data fetch and
+        # simulation — expired-instrument contract resolution happens lazily
+        # inside the engine, so this phase brackets the simulation start.
+        task_manager.update_progress(
+            task_id, {"phase": "resolving_contracts", "total_symbols": len(symbol_candles)},
+            status=STATUS_RESOLVING_CONTRACTS,
+        )
         task_manager.update_progress(
             task_id, {"phase": "processing", "total_symbols": len(symbol_candles)},
             status=STATUS_RUNNING,
@@ -891,7 +986,7 @@ async def run_backtest_in_background(
         task_manager.update_progress(
             task_id,
             {"phase": "finalizing", "bar_index": total_expected_bars, "total_bars": total_expected_bars},
-            status=STATUS_RUNNING,
+            status=STATUS_FINALIZING,
         )
 
         try:
@@ -904,6 +999,12 @@ async def run_backtest_in_background(
             payload["date_range"] = {"start": start_date, "end": end_date}
             payload["interval"] = interval
             payload["option_data_source"] = "upstox_expired_instruments_authoritative"
+            # PHASE 5.1 §18: UI must show whether the AI layer participated.
+            # Always AI_BACKTEST_UNAVAILABLE today — never labeled AI-assisted
+            # when the AI was not actually evaluated.
+            payload["ai_backtest_status"] = getattr(
+                backtest_result, "ai_backtest_status", "AI_BACKTEST_UNAVAILABLE")
+            payload["ai_mode"] = getattr(backtest_result, "ai_mode", "disabled")
 
             trades_count = 0
             raw_trades = getattr(backtest_result, "trades_taken", None)

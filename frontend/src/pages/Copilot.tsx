@@ -45,6 +45,228 @@ const QUICK_PROMPTS = [
 
 const POLL_INTERVAL_MS = 1000
 const POLL_MAX_CONSECUTIVE_FAILURES = 5
+const AI_DECISION_POLL_MS = 12000
+
+type AILatency = {
+  samples?: number
+  success_count?: number
+  failure_count?: number
+  latency_ms_median?: number | null
+  latency_ms_p95?: number | null
+  error_counts?: Record<string, number>
+}
+
+type AIRecentDecision = {
+  decision_id: string
+  symbol: string
+  decision: string
+  confidence: number
+  reason_codes: string[]
+  model_provider: string
+  model_name: string
+  created_at: string
+  latency_ms?: number | null
+}
+
+type AIDecisionStatus = {
+  ai_decision_enabled: boolean
+  worker_layer_state?: string | null
+  provider: string
+  model: string
+  base_url: string
+  timeout_seconds: number
+  temperature: number
+  architecture: string
+  approval_semantics: string
+  backtest_status: string
+  latency: AILatency
+  recent_decisions: AIRecentDecision[]
+  note: string
+}
+
+type WhyNotTradedBreakdown = {
+  stage: string
+  v8_d?: string
+  v8_d_rejection_reasons?: string[]
+  ai_decision?: string | null
+  ai_confidence?: number | null
+  ai_reason_codes?: string[]
+  ai_decision_id?: string | null
+  ai_model?: string | null
+  execution_reason?: string
+}
+
+type WhyNotTraded = {
+  available: boolean
+  reason?: string
+  traded?: boolean
+  signal?: string | null
+  breakdown?: WhyNotTradedBreakdown
+}
+
+/**
+ * AI Trading Decision panel (PHASE 5.1).
+ *
+ * Separate responsibility from the chat above: this is the AI DECISION
+ * ENGINE that gates V8-D signals before the hard risk/execution pipeline.
+ * "Execution Eligibility: YES" means the deterministic pipeline MAY
+ * continue — it NEVER means the AI placed an order. Confidence shown here
+ * is AI confidence in its own analysis, NOT a probability of profit.
+ */
+function AIDecisionPanel() {
+  const [status, setStatus] = useState<AIDecisionStatus | null>(null)
+  const [why, setWhy] = useState<WhyNotTraded | null>(null)
+  const [loadError, setLoadError] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const [s, w] = await Promise.all([
+          api.get('/api/ai-decision/status'),
+          api.get('/api/ai-decision/why-not-traded'),
+        ])
+        if (!alive) return
+        setLoadError(false)
+        setStatus(s.data)
+        setWhy(w.data)
+      } catch {
+        if (alive) setLoadError(true)
+      }
+    }
+    void load()
+    const id = setInterval(load, AI_DECISION_POLL_MS)
+    return () => { alive = false; clearInterval(id) }
+  }, [])
+
+  if (loadError && !status) {
+    return (
+      <div className="bg-[#141b2d] border border-red-900/40 rounded-xl p-4 text-xs text-red-300">
+        AI Trading Decision status unavailable (backend unreachable).
+      </div>
+    )
+  }
+  if (!status) return null
+
+  const stageBadge = (stage?: string) => {
+    const cls = stage === 'TRADED'
+      ? 'bg-emerald-950/40 border-emerald-700/50 text-emerald-300'
+      : stage === 'AI_REJECTED' || stage === 'KILL_SWITCH'
+        ? 'bg-red-950/40 border-red-800/50 text-red-300'
+        : stage === 'AI_WAITING'
+          ? 'bg-amber-950/40 border-amber-800/50 text-amber-300'
+          : stage === 'RISK_REJECTED' || stage === 'EXECUTION_REJECTED' || stage === 'NO_VALID_LOT_SIZE' || stage === 'NO_VALID_CONTRACT'
+            ? 'bg-orange-950/40 border-orange-800/50 text-orange-300'
+            : 'bg-slate-800/70 border-slate-700 text-slate-300'
+    const label = (stage || 'UNKNOWN').replace(/_/g, ' ')
+    return <span className={`text-[11px] px-2 py-0.5 rounded-full border ${cls}`}>{label}</span>
+  }
+
+  const decisionChip = (d?: string | null) => {
+    if (!d) return <span className="text-slate-500">—</span>
+    const cls = d === 'APPROVE' ? 'text-emerald-300' : d === 'WAIT' ? 'text-amber-300' : 'text-red-300'
+    return <span className={`font-semibold ${cls}`}>{d}</span>
+  }
+
+  const lat = status.latency || {}
+
+  return (
+    <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+            <Cpu size={14} className="text-cyan-400" /> AI Trading Decision
+            {status.ai_decision_enabled ? (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-950/40 border border-emerald-800/50 text-emerald-300">ENABLED</span>
+            ) : (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800/70 border border-slate-700 text-slate-400">DISABLED</span>
+            )}
+          </h2>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            V8-D signal → AI decision → hard risk → sizing → execution pipeline. {status.approval_semantics}.
+          </p>
+        </div>
+        <div className="text-right text-[11px] text-slate-400">
+          <div className="font-mono">{status.provider} · {status.model}</div>
+          <div className="text-slate-600">temp {status.temperature} · timeout {status.timeout_seconds}s</div>
+        </div>
+      </div>
+
+      {!status.ai_decision_enabled && (
+        <div className="text-[11px] text-slate-400 bg-[#0f1628] border border-[#1e2d45] rounded-lg p-2.5">
+          {status.note}
+        </div>
+      )}
+
+      {/* Why didn't we trade? — gate-by-gate breakdown (§10) */}
+      <div className="bg-[#0f1628] border border-[#1e2d45] rounded-lg p-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <span className="text-[11px] uppercase tracking-wider text-slate-500">Why didn&apos;t we trade?</span>
+          {stageBadge(why?.breakdown?.stage)}
+        </div>
+        {why?.available && why.breakdown ? (
+          <div className="mt-2 space-y-1 text-[11px] text-slate-300">
+            <div>V8-D: <span className={why.breakdown.v8_d === 'PASS' ? 'text-emerald-300' : 'text-slate-400'}>{why.breakdown.v8_d || '—'}</span>
+              {why.breakdown.v8_d_rejection_reasons && why.breakdown.v8_d_rejection_reasons.length > 0 && (
+                <span className="text-slate-500"> — {why.breakdown.v8_d_rejection_reasons.slice(0, 2).join('; ')}</span>
+              )}
+            </div>
+            <div>AI: {decisionChip(why.breakdown.ai_decision)}
+              {typeof why.breakdown.ai_confidence === 'number' && (
+                <span className="text-slate-500"> · AI confidence {why.breakdown.ai_confidence}%</span>
+              )}
+              {why.breakdown.ai_reason_codes && why.breakdown.ai_reason_codes.length > 0 && (
+                <span className="text-slate-500"> · {why.breakdown.ai_reason_codes.slice(0, 3).join(', ')}</span>
+              )}
+            </div>
+            {why.breakdown.execution_reason && (
+              <div className="text-slate-500">Pipeline: {why.breakdown.execution_reason}</div>
+            )}
+            <div className="text-slate-500">Final: {why.traded ? 'TRADED (paper)' : 'NO TRADE'}</div>
+          </div>
+        ) : (
+          <div className="mt-2 text-[11px] text-slate-500">{why?.reason || 'No scan result recorded yet.'}</div>
+        )}
+      </div>
+
+      {/* Latency telemetry (§23) */}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-400">
+        <span>Decisions measured: <span className="text-slate-200">{lat.samples ?? 0}</span></span>
+        <span>Median: <span className="text-slate-200">{lat.latency_ms_median != null ? `${Math.round(lat.latency_ms_median)}ms` : '—'}</span></span>
+        <span>p95: <span className="text-slate-200">{lat.latency_ms_p95 != null ? `${Math.round(lat.latency_ms_p95)}ms` : '—'}</span></span>
+        <span>Failures: <span className="text-slate-200">{lat.failure_count ?? 0}</span></span>
+        {lat.error_counts && Object.entries(lat.error_counts).map(([code, n]) => (
+          <span key={code} className="text-amber-400">{code}: {n}</span>
+        ))}
+      </div>
+
+      {/* Recent decisions — AI confidence, never probability of profit (§11) */}
+      {status.recent_decisions.length > 0 && (
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-1">Recent AI decisions</div>
+          <div className="space-y-1">
+            {status.recent_decisions.slice(0, 5).map(d => (
+              <div key={d.decision_id} className="flex items-center justify-between gap-2 text-[11px] bg-[#0f1628] border border-[#1e2d45] rounded px-2 py-1">
+                <span className="font-mono text-slate-500">{d.created_at.slice(11, 19)}</span>
+                <span className="text-slate-300">{d.symbol}</span>
+                {decisionChip(d.decision)}
+                <span className="text-slate-500" title="AI confidence in its own analysis — NOT a probability of profit">AI conf {d.confidence}%</span>
+                <span className="text-slate-500 truncate max-w-[30%]">{(d.reason_codes || []).slice(0, 2).join(', ') || '—'}</span>
+                <span className="text-slate-600">{d.latency_ms != null ? `${Math.round(d.latency_ms)}ms` : ''}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Backtest AI availability (§18) — never labeled AI-assisted silently */}
+      <div className="text-[11px] text-slate-500">
+        Backtest AI layer: <span className="text-amber-300">{status.backtest_status.replace(/_/g, ' ')}</span>
+        {' '}(historical AI decisions are not reproducible — backtests are V8-D-only and labeled as such)
+      </div>
+    </div>
+  )
+}
 
 /** Map a typed backend error_code to a distinct, honest UI message. */
 function errorCodeToMessage(code?: string, fallback?: string): { label: string; text: string } {
@@ -178,13 +400,22 @@ export default function Copilot() {
     setInput('')
     const userId = crypto.randomUUID()
     setMessages(prev => [...prev, { id: userId, role: 'user', text: q }])
-    // Assistant placeholder in `thinking` state; its id becomes the job id.
-    const jobId = crypto.randomUUID()
-    setMessages(prev => [...prev, { id: jobId, role: 'assistant', text: '', state: 'thinking' }])
+    // Assistant placeholder while the submit request is in flight. Its id is
+    // OPTIMISTIC — it is replaced by the SERVER's job_id below so that
+    // pollJob (which maps by the backend's job_id) can match this message.
+    // Using a fixed temp prefix (instead of crypto.randomUUID()) avoids any
+    // collision with a real backend job id.
+    const placeholderId = `temp-${crypto.randomUUID()}`
+    setMessages(prev => [...prev, { id: placeholderId, role: 'assistant', text: '', state: 'thinking' }])
+    let jobId = placeholderId
     try {
       const r = await api.post('/api/copilot/chat/submit', { question: q, session_id: sessionId })
       const d = r.data
       if (d.job_id) {
+        jobId = d.job_id
+        // Re-key the placeholder to the server's job id — pollJob matches
+        // messages by this exact id, so the answer renders on completion.
+        setMessages(prev => prev.map(m => m.id === placeholderId ? { ...m, id: jobId } : m))
         pollJob(d.job_id, () => {})
       } else {
         // Immediate typed failure (disabled / not configured).
@@ -316,6 +547,8 @@ export default function Copilot() {
           and restart the backend. Until then, the Copilot will show this configuration message instead of a fabricated answer.
         </div>
       )}
+
+      <AIDecisionPanel />
 
       <div className="flex-1 min-h-0 bg-[#141b2d] border border-[#1e2d45] rounded-xl flex flex-col">
         <div className="flex-1 overflow-y-auto p-4 space-y-3">

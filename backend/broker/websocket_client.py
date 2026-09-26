@@ -39,13 +39,24 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 def is_nse_market_open() -> bool:
-    """Check if NSE/BSE market session is currently active (09:15 to 15:30 IST on weekdays)."""
-    now_ist = datetime.now(IST)
-    if now_ist.weekday() >= 5:  # Saturday=5, Sunday=6
-        return False
-    market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-    return market_open <= now_ist <= market_close
+    """Whether the NSE/BSE equity+F&O session is currently active.
+
+    Delegates to the ONE authoritative exchange calendar (weekends, official
+    NSE/BSE holidays, and special sessions like Muhurat) — never local
+    weekday math. Falls back to the classic weekday/session check only if the
+    calendar itself cannot be loaded, so a broken feed connection probe can
+    never take the whole client down.
+    """
+    try:
+        from backend.market.calendar import is_market_open_now
+        return is_market_open_now()
+    except Exception:  # pragma: no cover — calendar import must never crash the feed
+        now_ist = datetime.now(IST)
+        if now_ist.weekday() >= 5:  # Saturday=5, Sunday=6
+            return False
+        market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+        return market_open <= now_ist <= market_close
 
 
 def _extract_ltpc(feed: Dict[str, Any]) -> Dict[str, Any]:

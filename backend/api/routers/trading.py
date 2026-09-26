@@ -17,18 +17,22 @@ from backend.config.universe_config import VALID_OPTION_INDICES
 from backend.database.db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
-router  = APIRouter()
+from fastapi import Depends
+
+from backend.api.control_auth import require_control_token
+
+# State-changing endpoints (manual exit): guarded by the optional control
+# token (no-op unless CONTROL_TOKEN is set).
+router = APIRouter(dependencies=[Depends(require_control_token)])
 settings = load_settings()
 db = DatabaseManager(db_path=settings.database.path)
 IST = ZoneInfo("Asia/Kolkata")
 
 def _is_market_open() -> bool:
-    now = datetime.now(IST)
-    if now.weekday() >= 5:
-        return False
-    open_t  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
-    close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
-    return open_t <= now <= close_t
+    """Delegates to the ONE authoritative exchange calendar (weekends,
+    official NSE/BSE holidays, special sessions) — no local weekday math."""
+    from backend.market.calendar import is_market_open_now
+    return is_market_open_now()
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:

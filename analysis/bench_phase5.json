@@ -1,0 +1,33 @@
+{
+  "data_loading_seconds": 0.09,
+  "1d": {
+    "bars": 75,
+    "seconds": 0.18,
+    "bars_per_second": 424.0,
+    "trades": 0,
+    "net_pnl": 0,
+    "validity": "INCONCLUSIVE",
+    "coverage": 100.0,
+    "signals": 0
+  },
+  "5d": {
+    "bars": 375,
+    "seconds": 0.32,
+    "bars_per_second": 1157.0,
+    "trades": 0,
+    "net_pnl": 0,
+    "validity": "INCONCLUSIVE",
+    "coverage": 100.0,
+    "signals": 0
+  },
+  "25d": {
+    "bars": 1650,
+    "seconds": 2.91,
+    "bars_per_second": 566.0,
+    "trades": 0,
+    "net_pnl": 0,
+    "validity": "INCONCLUSIVE",
+    "coverage": 100.0,
+    "signals": 0
+  }
+}

@@ -20,6 +20,7 @@ if str(_backend_root) not in sys.path:
     sys.path.insert(0, str(_backend_root))
 
 from .routers import (
+    ai_decision_router,
     ai_router,
     copilot_router,
     alerts_router,
@@ -51,6 +52,20 @@ async def lifespan(app: FastAPI):
     s = load_settings()
     db = DatabaseManager(db_path=s.database.path)
     db.init_db()
+
+    # ── Backtest job restart recovery ─────────────────────────────────
+    # Any job the durable store still lists as active died with the previous
+    # process. Mark it INTERRUPTED_BY_RESTART (never COMPLETED) before the
+    # API serves any status — the frontend then shows the honest state.
+    try:
+        from backend.backtest.job_store import job_store
+        recovered = job_store.recover_interrupted()
+        if recovered:
+            logging.getLogger(__name__).warning(
+                "BACKTEST_RESTART_RECOVERY startup recovered=%d job(s)", len(recovered)
+            )
+    except Exception:
+        logging.getLogger(__name__).exception("BACKTEST_RESTART_RECOVERY failed at startup")
 
     # ── Health monitoring ──────────────────────────────────────────────
     from backend.health.health_monitor import health_monitor, ComponentStatus
@@ -357,6 +372,7 @@ app.include_router(universe_router,       prefix="/api/universe")
 app.include_router(scanner_router,        prefix="/api/scanner")
 app.include_router(ai_router,             prefix="/api/ai")
 app.include_router(copilot_router,        prefix="/api/copilot")
+app.include_router(ai_decision_router,    prefix="/api/ai-decision")
 
 
 # ─── Core endpoints ────────────────────────────────────────────────────────────

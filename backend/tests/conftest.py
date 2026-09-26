@@ -52,3 +52,23 @@ if pytest is not None:
         _clear_token_runtime_state()
         yield
         _clear_token_runtime_state()
+
+    @pytest.fixture(autouse=True)
+    def _isolate_backtest_job_store():
+        """Empty the durable backtest-jobs table around every test.
+
+        The job store singleton points at DATABASE_PATH's directory, so each
+        test process gets its own DB file; this additionally guarantees no
+        active row survives between tests (which would trip the DB-enforced
+        one-active-job constraint)."""
+        try:
+            from backend.backtest.job_store import job_store
+            job_store.clear_all()
+        except Exception:
+            pass
+        yield
+        try:
+            from backend.backtest.job_store import job_store
+            job_store.clear_all()
+        except Exception:
+            pass

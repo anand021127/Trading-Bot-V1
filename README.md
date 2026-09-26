@@ -162,11 +162,11 @@ $env:ALLOW_LIVE_UPSTOX = "0"
 python run_all_tests.py
 ```
 
-Or via the project pytest shim:
+Or run specific files with true pytest:
 
 ```powershell
-python pytest.py backend\tests\test_paper_exit_pnl_risk.py
-python pytest.py backend\tests\test_position_recovery.py
+python -m pytest backend\tests\test_paper_exit_pnl_risk.py -q
+python -m pytest backend\tests\test_position_recovery.py -q
 ```
 
 Official style (if pytest is installed in the venv):
@@ -273,8 +273,7 @@ Trading-Bot-V1/
   scripts/
   models/
   tests/             # optional top-level tests
-  pytest.py          # offline-friendly test shim
-  run_all_tests.py   # full suite runner
+  run_all_tests.py   # full-suite entry point (thin true-pytest wrapper)
   .env.example
   README.md
 ```

@@ -4,12 +4,15 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from backend.api.control_auth import require_control_token
 from backend.config.settings import load_settings
 from backend.strategy.trading_engine import BotState
 
-router = APIRouter()
+# State-changing control endpoints: guarded by the optional control token
+# (no-op unless CONTROL_TOKEN is set — see backend/api/control_auth.py).
+router = APIRouter(dependencies=[Depends(require_control_token)])
 settings = load_settings()
 logger = logging.getLogger(__name__)
 

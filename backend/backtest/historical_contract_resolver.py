@@ -124,12 +124,32 @@ def get_nearest_expiry_for_date(
     underlying: str,
     target_date: date,
 ) -> date:
-    """Calendar approximation helper for expiry day."""
+    """Authoritative weekly-expiry resolution for `underlying` in the week of
+    `target_date`, HOLIDAY-SHIFTED via the exchange calendar.
+
+    Computes the calendar expiry weekday, then shifts BACKWARD to the previous
+    trading day when the expiry lands on a weekend or an official NSE/BSE
+    holiday (the exchange rule). Deterministic and reproducible for historical
+    backtests — pure calendar math over verified holiday tables, no network,
+    no wall clock.
+
+    For years beyond the calendar's verified tables this degrades to the pure
+    weekday approximation (documented, unshifted) rather than guessing
+    holidays — the authoritative expired-instruments API remains the primary
+    resolution path; this helper is the offline fallback.
+    """
     weekday = _EXPIRY_WEEKDAYS.get(underlying, 3)
     days_ahead = (weekday - target_date.weekday()) % 7
-    if days_ahead == 0:
-        return target_date
-    return target_date + timedelta(days=days_ahead)
+    expiry = target_date + timedelta(days=days_ahead)
+    try:
+        from backend.market.calendar import exchange_calendar
+        while not exchange_calendar.is_trading_day(expiry):
+            expiry -= timedelta(days=1)
+    except Exception:
+        # Calendar unavailable / unverified year: keep the historical
+        # weekday-only approximation (never raise out of metadata enrichment).
+        pass
+    return expiry
 
 
 def build_trading_symbol(

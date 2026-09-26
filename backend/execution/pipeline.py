@@ -15,6 +15,7 @@ from backend.execution.token_guard import TokenGuardError, assert_token_usable
 from backend.orders.contract_validator import validate_option_contract
 from backend.orders.execution_guard import evaluate_pretrade_guard
 from backend.orders.idempotency import IdempotentOrderStore, make_signal_id
+from backend.orders.broker_responses import ResponseKind, classify_broker_exception, classify_place_response
 from backend.risk.risk_config import AuthoritativeRiskConfig
 
 logger = logging.getLogger(__name__)
@@ -165,13 +166,61 @@ class ExecutionPipeline:
             logger.info("REJECT signal_id=%s reasons=%s", sid, guard.reasons)
             return PipelineResult(False, ";".join(guard.reasons), signal_id=sid)
 
-        order = self.place_order_fn(signal, sid)
-        if getattr(order, "id", None):
-            self.intents.mark_submitted(sid, str(order.id))
+        order_or_exc: Any = None
+        submit_exc: Optional[BaseException] = None
+        try:
+            order_or_exc = self.place_order_fn(signal, sid)
+        except Exception as exc:  # noqa: BLE001 — classified, never swallowed
+            submit_exc = exc
+
+        if submit_exc is not None:
+            # AMBIGUOUS RESPONSE GATE: when the outcome is unobservable
+            # (timeout/reset/5xx/DNS/malformed), the order MAY exist at the
+            # broker. The intent stays durable (SUBMISSION_UNKNOWN) so any
+            # retry of the same signal is rejected until reconciliation
+            # resolves the true state. NEVER blind-resubmit.
+            classification = classify_broker_exception(submit_exc)
+            logger.error(
+                "ORDER_SUBMIT_OUTCOME strategy=%s signal_id=%s kind=%s outcome=%s detail=%s",
+                self.strategy.name, sid, classification.kind.value,
+                classification.outcome.value, classification.detail[:200],
+            )
+            if classification.kind is ResponseKind.UNKNOWN:
+                self.intents.mark_unknown(sid)
+                return PipelineResult(
+                    False,
+                    f"ORDER_STATE_UNKNOWN — {classification.outcome.value}; reconciliation required before any retry",
+                    signal_id=sid,
+                )
+            # KNOWN synchronous rejection (broker refused before acceptance):
+            # no order exists at the broker; intent is removed so a corrected
+            # resubmission is a legitimate new attempt, not a duplicate.
+            self.intents.clear_intent(sid)
+            return PipelineResult(
+                False,
+                f"BROKER_REJECTED — {classification.outcome.value}",
+                signal_id=sid,
+            )
+
+        order = order_or_exc
+        raw_ack = getattr(order, "id", None) or (order.get("order_id") if isinstance(order, dict) else None)
+        if raw_ack:
+            self.intents.mark_submitted(sid, str(raw_ack))
+        else:
+            # 2xx-ish response without an order id is ALSO ambiguous — the
+            # broker may hold the order. Gate it identically.
+            resp_cls = classify_place_response(order.raw if isinstance(getattr(order, "raw", None), dict) else order)
+            if resp_cls.kind is ResponseKind.UNKNOWN:
+                self.intents.mark_unknown(sid)
+                return PipelineResult(
+                    False,
+                    f"ORDER_STATE_UNKNOWN — {resp_cls.outcome.value}; reconciliation required",
+                    signal_id=sid,
+                )
         logger.info(
             "ORDER strategy=%s signal_id=%s instrument=%s qty=%s order_id=%s status=%s",
             self.strategy.name, sid, signal.get("instrument_key"), signal.get("quantity"),
-            getattr(order, "id", None), getattr(order, "status", None),
+            raw_ack, getattr(order, "status", None),
         )
         return PipelineResult(True, "submitted", signal_id=sid, order=order)
 
@@ -194,9 +243,44 @@ class ExecutionPipeline:
         if remembered["duplicate"]:
             return PipelineResult(False, "duplicate_exit", signal_id=sid)
 
-        order = self.place_order_fn(exit_signal, sid)
-        if getattr(order, "id", None):
-            self.intents.mark_submitted(sid, str(order.id))
+        order_or_exc: Any = None
+        submit_exc: Optional[BaseException] = None
+        try:
+            order_or_exc = self.place_order_fn(exit_signal, sid)
+        except Exception as exc:  # noqa: BLE001 — classified, never swallowed
+            submit_exc = exc
+
+        if submit_exc is not None:
+            # Exit ambiguity: exactly one effective exit. If the outcome is
+            # unobservable, block the duplicate-exit retry until reconciled.
+            classification = classify_broker_exception(submit_exc)
+            logger.error(
+                "EXIT_SUBMIT_OUTCOME strategy=%s signal_id=%s kind=%s outcome=%s",
+                self.strategy.name, sid, classification.kind.value, classification.outcome.value,
+            )
+            if classification.kind is ResponseKind.UNKNOWN:
+                self.intents.mark_unknown(sid)
+                return PipelineResult(
+                    False,
+                    f"EXIT_STATE_UNKNOWN — {classification.outcome.value}; reconciliation required before retry",
+                    signal_id=sid,
+                )
+            self.intents.clear_intent(sid)
+            return PipelineResult(False, f"BROKER_REJECTED — {classification.outcome.value}", signal_id=sid)
+
+        order = order_or_exc
+        raw_ack = getattr(order, "id", None) or (order.get("order_id") if isinstance(order, dict) else None)
+        if raw_ack:
+            self.intents.mark_submitted(sid, str(raw_ack))
+        else:
+            resp_cls = classify_place_response(order.raw if isinstance(getattr(order, "raw", None), dict) else order)
+            if resp_cls.kind is ResponseKind.UNKNOWN:
+                self.intents.mark_unknown(sid)
+                return PipelineResult(
+                    False,
+                    f"EXIT_STATE_UNKNOWN — {resp_cls.outcome.value}; reconciliation required",
+                    signal_id=sid,
+                )
         logger.info(
             "EXIT_ORDER strategy=%s signal_id=%s instrument=%s qty=%s reason=%s status=%s kill=%s",
             self.strategy.name, sid, exit_signal.get("instrument_key"),

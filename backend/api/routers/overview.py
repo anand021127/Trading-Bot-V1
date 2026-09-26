@@ -37,13 +37,10 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 def _is_market_open() -> bool:
-    """Check if NSE market is currently open (9:15 AM – 3:30 PM IST, Mon–Fri)."""
-    now_ist = datetime.now(IST)
-    if now_ist.weekday() >= 5:  # Saturday=5, Sunday=6
-        return False
-    market_open  = now_ist.replace(hour=9,  minute=15, second=0, microsecond=0)
-    market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-    return market_open <= now_ist <= market_close
+    """Delegates to the ONE authoritative exchange calendar (weekends,
+    official NSE/BSE holidays, special sessions) — no local weekday math."""
+    from backend.market.calendar import is_market_open_now
+    return is_market_open_now()
 
 
 def _serialize_position(row: Any) -> Dict[str, Any]:

@@ -16,7 +16,13 @@ from backend.database.db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+from fastapi import Depends
+
+from backend.api.control_auth import require_control_token
+
+# Settings/token endpoints are state-changing: guarded by the optional
+# control token (no-op unless CONTROL_TOKEN is set).
+router = APIRouter(dependencies=[Depends(require_control_token)])
 settings = load_settings()
 
 SETTINGS_PATH = Path(__file__).resolve().parents[3] / "backend" / "config" / "settings.yaml"

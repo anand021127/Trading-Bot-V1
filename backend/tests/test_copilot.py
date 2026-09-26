@@ -446,10 +446,12 @@ class TestRealOptionPipeline:
         assert result["decision"] == "SKIP"
 
 
-class TestPaperExecutionSafety:
-    """The highest-stakes tests in this file — execution.py is the one
-    module that CAN place an order, so every refusal path is tested
-    explicitly, and success requires ALL gates to align."""
+class TestCopilotExecutionRemoved:
+    """PHASE 5: the Copilot is observation-only. The former execution path
+    (execution.py reconstructing an OPTION_PREMIUM StrategySignal and calling
+    execute_multi_signal from the scanner hook) is REMOVED. The refuse-only
+    stub must reject unconditionally and no engine execution method may ever
+    be reached from Copilot."""
 
     def _approved_plan(self):
         return {
@@ -459,36 +461,27 @@ class TestPaperExecutionSafety:
             "bid_price": 99.5, "ask_price": 100.5,
         }, {"approved": True, "reasons_rejected": []}
 
-    def test_refuses_when_copilot_disabled(self):
+    def test_refuse_stub_rejects_even_a_fully_approved_plan_in_paper_mode(self):
         from backend.copilot.execution import submit_trade_plan_for_paper_execution
         from backend.copilot.config import CopilotSettings
         plan, val = self._approved_plan()
-        settings = CopilotSettings(enabled=False, mode="paper", min_risk_reward=1.5,
+        settings = CopilotSettings(enabled=True, mode="paper", min_risk_reward=0.5,
                                     max_quote_age_seconds=30, llm_backend="none",
                                     llm_base_url="", llm_model="", llm_timeout_seconds=8)
-        result = submit_trade_plan_for_paper_execution(CopilotTools(), plan, val, copilot_settings=settings)
+        engine = MagicMock()
+        tools = CopilotTools(engine=engine)
+        result = submit_trade_plan_for_paper_execution(tools, plan, val, copilot_settings=settings)
         assert result.submitted is False
-        assert "disabled" in result.reason.lower()
+        assert "COPILOT_EXECUTION_REMOVED" in result.reason
+        engine.execute_multi_signal.assert_not_called()
 
-    def test_refuses_when_copilot_mode_not_paper(self):
+    def test_refuse_stub_rejects_when_bot_mode_is_live(self):
+        """The historical critical gate: global mode live must NEVER produce a
+        Copilot-driven order - now impossible by removal, still asserted."""
         from backend.copilot.execution import submit_trade_plan_for_paper_execution
         from backend.copilot.config import CopilotSettings
         plan, val = self._approved_plan()
-        settings = CopilotSettings(enabled=True, mode="shadow", min_risk_reward=1.5,
-                                    max_quote_age_seconds=30, llm_backend="none",
-                                    llm_base_url="", llm_model="", llm_timeout_seconds=8)
-        result = submit_trade_plan_for_paper_execution(CopilotTools(), plan, val, copilot_settings=settings)
-        assert result.submitted is False
-        assert "shadow" in result.reason.lower() or "paper" in result.reason.lower()
-
-    def test_refuses_when_global_bot_mode_is_live(self):
-        """The critical safety test: even with Copilot fully configured
-        for paper mode, if the bot's GLOBAL mode is 'live', execution
-        must still refuse — COPILOT_MODE=paper alone is never sufficient."""
-        from backend.copilot.execution import submit_trade_plan_for_paper_execution
-        from backend.copilot.config import CopilotSettings
-        plan, val = self._approved_plan()
-        settings = CopilotSettings(enabled=True, mode="paper", min_risk_reward=1.5,
+        settings = CopilotSettings(enabled=True, mode="paper", min_risk_reward=0.5,
                                     max_quote_age_seconds=30, llm_backend="none",
                                     llm_base_url="", llm_model="", llm_timeout_seconds=8)
         engine = MagicMock()
@@ -497,51 +490,33 @@ class TestPaperExecutionSafety:
             bot_settings.mode = "live"
             result = submit_trade_plan_for_paper_execution(tools, plan, val, copilot_settings=settings)
         assert result.submitted is False
-        assert "live" in result.reason.lower()
         engine.execute_multi_signal.assert_not_called()
 
-    def test_refuses_unapproved_plan(self):
-        from backend.copilot.execution import submit_trade_plan_for_paper_execution
-        from backend.copilot.config import CopilotSettings
-        plan, _ = self._approved_plan()
-        settings = CopilotSettings(enabled=True, mode="paper", min_risk_reward=1.5,
-                                    max_quote_age_seconds=30, llm_backend="none",
-                                    llm_base_url="", llm_model="", llm_timeout_seconds=8)
-        result = submit_trade_plan_for_paper_execution(CopilotTools(), plan, {"approved": False, "reasons_rejected": ["x"]}, copilot_settings=settings)
-        assert result.submitted is False
-        assert "not approved" in result.reason.lower() or "unapproved" in result.reason.lower()
-
-    def test_succeeds_when_all_gates_align(self):
-        from backend.copilot.execution import submit_trade_plan_for_paper_execution
-        from backend.copilot.config import CopilotSettings
-        plan, val = self._approved_plan()
-        settings = CopilotSettings(enabled=True, mode="paper", min_risk_reward=1.5,
-                                    max_quote_age_seconds=30, llm_backend="none",
-                                    llm_base_url="", llm_model="", llm_timeout_seconds=8)
-        engine = MagicMock()
-        engine.execute_multi_signal.return_value = "trade_123"
-        tools = CopilotTools(engine=engine)
-        with mock.patch("backend.strategy.trading_engine.settings") as bot_settings:
-            bot_settings.mode = "paper"
-            result = submit_trade_plan_for_paper_execution(tools, plan, val, copilot_settings=settings)
-        assert result.submitted is True
-        assert result.trade_id == "trade_123"
-        engine.execute_multi_signal.assert_called_once()
-
-    def test_engine_rejection_at_execution_time_is_reported_not_hidden(self):
-        from backend.copilot.execution import submit_trade_plan_for_paper_execution
-        from backend.copilot.config import CopilotSettings
-        plan, val = self._approved_plan()
-        settings = CopilotSettings(enabled=True, mode="paper", min_risk_reward=1.5,
-                                    max_quote_age_seconds=30, llm_backend="none",
-                                    llm_base_url="", llm_model="", llm_timeout_seconds=8)
-        engine = MagicMock()
-        engine.execute_multi_signal.return_value = None  # engine's own RiskManager rejected it
-        tools = CopilotTools(engine=engine)
-        with mock.patch("backend.strategy.trading_engine.settings") as bot_settings:
-            bot_settings.mode = "paper"
-            result = submit_trade_plan_for_paper_execution(tools, plan, val, copilot_settings=settings)
-        assert result.submitted is False
+    def test_no_module_outside_execution_layer_reaches_order_placement(self):
+        """Static guarantee: Copilot execution module contains no reachable
+        order submission CALL. Docstring mentions of the removed historical
+        path are fine; actual call syntax is not."""
+        import ast
+        import inspect
+        import backend.copilot.execution as ex
+        tree = ast.parse(inspect.getsource(ex))
+        banned_names = {"execute_multi_signal", "place_order", "submit_signal",
+                        "submit_exit", "OrderManager"}
+        banned_attrs = {"execute_multi_signal", "place_order"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                f = node.func
+                if isinstance(f, ast.Name) and f.id in banned_names:
+                    raise AssertionError(f"forbidden call: {f.id}")
+                if isinstance(f, ast.Attribute) and f.attr in banned_attrs:
+                    raise AssertionError(f"forbidden method call: .{f.attr}()")
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                mod = getattr(node, "module", None) or ""
+                names = [a.name for a in node.names]
+                if "orders" in mod or mod.startswith("orders."):
+                    raise AssertionError(f"copilot must not import orders layer: {mod}")
+                if any(n in ("OrderManager", "ExecutionPipeline") for n in names):
+                    raise AssertionError(f"copilot must not import execution symbols: {names}")
 
 
 class TestSpotPriceFallback:
@@ -761,12 +736,10 @@ class TestMarketClosedHandling:
         assert row.status == "OK"  # intentional (e.g. outside market hours), not a failure
 
 
-class TestScannerAutoPaperExecution:
-    """THE bug fix: live_scanner_copilot_hook() built/validated TradePlans
-    but never called submit_trade_plan_for_paper_execution() in paper
-    mode. These tests exercise the REAL LiveScanner -> hook -> execution
-    -> DB position chain, not just the execution.py gates in isolation
-    (those were already covered by TestPaperExecutionSafety)."""
+class TestScannerCopilotHookObservationOnly:
+    """PHASE 5: the live scanner's Copilot hook only OBSERVES - it logs
+    trade plans and builds alerts, and can never create a position or call
+    the broker, in paper OR shadow mode."""
 
     def _scanner_with_hook(self, mode="paper"):
         from backend.scanner.live_scanner import LiveScanner
@@ -775,11 +748,6 @@ class TestScannerAutoPaperExecution:
         db.init_db()
         client = _mock_client_with_realistic_chain()
         client.get_quote_by_instrument_key.return_value = {"ltp": 120.5, "bid_price": 119.5, "ask_price": 121.0}
-        # Construct WITH the real client directly — order_manager binds
-        # to whatever client is passed at __init__ time, so assigning
-        # engine.client afterward would leave order_manager pointed at a
-        # stale, unconfigured MagicMock (a real bug this test caught in
-        # its own harness, not in production code).
         import backend.strategy.trading_engine as te_mod
         te_mod.settings.mode = "paper"
         te_mod.settings.strategy.name = "V8_D_PULLBACK_ATM"
@@ -789,13 +757,7 @@ class TestScannerAutoPaperExecution:
         te_mod.settings.risk.max_risk_per_trade_pct = 0.05
         engine = TradingEngine(client=client, db_manager=db)
         engine.risk_manager.capital = 1_000_000.0
-        # Re-arm pipeline with the enlarged capital / allocation limits
         engine._init_execution_pipeline()
-        # Copilot paper-execution tests exercise OPTION_PREMIUM-shaped
-        # signals from the mocked chain. Production paper scanning uses
-        # evaluate_configured_strategy → V8-D; here we route the scanner
-        # through evaluate_option_premium so the mock chain can produce a
-        # BUY without requiring a real V8-D pullback setup.
         engine.evaluate_configured_strategy = engine.evaluate_option_premium  # type: ignore[method-assign]
         tools = CopilotTools(engine=engine, db_manager=db, risk_manager=engine.risk_manager)
         state = CopilotScanState()
@@ -805,32 +767,21 @@ class TestScannerAutoPaperExecution:
         )
         return scanner, engine, db, client, tools
 
-    def test_approved_tradeplan_via_scanner_creates_paper_position(self):
+    def test_approved_tradeplan_via_scanner_creates_NO_position(self):
+        """The decisive flip vs the old behavior: even a fully approved trade
+        plan in paper mode creates NO position from the Copilot hook."""
         scanner, engine, db, client, tools = self._scanner_with_hook()
         with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
                                            "COPILOT_MIN_RISK_REWARD": "0.5"}):
             scanner.scan_symbol("NIFTY50")
-        positions = db.get_open_positions()
-        assert len(positions) == 1
-        assert positions[0].symbol == "NIFTY50"
+        assert db.get_open_positions() == []
         client.place_order.assert_not_called()
 
-    def test_same_setup_scanned_again_does_not_duplicate(self):
+    def test_scanned_twice_still_creates_nothing(self):
         scanner, engine, db, client, tools = self._scanner_with_hook()
         with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
                                            "COPILOT_MIN_RISK_REWARD": "0.5"}):
             scanner.scan_symbol("NIFTY50")
-            scanner.scan_symbol("NIFTY50")  # identical setup, same open position still exists
-        positions = db.get_open_positions()
-        assert len(positions) == 1  # NOT 2 — the open-position guard prevented a duplicate
-        client.place_order.assert_not_called()
-
-    def test_risk_manager_rejection_creates_no_position(self):
-        scanner, engine, db, client, tools = self._scanner_with_hook()
-        # Force RiskManager to reject every trade.
-        engine.risk_manager.can_take_trade = lambda symbol="": (False, "Daily loss limit hit")
-        with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
-                                           "COPILOT_MIN_RISK_REWARD": "0.5"}):
             scanner.scan_symbol("NIFTY50")
         assert db.get_open_positions() == []
         client.place_order.assert_not_called()
@@ -840,14 +791,10 @@ class TestScannerAutoPaperExecution:
         with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "shadow",
                                            "COPILOT_MIN_RISK_REWARD": "0.5"}):
             scanner.scan_symbol("NIFTY50")
-        assert db.get_open_positions() == []  # shadow mode logs only, never opens a position
+        assert db.get_open_positions() == []
         client.place_order.assert_not_called()
 
-    def test_global_live_mode_refuses_even_via_scanner(self):
-        """The critical cross-mode safety check: if the bot's global
-        mode is somehow 'live' while Copilot thinks it's 'paper', the
-        scanner-driven path must refuse exactly like the direct
-        execution.py call does — no position, no broker order."""
+    def test_global_live_mode_creates_nothing_via_scanner(self):
         scanner, engine, db, client, tools = self._scanner_with_hook()
         with mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
                                            "COPILOT_MIN_RISK_REWARD": "0.5"}), \
@@ -858,12 +805,8 @@ class TestScannerAutoPaperExecution:
         client.place_order.assert_not_called()
 
     def test_manual_analyze_path_never_executes(self):
-        """Reviewed per the request: the manual Analyze/TradePlan API
-        path (tools.get_trade_plan -> build_trade_plan_for_symbol) does
-        NOT call execution at all — it only builds and validates. This
-        is a design confirmation, not a new gate: the manual path was
-        already execution-free, so it cannot create a duplicate (or any)
-        paper trade by construction."""
+        """The manual Analyze/TradePlan API path only builds and validates -
+        by construction it cannot create a paper trade."""
         engine, db = _real_engine()
         client = _mock_client_with_realistic_chain()
         engine.client = client
@@ -874,20 +817,16 @@ class TestScannerAutoPaperExecution:
         assert db.get_open_positions() == []
         client.place_order.assert_not_called()
 
-    def test_rejected_execution_is_logged_not_silently_dropped(self):
+    def test_observation_logged_not_execution(self):
+        """The paper-mode hook logs COPILOT_OBSERVED_NOT_EXECUTED - proof the
+        plan was seen but NOT executed."""
         scanner, engine, db, client, tools = self._scanner_with_hook()
-        engine.risk_manager.can_take_trade = lambda symbol="": (False, "Max trades per day reached")
-        import tempfile
-        from pathlib import Path
-        with tempfile.TemporaryDirectory() as d:
-            log_path = Path(d) / "shadow.csv"
-            with mock.patch("backend.copilot.scan_loop.log_trade_plan") as mock_log, \
-                 mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
-                                               "COPILOT_MIN_RISK_REWARD": "0.5"}):
-                scanner.scan_symbol("NIFTY50")
+        with mock.patch("backend.copilot.scan_loop.log_trade_plan") as mock_log, \
+             mock.patch.dict(os.environ, {"COPILOT_ENABLED": "true", "COPILOT_MODE": "paper",
+                                           "COPILOT_MIN_RISK_REWARD": "0.5"}):
+            scanner.scan_symbol("NIFTY50")
         if mock_log.called:
-            call_args = mock_log.call_args
-            assert "EXECUTION_REJECTED" in str(call_args) or "Max trades per day" in str(call_args)
+            assert "COPILOT_OBSERVED_NOT_EXECUTED" in str(mock_log.call_args)
 
 
 class TestConversationMemory:

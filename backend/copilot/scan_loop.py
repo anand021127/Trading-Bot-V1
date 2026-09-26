@@ -108,17 +108,17 @@ def _process_trade_plan_result(
         return alert.formatted() if alert else None
 
     if settings.mode == "paper" and decision == "TRADE" and result.get("trade_plan") is not None:
+        # PHASE 5: Copilot is observation-only. The hook NEVER executes —
+        # the paper trade plans it finds are LOGGED (shadow log) and surfaced
+        # as alerts; actual trading happens only via the production scanner
+        # → PaperTradingRuntime → ExecutionPipeline path.
         if _has_open_position_for_symbol(tools, symbol):
             return alert.formatted() if alert else None  # already have a position — not a new setup
 
-        from backend.copilot.execution import submit_trade_plan_for_paper_execution
-        exec_result = submit_trade_plan_for_paper_execution(
-            tools, result["trade_plan"], result["validation"], copilot_settings=settings,
-        )
         try:
             log_trade_plan(
                 result.get("trade_plan"), result.get("validation"),
-                "PAPER_EXECUTED" if exec_result.submitted else f"EXECUTION_REJECTED: {exec_result.reason}",
+                "COPILOT_OBSERVED_NOT_EXECUTED",
             )
         except Exception:
             pass

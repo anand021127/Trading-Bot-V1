@@ -76,30 +76,29 @@ async def _test_live_quote() -> Dict[str, Any]:
     t0 = time.monotonic()
     try:
         from backend.broker.upstox_client import UpstoxClient
-        from zoneinfo import ZoneInfo
         client = UpstoxClient()
         underlying = "NIFTY50"
         q = await asyncio.to_thread(client.get_live_quote, underlying)
         ms = (time.monotonic() - t0) * 1000
         ltp = q.get("ltp", 0)
 
+        # ONE authoritative session source — no local weekday math.
+        from backend.market.calendar import exchange_calendar
         now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
-        is_weekday = now_ist.weekday() < 5
-        market_open = (is_weekday
-                       and now_ist.replace(hour=9, minute=15, second=0) <= now_ist
-                       <= now_ist.replace(hour=15, minute=30, second=0))
+        status, _desc = exchange_calendar.session_status(now_ist)
+        market_open = status == "OPEN"
 
         if ltp and ltp > 0:
             return _result("live_quote", "PASS", ms,
                            f"{underlying} LTP: ₹{ltp:.2f} | Change: {q.get('change_pct', 0):.2f}%")
         if not market_open:
             time_str = now_ist.strftime("%H:%M IST")
-            if not is_weekday:
-                note = f"Weekend — NSE closed."
-            elif now_ist.hour < 9 or (now_ist.hour == 9 and now_ist.minute < 15):
+            if status == "NON_TRADING_DAY":
+                note = "Weekend / exchange holiday — NSE closed."
+            elif status == "BEFORE_OPEN":
                 note = f"Pre-market. Opens at 9:15 AM IST."
             else:
-                note = f"Market closed at 3:30 PM IST. Current: {time_str}"
+                note = f"Market closed. Current: {time_str} ({_desc})"
             return _result("live_quote", "PASS", ms,
                            f"API responded correctly. LTP=0 expected — {note}")
         return _result("live_quote", "FAIL", ms, "",

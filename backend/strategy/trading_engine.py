@@ -546,7 +546,7 @@ class TradingEngine:
 
     @staticmethod
     def _is_entry_window() -> bool:
-        return session_manager.is_valid_entry_time()
+        return session_manager.is_entry_window()
 
     @staticmethod
     def _is_exit_all_time() -> bool:

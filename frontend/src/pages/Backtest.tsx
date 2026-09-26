@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
-import { Play, BarChart2, RefreshCw, AlertTriangle, Info, Download, StopCircle } from 'lucide-react'
+import { Play, BarChart2, RefreshCw, AlertTriangle, Info, Download, StopCircle, History } from 'lucide-react'
 import { runBacktest, getBacktestStatus, getBacktestResult, downloadBacktestResult, cancelBacktest } from '../api/endpoints'
 import { formatCurrency, pnlColor } from '../utils/formatters'
-import type { BacktestResponse } from '../types'
+import type { BacktestResponse, BacktestStatus } from '../types'
+import { BACKTEST_ACTIVE_STATUSES, BACKTEST_STATUS_LABELS } from '../types'
 
 const INDICES = ['NIFTY50', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX']
 
@@ -96,9 +97,47 @@ export default function Backtest() {
   const [eta, setEta]                 = useState<number | null>(null)
   const [cancelling, setCancelling]   = useState(false)
   const [tradeFilter, setTradeFilter]         = useState<'ALL' | 'WINS' | 'LOSSES'>('ALL')
+  const [recoveredJob, setRecoveredJob]       = useState<null | { status: BacktestStatus; error?: string | null; interrupted: boolean }>(null)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const recoveredRef = useRef(false)
 
-  useEffect(() => () => { if (pollRef.current) clearTimeout(pollRef.current) }, [])
+  // Restart recovery: on mount, ask the backend for the latest durable job.
+  // A terminal job (COMPLETED/FAILED/CANCELLED/INTERRUPTED_BY_RESTART) is
+  // re-hydrated into the UI — including its full result — so a refresh or a
+  // backend restart never loses the last run. A still-active job resumes
+  // polling automatically. Only terminal jobs are recovered (never invented).
+  useEffect(() => {
+    if (recoveredRef.current) return
+    recoveredRef.current = true
+    ;(async () => {
+      try {
+        const r = await axios.get('/api/backtest/jobs/active')
+        const job = r.data?.job
+        const status: BacktestStatus | undefined = job?.status
+        if (!status) return
+        if (BACKTEST_ACTIVE_STATUSES.includes(status) && job.job_id) {
+          setTaskId(job.job_id)
+          setRunning(true)
+          pollTask(job.job_id, 0)
+          return
+        }
+        if (status === 'COMPLETED') {
+          try {
+            const res = await getBacktestResult(job.job_id)
+            setResult(res)
+            setTaskId(job.job_id)
+          } catch { /* result expired — status banner still shown */ }
+        }
+        setRecoveredJob({
+          status,
+          error: job?.error ?? null,
+          interrupted: status === 'INTERRUPTED_BY_RESTART',
+        })
+      } catch { /* backend unreachable — user starts a fresh run */ }
+    })()
+    return () => { if (pollRef.current) clearTimeout(pollRef.current) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const toggleSymbol = (sym: string) =>
     setSelectedSymbols(prev => prev.includes(sym) ? prev.filter(s => s !== sym) : [...prev, sym])
@@ -155,7 +194,8 @@ export default function Backtest() {
     const tick = async () => {
       try {
         const status = await getBacktestStatus(taskId)
-        if (status.status === 'completed') {
+        const s = String(status.status || '').toUpperCase()
+        if (s === 'COMPLETED') {
           const finalResult = await getBacktestResult(taskId)
           setResult(finalResult)
           setRunning(false)
@@ -163,7 +203,7 @@ export default function Backtest() {
           setStatusLabel('COMPLETED')
           return
         }
-        if (status.status === 'failed') {
+        if (s === 'FAILED') {
           // Show the backend's REAL failure reason (error_details message
           // when present) — never a generic timeout message.
           setError(status.error || 'Backtest failed.')
@@ -172,14 +212,25 @@ export default function Backtest() {
           setStatusLabel('FAILED')
           return
         }
-        if (status.status === 'cancelled') {
+        if (s === 'CANCELLED') {
           setError('Backtest cancelled.')
           setRunning(false)
           setProgress(null)
           setStatusLabel('CANCELLED')
           return
         }
-        setStatusLabel(status.status)
+        if (s === 'INTERRUPTED_BY_RESTART') {
+          setError(
+            (status.error_details?.message as string) ||
+            status.error ||
+            'The backend restarted while this backtest was running — the job was interrupted and must be re-run.'
+          )
+          setRunning(false)
+          setProgress(null)
+          setStatusLabel('INTERRUPTED_BY_RESTART')
+          return
+        }
+        setStatusLabel(s)
         setProgress(status.progress ?? null)
         setElapsed(status.elapsed_seconds ?? null)
         setEta(status.estimated_remaining_seconds ?? null)
@@ -365,13 +416,18 @@ export default function Backtest() {
           <div className="text-xs text-slate-400 bg-[#0f1628] border border-[#1e2d45] rounded-lg p-3 space-y-2">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
               <span className="font-semibold text-slate-300">
-                {statusLabel === 'QUEUED' ? 'Queued…' : statusLabel === 'FETCHING_DATA' ? 'Fetching data…' : 'Running…'}
+                {statusLabel && statusLabel in BACKTEST_STATUS_LABELS
+                  ? BACKTEST_STATUS_LABELS[statusLabel as BacktestStatus]
+                  : (statusLabel ?? '')}
               </span>
               {elapsed !== null && <span>Elapsed: {elapsed.toFixed(0)}s</span>}
               {eta !== null && eta > 0 && <span>Estimated remaining: ~{eta.toFixed(0)}s</span>}
             </div>
             {progress?.phase === 'fetching_data' && (
               <div>Fetching real historical data — {progress.symbols_fetched ?? 0}/{progress.total_symbols ?? '?'} symbols done…</div>
+            )}
+            {progress?.phase === 'resolving_contracts' && (
+              <div>Resolving real historical option contracts (expired-instrument API)…</div>
             )}
             {progress?.phase === 'processing' && (
               <div>
@@ -380,6 +436,20 @@ export default function Backtest() {
               </div>
             )}
             {progress?.phase === 'finalizing' && <div>Finalizing results…</div>}
+          </div>
+        )}
+
+        {!running && recoveredJob && !result && recoveredJob.status !== 'COMPLETED' && (
+          <div className={`flex items-start gap-2 rounded-lg p-3 text-xs border ${
+            recoveredJob.interrupted
+              ? 'bg-amber-950/20 border-amber-800/40 text-amber-300'
+              : 'bg-slate-900/40 border-slate-700/40 text-slate-300'
+          }`}>
+            <History size={13} className="flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold">Last job: {BACKTEST_STATUS_LABELS[recoveredJob.status]} (recovered from backend restart)</div>
+              {recoveredJob.error && <div className="mt-0.5 opacity-80">{recoveredJob.error}</div>}
+            </div>
           </div>
         )}
       </div>

@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from datetime import datetime, time
 from typing import Any, Dict, Optional, Tuple, Union
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class IntradaySessionManager:
@@ -111,12 +114,43 @@ class IntradaySessionManager:
 
         return True, "VALID_ENTRY_TIME"
 
-    def is_mandatory_square_off(self, timestamp: Union[str, datetime, time, None]) -> bool:
+    def is_mandatory_square_off(self, timestamp: Union[str, datetime, time, None] = None) -> bool:
         """Return True if the timestamp has reached or passed mandatory square-off time (15:15 IST)."""
-        t = self.parse_time(timestamp)
+        t = self.parse_time(timestamp if timestamp is not None else datetime.now(IST))
         if t is None:
             return False
         return t >= self.mandatory_square_off
+
+    # ── Authoritative calendar integration ────────────────────────────
+    def is_market_open(self, now: Optional[datetime] = None) -> bool:
+        """Whether the market is in an OPEN session right now.
+
+        Delegates to the ONE authoritative exchange calendar (weekends,
+        official NSE/BSE holidays, special sessions like Muhurat). Falls
+        back to the classic weekday/session check only if the calendar
+        cannot be loaded, so a calendar problem can never crash an engine.
+        """
+        try:
+            from backend.market.calendar import exchange_calendar
+            return exchange_calendar.market_is_open(now)
+        except Exception:  # pragma: no cover — calendar failure fallback
+            now = now or datetime.now(IST)
+            if now.weekday() >= 5:
+                return False
+            return self.market_open <= now.time() < self.market_close
+
+    def is_entry_window(self, now: Optional[datetime] = None) -> bool:
+        """Whether NEW entries are allowed right now (OPEN session only).
+        After last-entry cutoff or outside a trading day: False."""
+        try:
+            from backend.market.calendar import exchange_calendar
+            status, _desc = exchange_calendar.session_status(now or datetime.now(IST))
+            return status == "OPEN"
+        except Exception:  # pragma: no cover
+            now = now or datetime.now(IST)
+            if now.weekday() >= 5:
+                return False
+            return self.market_open <= now.time() < self.last_entry
 
 
 # Shared global singleton with standard institutional parameters

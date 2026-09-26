@@ -318,6 +318,11 @@ class BacktestResult:
     ai_signals_evaluated: int = 0
     ai_signals_filtered: int = 0
     ai_shadow_log_sample: List[Dict[str, Any]] = field(default_factory=list)
+    # PHASE 5.1 §17: honest AI-layer status. The AI decision layer (LLM)
+    # cannot reproduce historical decisions deterministically and the legacy
+    # ML filter is a passthrough stub — so AI-assisted backtests are
+    # explicitly UNAVAILABLE, never silently labeled AI-assisted.
+    ai_backtest_status: str = "AI_BACKTEST_UNAVAILABLE"
     # V21-FINAL: data quality report for backtest transparency
     data_quality: Optional[DataQualityReport] = None
     # Detailed diagnostic counters for auditability
@@ -558,6 +563,9 @@ class BacktestEngine:
         result.real_options_used = require_real_options
         result.data_mode = "REAL_HISTORICAL_OPTIONS" if require_real_options else "SPOT_ONLY"
         result.ai_mode = self.ai_mode
+        # §17: AI decision layer cannot evaluate history reproducibly ->
+        # AI_BACKTEST_UNAVAILABLE (never fake AI-assisted performance).
+        result.ai_backtest_status = "AI_BACKTEST_UNAVAILABLE"
         result.instrument_type = InstrumentType.INDEX_OPTION.value if (is_option_premium and require_real_options) else InstrumentType.EQUITY.value
 
         if require_real_options and options_data_loader is None:
@@ -988,7 +996,7 @@ class BacktestEngine:
                         if len(result.ai_shadow_log_sample) < self.rejected_sample_size:
                             result.ai_shadow_log_sample.append({
                                 "symbol": sym, "timestamp": ts,
-                                "ai_ran": ai_decision.ran, "ai_probability": ai_decision.probability,
+                                "ai_ran": ai_decision.ran, "ai_score": ai_decision.score,
                                 "ai_should_allow": ai_decision.should_allow, "ai_reason": ai_decision.reason,
                             })
                         if self.ai_mode == "filter" and not ai_decision.should_allow:
@@ -1530,17 +1538,21 @@ class BacktestEngine:
             try:
                 req_start = datetime.fromisoformat(requested_start_date).date()
                 req_end = datetime.fromisoformat(requested_end_date).date()
-                # Approximate trading days as weekdays in the requested
-                # range (a simple, honest floor — it doesn't subtract
-                # exchange holidays, so real coverage % will read
-                # slightly LOW rather than ever appearing artificially
-                # high; never rounds in the favorable direction).
-                requested_trading_days = 0
-                d = req_start
-                while d <= req_end:
-                    if d.weekday() < 5:
-                        requested_trading_days += 1
-                    d += timedelta(days=1)
+                # Authoritative trading-day enumeration from the exchange
+                # calendar (weekends + official NSE/BSE holidays; falls back
+                # to the weekday floor only for years beyond the verified
+                # holiday tables — a coverage floor that reads LOW, never
+                # artificially high).
+                from backend.market.calendar import exchange_calendar, CalendarDataError
+                try:
+                    requested_trading_days = exchange_calendar.trading_days_count(req_start, req_end)
+                except CalendarDataError:
+                    requested_trading_days = 0
+                    d = req_start
+                    while d <= req_end:
+                        if d.weekday() < 5:
+                            requested_trading_days += 1
+                        d += timedelta(days=1)
                 result.trading_days_requested = requested_trading_days
 
                 if requested_trading_days > 0:
