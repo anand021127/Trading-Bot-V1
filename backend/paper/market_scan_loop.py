@@ -255,6 +255,26 @@ class PaperMarketScanner:
         # holidays (Muhurat special sessions are honored by the calendar).
         if not _is_trading_session(now):
             return ScanResult(False, False, "market_closed")
+        # PHASE 5.3 lifecycle parity: new ENTRIES are allowed only inside the
+        # documented session-manager entry window (09:20 entry start → 14:45
+        # last-entry cutoff, same rule the backtest engine now enforces).
+        # Previously this loop had NO cutoff (any in-session time could open a
+        # position — the exact defect that let a 15:25 expiry-day entry into
+        # the real backtest data). Positions/square-off/AI monitoring are
+        # unaffected: submit_entry and the worker keep running after the
+        # cutoff; only NEW entries are gated. Fail-closed on any error.
+        try:
+            from backend.strategy.session_manager import session_manager as _sm
+            _wall = now.astimezone(IST).time() if now.tzinfo else now.time()
+            if _wall < _sm.entry_start or _wall >= _sm.last_entry:
+                return ScanResult(
+                    False, False,
+                    f"entry_window_closed:{_wall.strftime('%H:%M')}-outside-"
+                    f"{_sm.entry_start.strftime('%H:%M')}-{_sm.last_entry.strftime('%H:%M')}",
+                )
+        except Exception as exc:
+            logger.warning("Entry-window check failed (%s) — fail-closed", type(exc).__name__)
+            return ScanResult(False, False, f"entry_window_error:{type(exc).__name__}")
         # PHASE 5.2 §5 + 5.3 §6: read the runtime's persisted reconciliation
         # verdict ONCE per scan (with age). "1"=ok, "0"=failed,
         # ""/missing=not yet checked, stale=ok-but-too-old.

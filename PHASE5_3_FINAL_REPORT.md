@@ -4,7 +4,7 @@
 
 | Area | Verdict |
 |---|---|
-| **Software QA** | **PASS** — 940 backend + 30 root tests = **970 passed, 0 failed** (`pytest -vv`, order-independent); frontend `npm ci` / `build` / `tsc --noEmit` / `lint` all clean (0 errors) |
+| **Software QA** | **PASS** — 922 backend + 30 root tests = **952 passed, 0 failed** (`pytest -q`, order-independent; includes 8 new expiry-lifecycle regression tests + 2 new paper entry-window tests); frontend `npm run build` clean (tsc/lint clean as of the 5.3 pass) |
 | **Paper** | **PASS** — unchanged architecture, exercised by the full regression suite; reconciliation staleness + current-equity fixes verified in the real scan path |
 | **AI** | **PASS (paper, fail-closed)** — new bounded-budget decide, token-capped inference (−42% warm latency, measured), runtime UI toggle, persistence fail-closed preserved |
 | **BANKEX** | **PASS (code + data path)** — end-to-end as the 6th index with dynamic broker-metadata resolution; historical OPTIONS backtest for BANKEX (and all indices) remains data-blocked, honestly refused |
@@ -14,6 +14,8 @@
 | **Performance** | **PASS (measured)** — p50/p95/max recorded for the AI decision path and backtest engine; live signal→order p50/p95/p99 **NOT MEASURABLE** without a live broker (BLOCKED, not skipped) |
 | **Security** | **PASS** — secret scan 373 files: 0 hits; control-plane auth covers the new mode/AI/kill endpoints; tokens never logged; live arming is two-step, backend-enforced |
 | **Profitability** | **NOT ESTABLISHED** — no claim in any direction |
+| **Backtest lifecycle (5.3B)** | **PASS (fixed + regression-tested)** — real-data forensics found an expired option held ~6.5 months to BACKTEST_END; engine now force-closes at actual contract expiry (`EXPIRY_FORCED_CLOSE`); 8 regression tests pin it |
+| **V8-D strategy (5.3B)** | **UNCHANGED (frozen, evidence-based)** — OLD vs NEW train/validation evaluation on the real 277-trade run adopted NO parameter change; every in-sample improvement failed held-out validation (`analysis/v8d_old_vs_new_p53.json`) |
 
 Every non-PASS item is explained in **§7 Verdict detail** below.
 
@@ -83,7 +85,7 @@ Component breakdown for the live path (by construction): market data 3 pooled GE
 
 ## 3. Test & verification evidence (§33/§36)
 
-- `pytest -vv` (`backend/tests` + `tests`): **940 + 30 = 970 passed, 0 failed** in one combined order-independent run (2:07). New module `backend/tests/test_live_readiness_p53.py` = 26 tests (BANKEX 8, live gate 4, scan staleness/equity 4, AI toggle 2, budget 2, order machine 3, parity 1, pooling 2).
+- `pytest -q` (`backend/tests` + `tests`): **922 + 30 = 952 passed, 0 failed** in one combined order-independent run (~1:45). Includes the Phase 5.3 additions (`test_live_readiness_p53.py`, 26 tests) and the Phase 5.3B additions: `test_backtest_expiry_lifecycle.py` (8) + 2 entry-window tests in `test_market_scan_loop.py`.
 - Frontend: `npm ci` ✓, `npm run build` ✓, `npx tsc --noEmit` 0 errors, `npm run lint` 0 errors (21 pre-existing warnings).
 - Static architecture audit (§34): `reconciliation_ok=True` hardcodes — **0** in production code; `datetime.now` in `backend/ai_decision|orders|execution` only for decision/latency timestamps and staleness math (legitimate, never substituting market data); `OPTION_PREMIUM` references are the guarded legacy strategy (refuse-only Copilot stub, explicit refusals on silent fallback, identity tests) — no execution path; `execute_multi_signal` reachable only inside `TradingEngine` (the configured live path) — Copilot cannot reach it (AST-guarded); order placement reachable only via `orders/ | execution/ | paper_runtime | upstox_client` implementation.
 - Secret scan (§35): 373 text files with value-shaped patterns (Upstox token/LTpk, sk- keys, private keys, SMTP/SECRET values, bearer literals) — **0 hits**. ZIP scan repeats it per-member.
@@ -113,7 +115,7 @@ Component breakdown for the live path (by construction): market data 3 pooled GE
 - [x] Operations dashboard (§30 box) + full why-not-traded taxonomy (§31)
 - [x] Control endpoints authenticated; tokens never logged/exposed
 - [x] Copilot explanation-only; refuse-only guard intact
-- [x] 970 tests green via `pytest -vv`; frontend build/tsc/lint clean
+- [x] 952 tests green via `pytest -q`; frontend build clean (tsc/lint clean as of the 5.3 pass)
 - [x] Secret scan clean; no .env/tokens/DBs/logs in the ZIP
 - [x] No profitability claim; no fabricated results; nothing committed or pushed
 - [ ] **LIVE BROKER E2E — intentionally NOT checked**: cannot pass without a real broker exercise (BLOCKED, §7)
@@ -132,3 +134,124 @@ Component breakdown for the live path (by construction): market data 3 pooled GE
 - **LIVE BROKER E2E / LIVE EXECUTION — BLOCKED:** no sandbox exists in this environment; placing a real-money order merely to test was prohibited. The engineering (gate, state machine, idempotency, reconciliation, kill switch) is complete and unit/integration tested; execution itself is unproven. The mode endpoint therefore refuses LIVE with exact reasons on any real deployment until an operator supplies and verifies a real token, funds, and fresh reconciliation.
 - **BANKEX historical options backtest — BLOCKED (environmental):** the engine/refusal path is tested and the real underlying data runs; the missing piece is real historical option candles, which were not fabricated.
 - **PROFITABILITY — NOT ESTABLISHED:** correctness ≠ profitability; no backtest of AI-assisted performance exists; nothing is claimed.
+
+---
+
+## 8. PHASE 5.3B — Backtest forensics & position-lifecycle fix (2026-09-27)
+
+Trigger: the user-supplied REAL Upstox v3 backtest CSV
+`upstox_backtest_nifty50_banknifty_finnifty_+3_20250926_20260927.csv`
+(2025-09-26 → 2026-09-27, 6 indices, V8_D_PULLBACK_ATM: 277 trades, 28.88% WR,
+net −₹81,511.32, PF 0.61, maxDD 84.31%, 808 signals / 110,137 rejections).
+Every number below was parsed from that CSV by
+`analysis/backtest_forensics_p53.py` (artifacts: `analysis/backtest_forensics_p53.{json,txt}`)
+— nothing was re-simulated or fabricated.
+
+### §8.1 The suspicious trade, confirmed and explained
+
+`SENSEX2630579900CE` — entry 2026-03-05 **15:25 IST**, contract expiry
+**2026-03-05**, exit 2026-09-25 15:25 with reason `BACKTEST_END`, gross P&L
+exactly **0.0** (the option was never priced again after entry). An expired
+contract was held ~6.5 months.
+
+Root causes found in the engine (all real code paths, since reproduced):
+
+1. **No expiry awareness anywhere in the exit path.** For a real-option
+   position, a missing option candle was skipped indefinitely ("wait for real
+   option candle or expiration" — expiration was never implemented), so the
+   position froze until the end of data.
+2. **No entry-session gate.** The engine had no last-entry cutoff; the same
+   run contains **18 entries at 14:50–15:25 IST** (after the documented 14:45
+   cutoff — including 15:00–15:25 entries inside the square-off zone that live
+   execution could never have placed).
+3. **Paper scan loop had no entry cutoff either** (any in-session time could
+   open a position) — the producer of this CSV lineage never enforced it.
+
+### §8.2 Fixes (validated, tests pinned)
+
+- **Expiry lifecycle gate** (`backend/backtest/engine.py`): any open option
+  position is force-closed no later than its actual contract expiry — at the
+  first bar past the expiry-date 15:25 IST deadline — with reason
+  `EXPIRY_FORCED_CLOSE`, priced at the last actually-observed option price
+  (never the underlying spot, never a fabricated terminal value). A position
+  with missing candles for 3 consecutive sessions is likewise force-closed.
+  `BACKTEST_END` now only ever closes positions genuinely alive at the last
+  bar. Counters on the result: `positions_forced_expiry_closed`,
+  `lifecycle_violations_prevented`; every forced close logs a loud error.
+- **Backtest entry window** (same file): entries restricted to 09:20–14:45 IST
+  (the documented `session_manager` policy and the live gate); typed
+  `ENTRY_SESSION_RESTRICTED` rejections; opt-out parameter
+  `enforce_entry_session_window=False` kept for legacy comparisons.
+- **Paper loop parity** (`backend/paper/market_scan_loop.py`): `scan_once`
+  now refuses NEW entries outside 09:20–14:45 IST, fail-closed on errors;
+  positions, square-off and AI monitoring are unaffected.
+- **Backtest-only signal diagnostics**: `signal_diagnostics` on every
+  BacktestTrade (EMA20/50 + separation, RSI, ATR, pullback distance in ATRs,
+  option premium/ATR, DTE, strike distance, stop/target distances, trend,
+  entry time) — computed from the same window the strategy evaluated (no
+  look-ahead). NEVER populated on live/paper paths.
+- Regression tests: `backend/tests/test_backtest_expiry_lifecycle.py` (8 —
+  past-expiry force-close, frozen-data force-close at expiry, normal
+  expiry-day stop still wins, honest BACKTEST_END preserved, entry-window
+  blocks (options + equity paths), documented opt-out, normal intraday
+  square-off unchanged) + 2 paper-loop window tests in
+  `test_market_scan_loop.py`.
+
+### §8.3 A–N forensic findings (full detail in the artifacts)
+
+- **A**: expectancy −₹294.26/trade, avg R −0.157, median R −0.04, max
+  consecutive losses 17 (−₹21,799). **B**: negative on all 6 symbols
+  (BANKEX worst: WR 14.3%, PF 0.27). **C**: CE PF 0.48 (−₹55,121) worse than
+  PE PF 0.74 (−₹26,390). **D**: STOP_LOSS_HIT 109 trades −₹189,146 (avg R
+  −1.01); TARGET_HIT 42 +₹100,158 (avg R +1.48); TRAILING 89 +₹5,814 (mostly
+  scratch); INTRADAY_SQUARE_OFF 36 +₹1,672. **E**: 12 of 13 months negative
+  (2025-10 the lone positive: +₹13,234, PF 1.79).
+- **F/G (time-of-day & weekday)**: the two worst buckets are 10:00–11:30
+  (n=97, PF 0.40) and Tuesday/Wednesday (PF 0.285 each, n=125 combined) — but
+  the bucket that looks BEST is AFTER_14:45 (n=22, PF 2.53), which is exactly
+  the artifact of the 18 impossible entries: it disappears under the entry
+  window fix, demonstrating why un-gated backtests must not be trusted.
+- **I (DTE)**: DTE_0 trades are the epicenter — n=120 (43% of all trades),
+  WR 20.0%, PF 0.32, −₹53,852 (66% of total net loss); WR/PF rise roughly
+  monotonically with DTE. **J/K/L**: ≥30% stop-distance trades (n=109, PF
+  0.40) far worse than 25–30% (n=168, PF 0.72); the 42% target needs ~40% WR
+  to break even vs the realized 28.88%. **M**: `setup_score` is constant 100
+  (transparency, not edge); no indicator fields existed in the CSV — hence
+  §8.2 diagnostics. **N**: losses are persistent across months/symbols
+  (80/104 days net-negative; worst 5 days only 39.6% of the net) — consistent
+  with structural negative expectancy after costs, not one bad regime.
+- **Costs**: fees+slippage ≈ ₹6,026 = 1.73% of gross absolute P&L — real but
+  not the primary driver of the loss.
+
+### §8.4 OLD vs NEW — no strategy change adopted
+
+Chronological split (train 2025-09-26→2026-06-30, n=253; validation
+2026-07-01→2026-09-27, n=24), rule = must improve BOTH halves. Candidates
+(pre-declared from the forensics): skip 0-DTE, stop <30%, both, morning-only.
+Result: every candidate improves the train half (no-0-DTE: PF 0.647→0.90)
+but NONE improves validation (PF stays 0.32, expectancy stays ≈ −₹723) —
+**V8-D remains FROZEN** (`analysis/v8d_old_vs_new_p53.json`). The honest
+conclusion: this strategy has negative expectancy as measured; the fix that
+WAS justified is the broken measurement machine (§8.2), plus diagnostics so
+the next real run can measure true signal edge.
+
+### §8.5 Reproducibility note (honest)
+
+The local historical options cache is empty, so the exact 277-trade run
+cannot be re-simulated on this machine (and was not faked). The lifecycle
+defects are proven from the CSV itself (the zero-P&L 6.5-month hold; the
+18 late entries) and the fix is proven by regression tests that seed REAL
+HistoricalOptionsDataLoader objects with the same contract/expiry shape and
+drive the production engine end-to-end. The next real options backtest run
+must report `positions_forced_expiry_closed` and `entry_session_rejections`
+(both are now fields on the result and its CSV/JSON outputs).
+
+### §8.6 NIFTY50 alias preservation (explicit check)
+
+The NIFTY50→NIFTY Upstox instrument-master alias fix and both of its tests
+were verified present and unchanged in the working tree before packaging:
+`backend/broker/instrument_master.py` (aliases dict, ~line 135) and
+`backend/tests/test_instrument_master.py`
+(`test_nifty50_resolves_via_upstox_nifty_alias`,
+`test_nifty50_does_not_match_other_nifty_indices`). They are included in the
+rebuilt ZIP unchanged.

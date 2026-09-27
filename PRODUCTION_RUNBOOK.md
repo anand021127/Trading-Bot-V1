@@ -180,3 +180,23 @@ Heartbeat thresholds: age < 20 s = healthy; 20–60 s = degraded/watch;
 * All trading decisions are reconstructible from `PAPER_AUDIT` /
   `PAPER_EXIT` log lines + `order_intents` + `trades`. Include these in every
   incident report.
+
+### 0.1 Entry window (PHASE 5.3B — lifecycle parity, all paths)
+
+New positions are accepted ONLY inside the entry window **09:20–14:45 IST**
+(the `session_manager` policy). This is now enforced identically in all three
+engines:
+
+| Path | Gate | Outside-window behavior |
+|---|---|---|
+| Live (`trading_engine`) | calendar entry window (pre-existing) | no new entries; positions managed |
+| Paper (`paper/market_scan_loop.py`) | `entry_window_closed:<HH:MM>` (NEW, fail-closed) | scan refused before evaluation; `submit_entry` still runs for square-off/monitoring |
+| Backtest (`backtest/engine.py`) | `ENTRY_SESSION_RESTRICTED` (NEW; opt-out `enforce_entry_session_window=False`) | signal rejected and counted on the result |
+
+Backtest result now also reports `entry_session_rejections`,
+`positions_forced_expiry_closed`, `lifecycle_violations_prevented`. Any open
+option position is force-closed no later than its ACTUAL contract expiry
+(`EXPIRY_FORCED_CLOSE`, exit priced at the last observed option premium);
+`BACKTEST_END` never overrides expiry. If a future backtest CSV shows these
+counters non-zero, treat the underlying data/coverage problem as a blocker —
+do not trade on it.

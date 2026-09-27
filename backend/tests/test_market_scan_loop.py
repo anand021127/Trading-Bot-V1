@@ -305,3 +305,56 @@ def test_real_v8d_evaluates_without_crash_on_fresh_bars():
     # traded may be True or False depending on filter fit — must not error
     assert res.reason
     assert "strategy_error" not in res.reason
+
+
+def test_scan_blocks_new_entries_after_last_entry_cutoff():
+    """PHASE 5.3 lifecycle parity: no NEW V8-D entries after the 14:45 IST
+    last-entry cutoff (same rule the backtest engine now enforces). This is
+    the paper-loop half of the defect that let a 15:25 expiry-day entry into
+    the real backtest data. Fail-closed, scanned=False, never traded."""
+    now = datetime(2026, 9, 18, 14, 50, tzinfo=IST)  # Friday, in-session, past cutoff
+    candles = _bars_for_ce_signal(80)
+    for i, c in enumerate(candles):
+        c["timestamp"] = (now - timedelta(minutes=5 * (len(candles) - i))).isoformat()
+    data = FakeMarketData(candles, _atm_chain(float(candles[-1]["close"])), float(candles[-1]["close"]))
+    path = os.path.join(tempfile.mkdtemp(), "scan4.db")
+    env = {
+        "TRADING_MODE": "paper",
+        "TRADING_STRATEGY": "V8_D_PULLBACK_ATM",
+        "UPSTOX_ORDER_PRODUCT": "I",
+        "DATABASE_PATH": path,
+        "RISK_PER_TRADE_PCT": "0.025",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+        rt = PaperTradingRuntime()
+        rt.now_fn = lambda: datetime(2026, 9, 18, 14, 50, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        scanner = PaperMarketScanner(data=data, strategy=V8DStrategy(), min_bars=60)
+        res = scanner.scan_once(rt, now=now)
+    assert res.traded is False
+    assert res.scanned is False
+    assert res.reason.startswith("entry_window_closed:")
+
+
+def test_scan_blocks_new_entries_before_entry_start():
+    """No NEW entries before the 09:20 IST entry start (gate is symmetric)."""
+    now = datetime(2026, 9, 18, 9, 17, tzinfo=IST)  # Friday, in-session, before 09:20
+    candles = _bars_for_ce_signal(80)
+    for i, c in enumerate(candles):
+        c["timestamp"] = (now - timedelta(minutes=5 * (len(candles) - i))).isoformat()
+    data = FakeMarketData(candles, _atm_chain(float(candles[-1]["close"])), float(candles[-1]["close"]))
+    path = os.path.join(tempfile.mkdtemp(), "scan5.db")
+    env = {
+        "TRADING_MODE": "paper",
+        "TRADING_STRATEGY": "V8_D_PULLBACK_ATM",
+        "UPSTOX_ORDER_PRODUCT": "I",
+        "DATABASE_PATH": path,
+        "RISK_PER_TRADE_PCT": "0.025",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+        rt = PaperTradingRuntime()
+        rt.now_fn = lambda: datetime(2026, 9, 18, 9, 17, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        scanner = PaperMarketScanner(data=data, strategy=V8DStrategy(), min_bars=60)
+        res = scanner.scan_once(rt, now=now)
+    assert res.traded is False
+    assert res.scanned is False
+    assert res.reason.startswith("entry_window_closed:")

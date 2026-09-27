@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import bisect
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import Enum
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -225,6 +225,9 @@ class BacktestTrade:
     trailing_stop: float = 0.0
     setup_score: float = 0.0
     r_multiple: Optional[float] = None
+    # BACKTEST-ONLY diagnostics (never populated on live/paper paths):
+    # indicator state at entry, for post-hoc signal-edge analysis.
+    signal_diagnostics: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         risk_per_share = (self.entry_price - self.stop_loss) if (self.stop_loss and self.entry_price and self.entry_price > self.stop_loss) else 0.0
@@ -283,6 +286,7 @@ class BacktestTrade:
             "confidence": self.confidence,
             "setup_score": self.setup_score or self.confidence,
             "r_multiple": round(r_mult, 2) if isinstance(r_mult, (int, float)) else "",
+            "signal_diagnostics": self.signal_diagnostics,
         }
 
 
@@ -347,6 +351,12 @@ class BacktestResult:
     orders_created: int = 0
     trades_opened: int = 0
     trades_closed: int = 0
+    # ── Expiry / position-lifecycle enforcement (2026-09 forensics) ──
+    # A long option position must never survive past its actual contract
+    # expiry, and BACKTEST_END must never override an earlier expiry.
+    positions_forced_expiry_closed: int = 0
+    lifecycle_violations_prevented: int = 0
+    entry_session_rejections: int = 0
     setups_breakdown: Dict[str, int] = field(default_factory=dict)
     symbol_summary: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     portfolio_summary: Dict[str, Any] = field(default_factory=dict)
@@ -431,6 +441,9 @@ class BacktestResult:
             "orders_created": self.orders_created,
             "trades_opened": self.trades_opened,
             "trades_closed": self.trades_closed,
+            "positions_forced_expiry_closed": self.positions_forced_expiry_closed,
+            "lifecycle_violations_prevented": self.lifecycle_violations_prevented,
+            "entry_session_rejections": self.entry_session_rejections,
             "data_coverage_pct": self.data_coverage_pct,
             "option_candle_coverage_pct": self.option_candle_coverage_pct,
             "contract_resolution_success_pct": self.contract_resolution_success_pct,
@@ -458,6 +471,8 @@ class BacktestEngine:
         max_window_bars: int = 400,
         max_simultaneous_positions: int = 6,
         allow_same_bar_reentry: bool = False,
+        enforce_entry_session_window: bool = True,
+        max_missing_option_sessions: int = 3,
         ai_mode: str = "disabled",  # "disabled" | "shadow" | "filter" — see PHASE 10
     ) -> None:
         # ai_mode="disabled": identical behavior to before the AI layer existed.
@@ -480,6 +495,15 @@ class BacktestEngine:
         self.max_window_bars = max_window_bars
         self.max_simultaneous_positions = max_simultaneous_positions
         self.allow_same_bar_reentry = allow_same_bar_reentry
+        # Backtest parity with the session_manager entry windows (09:20 start,
+        # 14:45 last entry, 15:15 square-off). The 2026-09 real-data CSV
+        # contained an entry at 15:25 on contract-expiry day that live
+        # execution could never have placed.
+        self.enforce_entry_session_window = enforce_entry_session_window
+        # Consecutive SESSIONS with no option candle beyond which a real-option
+        # position is force-closed at last known price instead of being frozen
+        # until backtest end (never carried past expiry either way).
+        self.max_missing_option_sessions = max_missing_option_sessions
 
     def run(
         self,
@@ -712,6 +736,112 @@ class BacktestEngine:
                 if position is None:
                     continue
 
+                # ── Expiry lifecycle gate: an open option position must be
+                # closed no later than its ACTUAL contract expiry. Backtest
+                # end, missing data, or anything else must never extend a
+                # position beyond expiry. Every real contract from the
+                # historical resolver expires 15:25 IST (index options);
+                # for non-option positions the guard degenerates to date-only
+                # equality, which is correct (intraday square-off owns the rest).
+                # Also covers positions discovered with expiries already in the
+                # past (defensive — must not happen, but must not survive).
+                pos_expiry_str = str(position.get("expiry") or "")
+                expiry_guard_triggered = False
+                if pos_expiry_str:
+                    try:
+                        pos_expiry_date = datetime.fromisoformat(pos_expiry_str).date() if "T" in pos_expiry_str else date.fromisoformat(pos_expiry_str[:10])
+                        bar_ts_dt = datetime.fromisoformat(ts)
+                        if bar_ts_dt.date() > pos_expiry_date or (bar_ts_dt.date() == pos_expiry_date and bar_ts_dt.time() >= time(15, 25, 0)):
+                            expiry_guard_triggered = True
+                    except Exception:
+                        pos_expiry_date = None
+                        expiry_guard_triggered = False
+                    if expiry_guard_triggered:
+                        result.lifecycle_violations_prevented += 1
+                        result.positions_forced_expiry_closed += 1
+                        exit_price = float(
+                            position.get("_last_known_opt_price")
+                            or position.get("entry_price", 0.0)
+                            or 0.0
+                        )
+                        if position.get("is_real_option") and options_data_loader:
+                            c_key_e = position.get("contract_key", "")
+                            candle_rec_e = options_data_loader.get_candle_at(c_key_e, ts)
+                            if candle_rec_e:
+                                exit_price = float(candle_rec_e.close)
+                        # NOTE: when the option candle is gone (post-expiry), the
+                        # last honest known price is the last option price we
+                        # actually observed (tracked on every observed candle).
+                        # NEVER substitute the underlying spot close (wrong scale)
+                        # and NEVER fabricate a terminal value.
+                        qty_e = position["quantity"]
+                        inst_type_e = InstrumentType.INDEX_OPTION if (
+                            bool(position.get("is_real_option", False))
+                            or (position["strategy"] in ("OPTION_PREMIUM", "V8_D_PULLBACK_ATM") and require_real_options)
+                        ) else InstrumentType.EQUITY
+                        costs_e = self.costs.apply(position["entry_price"], exit_price, qty_e, instrument_type=inst_type_e)
+                        exit_ts_e = pos_expiry_date.isoformat() + "T15:25:00+05:30" if pos_expiry_date else ts
+                        trade_e = BacktestTrade(
+                            symbol=(position.get("contract_key") or position.get("contract_symbol") or position.get("option_symbol", sym)) if position.get("is_real_option") else sym,
+                            strategy=position["strategy"],
+                            entry_time=position["entry_time"],
+                            exit_time=exit_ts_e,
+                            entry_price=position["entry_price"],
+                            exit_price=round(exit_price, 2),
+                            quantity=qty_e,
+                            exit_reason="EXPIRY_FORCED_CLOSE",
+                            gross_pnl=costs_e["gross_pnl"],
+                            net_pnl=costs_e["net_pnl"],
+                            charges=costs_e["charges"],
+                            confidence=position["confidence"],
+                            brokerage=costs_e["brokerage"],
+                            stt=costs_e["stt"],
+                            exchange_charges=costs_e["exchange_charges"],
+                            gst=costs_e["gst"],
+                            sebi_charges=costs_e["sebi_charges"],
+                            stamp_duty=costs_e["stamp_duty"],
+                            slippage=costs_e["slippage"],
+                            total_cost=costs_e["total_cost"],
+                            underlying=position.get("underlying", sym),
+                            instrument_key=position.get("contract_key", position.get("contract_symbol", sym)),
+                            option_symbol=position.get("option_symbol", position.get("contract_symbol", "")),
+                            strike=position.get("strike"),
+                            option_type=position.get("option_type", ""),
+                            expiry=position.get("expiry", ""),
+                            lot_size=int(position.get("lot_size") or 0),
+                            number_of_lots=int(position.get("number_of_lots") or 0),
+                            instrument_type=inst_type_e.value,
+                            stop_loss=position.get("stop_loss", 0.0),
+                            target=position.get("target", 0.0),
+                            trailing_stop=position.get("trailing_stop", 0.0),
+                            setup_score=position.get("confidence", 0.0),
+                            signal_diagnostics=position.get("signal_diagnostics"),
+                        )
+                        all_trades.append(trade_e)
+                        result.trades_closed += 1
+                        symbol_stats[sym]["trades"] += 1
+                        symbol_stats[sym]["trades_list"].append(trade_e)
+                        symbol_stats[sym]["net_pnl"] = round(symbol_stats[sym]["net_pnl"] + costs_e["net_pnl"], 2)
+                        symbol_stats[sym]["charges"] = round(symbol_stats[sym]["charges"] + costs_e["charges"], 2)
+                        if costs_e["net_pnl"] > 0:
+                            symbol_stats[sym]["wins"] += 1
+                        else:
+                            symbol_stats[sym]["losses"] += 1
+                        equity = round(equity + costs_e["net_pnl"], 2)
+                        peak_equity = max(peak_equity, equity)
+                        dd_e = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
+                        result.max_drawdown_pct = max(result.max_drawdown_pct, dd_e)
+                        equity_curve.append({"timestamp": exit_ts_e, "equity": round(equity, 2)})
+                        logger.error(
+                            "LIFECYCLE FORCED CLOSE: option position for %s survived past expiry %s "
+                            "(seen at %s) — force-closed at expiry session close. This indicates the "
+                            "regular exit path failed to act before expiry.",
+                            sym, pos_expiry_str, ts,
+                        )
+                        symbol_positions[sym] = None
+                        symbol_last_exit_ts[sym] = ts
+                        continue
+
                 bar = symbol_candle_map[sym][ts]
                 window = symbol_bars_seen[sym][max(0, len(symbol_bars_seen[sym]) - self.max_window_bars):]
                 sym_ctx = option_contexts.get(sym, {})
@@ -731,8 +861,101 @@ class BacktestEngine:
                     c_key = position.get("contract_key", "")
                     candle_rec = options_data_loader.get_candle_at(c_key, ts)
                     if candle_rec is None:
-                        # Cannot evaluate option exit on spot candle. Wait for real option candle or expiration.
+                        # Cannot evaluate option exit on the option candle.
+                        # A position must never wait INDEFINITELY: after MAX
+                        # consecutive missing SESSIONS the position is
+                        # force-closed at its last known price rather than
+                        # frozen until backtest end (real defect: a frozen
+                        # SENSEX position survived ~6.5 months past expiry in
+                        # the 2026-09 real-data backtest).
+                        pos_expiry_str_c = str(position.get("expiry") or "")
+                        pos_exp_date_c: Optional[date] = None
+                        if pos_expiry_str_c:
+                            try:
+                                pos_exp_date_c = date.fromisoformat(pos_expiry_str_c[:10])
+                            except Exception:
+                                pos_exp_date_c = None
+                        if pos_exp_date_c is None or bar_date > pos_exp_date_c.isoformat():
+                            if position.get("_missing_candle_last_date") != bar_date:
+                                position["_missing_candle_last_date"] = bar_date
+                                position["_missing_candle_sessions"] = int(position.get("_missing_candle_sessions", 0) or 0) + 1
+                            if position["_missing_candle_sessions"] >= self.max_missing_option_sessions:
+                                result.positions_forced_expiry_closed += 1
+                                exit_price_c = float(
+                                    position.get("_last_known_opt_price")
+                                    or position.get("entry_price", 0.0)
+                                    or 0.0
+                                )
+                                last_exit_ts_c = ts
+                                if pos_exp_date_c is not None:
+                                    last_exit_ts_c = pos_exp_date_c.isoformat() + "T15:25:00+05:30"
+                                qty_c = position["quantity"]
+                                inst_type_c = InstrumentType.INDEX_OPTION if (
+                                    bool(position.get("is_real_option", False))
+                                    or (position["strategy"] in ("OPTION_PREMIUM", "V8_D_PULLBACK_ATM") and require_real_options)
+                                ) else InstrumentType.EQUITY
+                                costs_c = self.costs.apply(position["entry_price"], exit_price_c, qty_c, instrument_type=inst_type_c)
+                                trade_c = BacktestTrade(
+                                    symbol=(position.get("contract_key") or position.get("contract_symbol") or position.get("option_symbol", sym)) if position.get("is_real_option") else sym,
+                                    strategy=position["strategy"],
+                                    entry_time=position["entry_time"],
+                                    exit_time=last_exit_ts_c,
+                                    entry_price=position["entry_price"],
+                                    exit_price=round(exit_price_c, 2),
+                                    quantity=qty_c,
+                                    exit_reason="EXPIRY_FORCED_CLOSE",
+                                    gross_pnl=costs_c["gross_pnl"],
+                                    net_pnl=costs_c["net_pnl"],
+                                    charges=costs_c["charges"],
+                                    confidence=position["confidence"],
+                                    brokerage=costs_c["brokerage"],
+                                    stt=costs_c["stt"],
+                                    exchange_charges=costs_c["exchange_charges"],
+                                    gst=costs_c["gst"],
+                                    sebi_charges=costs_c["sebi_charges"],
+                                    stamp_duty=costs_c["stamp_duty"],
+                                    slippage=costs_c["slippage"],
+                                    total_cost=costs_c["total_cost"],
+                                    underlying=position.get("underlying", sym),
+                                    instrument_key=position.get("contract_key", position.get("contract_symbol", sym)),
+                                    option_symbol=position.get("option_symbol", position.get("contract_symbol", "")),
+                                    strike=position.get("strike"),
+                                    option_type=position.get("option_type", ""),
+                                    expiry=position.get("expiry", ""),
+                                    lot_size=int(position.get("lot_size") or 0),
+                                    number_of_lots=int(position.get("number_of_lots") or 0),
+                                    instrument_type=inst_type_c.value,
+                                    stop_loss=position.get("stop_loss", 0.0),
+                                    target=position.get("target", 0.0),
+                                    trailing_stop=position.get("trailing_stop", 0.0),
+                                    setup_score=position.get("confidence", 0.0),
+                                    signal_diagnostics=position.get("signal_diagnostics"),
+                                )
+                                all_trades.append(trade_c)
+                                result.trades_closed += 1
+                                symbol_stats[sym]["trades"] += 1
+                                symbol_stats[sym]["trades_list"].append(trade_c)
+                                symbol_stats[sym]["net_pnl"] = round(symbol_stats[sym]["net_pnl"] + costs_c["net_pnl"], 2)
+                                symbol_stats[sym]["charges"] = round(symbol_stats[sym]["charges"] + costs_c["charges"], 2)
+                                if costs_c["net_pnl"] > 0:
+                                    symbol_stats[sym]["wins"] += 1
+                                else:
+                                    symbol_stats[sym]["losses"] += 1
+                                equity = round(equity + costs_c["net_pnl"], 2)
+                                peak_equity = max(peak_equity, equity)
+                                dd_c = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
+                                result.max_drawdown_pct = max(result.max_drawdown_pct, dd_c)
+                                equity_curve.append({"timestamp": last_exit_ts_c, "equity": round(equity, 2)})
+                                logger.error(
+                                    "LIFECYCLE FORCED CLOSE: no option candle for %s for %s consecutive "
+                                    "sessions (expiry=%s) — force-closed at entry price, never carried "
+                                    "past expiry.",
+                                    sym, position["_missing_candle_sessions"], pos_expiry_str_c or "unknown",
+                                )
+                                symbol_positions[sym] = None
+                                symbol_last_exit_ts[sym] = ts
                         continue
+
                     opt_bar = {
                         "timestamp": candle_rec.timestamp,
                         "open": candle_rec.open,
@@ -741,6 +964,9 @@ class BacktestEngine:
                         "close": candle_rec.close,
                         "volume": candle_rec.volume,
                     }
+                    position["_missing_candle_sessions"] = 0
+                    position["_missing_candle_last_date"] = ""
+                    position["_last_known_opt_price"] = float(candle_rec.close)
                 else:
                     opt_bar = bar
 
@@ -832,6 +1058,7 @@ class BacktestEngine:
                         target=position.get("target", 0.0),
                         trailing_stop=position.get("trailing_stop", 0.0),
                         setup_score=position.get("confidence", 0.0),
+                        signal_diagnostics=position.get("signal_diagnostics"),
                     )
                     all_trades.append(trade)
                     result.trades_closed += 1
@@ -961,6 +1188,37 @@ class BacktestEngine:
                                 symbol=sym, timestamp=ts, strategy=best.strategy_name, reasons=[rej_reason],
                             ))
                         continue
+
+                    # Entry session-window parity with the LIVE V8-D path
+                    # (trading_engine / paper scan loop both gate new entries
+                    # on the calendar OPEN window, which ends at the 14:45
+                    # last-entry cutoff): entries before 09:20 or at/after
+                    # 14:45 are impossible live, so they must not open a
+                    # backtest position. The attached 2026-09 real-data CSV
+                    # contained 18 such entries (14:50–15:25), including the
+                    # 15:25 expiry-day SENSEX entry that then froze until
+                    # backtest end. The midday-lull rule is deliberately NOT
+                    # applied here — the live V8-D path does not enforce it.
+                    if self.enforce_entry_session_window:
+                        _t_entry = session_manager.parse_time(ts)
+                        if _t_entry is not None and (
+                            _t_entry < session_manager.entry_start
+                            or _t_entry >= session_manager.last_entry
+                        ):
+                            result.entry_session_rejections += 1
+                            rej_reason = (
+                                f"ENTRY_SESSION_RESTRICTED — {_t_entry.strftime('%H:%M')} IST is "
+                                f"outside the live entry window "
+                                f"({session_manager.entry_start.strftime('%H:%M')}-"
+                                f"{session_manager.last_entry.strftime('%H:%M')} IST)"
+                            )
+                            rejected_total += 1
+                            reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                            if len(rejected_sample) < self.rejected_sample_size:
+                                rejected_sample.append(RejectedSignal(
+                                    symbol=sym, timestamp=ts, strategy=best.strategy_name, reasons=[rej_reason],
+                                ))
+                            continue
 
                     candidate_signals.append((sym, best, bar, bar_context))
 
@@ -1165,6 +1423,59 @@ class BacktestEngine:
                         setup_name_tag = best.indicators.get("setup_name", "MOMENTUM_CONTINUATION")
                         result.setups_breakdown[setup_name_tag] = result.setups_breakdown.get(setup_name_tag, 0) + 1
 
+                        # ── BACKTEST-ONLY signal diagnostics (never live) ──
+                        # Capture the underlying indicator state at entry so
+                        # post-hoc signal-edge analysis can be run without
+                        # changing strategy behavior. Values are computed from
+                        # the same window the strategy just evaluated (no
+                        # look-ahead). Live/paper execution never sets this.
+                        try:
+                            closes_d = [float(c["close"]) for c in window]
+                            highs_d = [float(c["high"]) for c in window]
+                            lows_d = [float(c["low"]) for c in window]
+                            from backend.indicators.ema import calculate_ema as _calc_ema
+                            from backend.indicators.rsi import calculate_rsi as _calc_rsi
+                            from backend.indicators.atr import calculate_atr as _calc_atr
+                            _ema20 = _calc_ema(closes_d, 20)
+                            _ema50 = _calc_ema(closes_d, 50)
+                            _rsi_v = _calc_rsi(closes_d, 14)
+                            _atr_v = _calc_atr(highs_d, lows_d, closes_d, 14)
+                            _spot_d = float(bar["close"])
+                            signal_diag = {
+                                "ema20": round(float(_ema20[-1]), 4) if _ema20 else None,
+                                "ema50": round(float(_ema50[-1]), 4) if _ema50 else None,
+                                "ema_separation_pct": (
+                                    round((float(_ema20[-1]) - float(_ema50[-1])) / float(_ema50[-1]) * 100.0, 4)
+                                    if _ema20 and _ema50 and float(_ema50[-1]) != 0 else None
+                                ),
+                                "rsi": round(float(_rsi_v[-1]), 2) if _rsi_v else None,
+                                "atr": round(float(_atr_v[-1]), 4) if _atr_v else None,
+                                "underlying_trend": trend,
+                                "spot_price": _spot_d,
+                                "pullback_dist_atr": (
+                                    round((_spot_d - float(_ema20[-1])) / float(_atr_v[-1]), 3)
+                                    if _atr_v and float(_atr_v[-1]) > 0 else None
+                                ),
+                                "opt_type": opt_type,
+                                "opt_premium": round(opt_entry_price, 2),
+                                "opt_atr": (
+                                    round(float(opt_candle.high - opt_candle.low), 4)
+                                    if opt_candle is not None else None
+                                ),
+                                "expiry": exp_str,
+                                "dte_days": (datetime.fromisoformat(exp_str).date() - bar_dt).days if exp_str and "-" in exp_str else None,
+                                "strike_distance_pct": (
+                                    round((float(strike_val) - _spot_d) / _spot_d * 100.0, 4)
+                                    if strike_val and _spot_d > 0 else None
+                                ),
+                                "entry_time": ts,
+                                "stop_distance_pct": round((opt_entry_price - opt_stop_loss) / opt_entry_price * 100.0, 3) if opt_entry_price > 0 else None,
+                                "target_distance_pct": round((opt_target - opt_entry_price) / opt_entry_price * 100.0, 3) if opt_entry_price > 0 else None,
+                                "setup_score": float(best.confidence),
+                            }
+                        except Exception:
+                            signal_diag = None
+
                         opt_trading_sym = c_key
                         try:
                             exp_date_obj = datetime.fromisoformat(exp_str).date() if exp_str and "-" in exp_str else bar_dt
@@ -1213,6 +1524,7 @@ class BacktestEngine:
                             "number_of_lots": num_lots,
                             "confidence": best.confidence,
                             "setup_name": setup_name_tag,
+                            "signal_diagnostics": signal_diag,
                         }
                         symbol_last_entry_ts[sym] = ts
                         max_simultaneous_seen = max(max_simultaneous_seen, current_open_count + 1)
@@ -1271,6 +1583,11 @@ class BacktestEngine:
                         max_simultaneous_seen = max(max_simultaneous_seen, current_open_count + 1)
 
         # ── 5. End of Simulation Closeout (close any remaining open positions) ──
+        # Invariant: with the expiry lifecycle gate active (Phase 1), no real
+        # option position can reach this point alive past its expiry — the
+        # guard force-closes it at/before expiry. Positions still open here
+        # are genuinely alive at the last bar (expiry in the future or no
+        # expiry, e.g. spot-mode mock tests); BACKTEST_END is honest for them.
         for sym in valid_symbols:
             pos = symbol_positions[sym]
             if pos is not None and symbol_sorted_candles[sym]:
@@ -1371,6 +1688,7 @@ class BacktestEngine:
                     target=pos.get("target", 0.0),
                     trailing_stop=pos.get("trailing_stop", 0.0),
                     setup_score=pos.get("confidence", 0.0),
+                    signal_diagnostics=pos.get("signal_diagnostics"),
                 )
                 all_trades.append(trade)
                 result.trades_closed += 1

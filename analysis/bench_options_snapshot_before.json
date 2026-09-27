@@ -1,0 +1,23 @@
+{
+  "benchmark": "PHASE 5.2 \u00a716 options snapshot hot path (fixture loader, labeled BENCH_FIXTURE)",
+  "bars": 75,
+  "fixture_bars_per_contract": 4000,
+  "total_seconds": 0.013,
+  "per_bar_ms": 0.17,
+  "first_snapshot": {
+    "strike": 24000.0,
+    "option_type": "CE",
+    "instrument_key": "BENCH_FIXTURE_NIFTY_CE",
+    "expiry": "2024-01-11",
+    "ltp": 100.15,
+    "close_price": 100.15,
+    "open": 99.95,
+    "high": 100.65,
+    "low": 99.65,
+    "volume": 1000.0,
+    "lot_size": 75,
+    "timestamp": "2024-01-01 09:15:00",
+    "option_atr": 0.0,
+    "atr": 0.0
+  }
+}

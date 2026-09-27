@@ -1,0 +1,41 @@
+{
+  "benchmark": "PHASE 5.2 \u00a716 staged backtest benchmark",
+  "date": "2026-09-26",
+  "symbol": "NIFTY50",
+  "data": "real_data/NIFTY50_2024_5min.json",
+  "strategy": "V8_D_PULLBACK_ATM",
+  "stages": {
+    "data_loading_seconds": 0.056,
+    "trend_series_seconds": 0.126,
+    "options_cache_load_seconds": 0.001,
+    "options_cache_contracts": 0,
+    "options_cache_candles": 0
+  },
+  "results": {
+    "5d": {
+      "bars": 225,
+      "seconds": 0.16,
+      "bars_per_second": 1406.2,
+      "trades": 0,
+      "signals": 0,
+      "net_pnl": 0,
+      "candles_evaluated": 165,
+      "warmup_bars": 60,
+      "ai_backtest_status": "AI_BACKTEST_UNAVAILABLE",
+      "rejections_total": 165
+    },
+    "25d": {
+      "bars": 1200,
+      "seconds": 1.03,
+      "bars_per_second": 1165.0,
+      "trades": 0,
+      "signals": 0,
+      "net_pnl": 0,
+      "candles_evaluated": 1140,
+      "warmup_bars": 60,
+      "ai_backtest_status": "AI_BACKTEST_UNAVAILABLE",
+      "rejections_total": 1140
+    }
+  },
+  "note": "Real historical data only. Same underlying/timeframe/contract/strategy across runs. ai_backtest_status honestly AI_BACKTEST_UNAVAILABLE."
+}

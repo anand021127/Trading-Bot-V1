@@ -1,0 +1,126 @@
+{
+ "label": "TEST",
+ "mode": "paper",
+ "scenarios": {
+  "ai_approve": {
+   "ai_decision": "APPROVE",
+   "ai_reason_codes": [
+    "AI_APPROVED",
+    "OK"
+   ],
+   "ai_decision_id": "aid_f17ea6a220ba428597b11ece7b84ad71",
+   "gate": "PASS",
+   "label": "TEST",
+   "submitted": true,
+   "pipeline_reason": "submitted",
+   "signal_id": "56bf8dae3cb2894623f8182e93c69461",
+   "trade_recorded": true
+  },
+  "ai_reject": {
+   "ai_decision": "REJECT",
+   "ai_reason_codes": [
+    "BAD_SETUP"
+   ],
+   "ai_decision_id": "aid_7fa5639b5a43424a9ada1f45ab8c08eb",
+   "gate": "AI_NO_TRADE:BAD_SETUP",
+   "label": "TEST",
+   "submitted": false
+  },
+  "ai_wait": {
+   "ai_decision": "WAIT",
+   "ai_reason_codes": [
+    "AMBIGUOUS"
+   ],
+   "ai_decision_id": "aid_a28366e97e7148a3b963de958efc03fb",
+   "gate": "AI_NO_TRADE:AMBIGUOUS",
+   "label": "TEST",
+   "submitted": false
+  },
+  "ai_timeout": {
+   "ai_decision": "REJECT",
+   "ai_reason_codes": [
+    "AI_TIMEOUT"
+   ],
+   "ai_decision_id": "aid_c4646f7e13fb4abcb4889cabd3358fa3",
+   "gate": "AI_NO_TRADE:AI_TIMEOUT",
+   "label": "TEST",
+   "submitted": false
+  },
+  "ai_provider_unavailable": {
+   "ai_decision": "REJECT",
+   "ai_reason_codes": [
+    "AI_PROVIDER_UNAVAILABLE"
+   ],
+   "ai_decision_id": "aid_cf3264825cc04ab8867feb0280515142",
+   "gate": "AI_NO_TRADE:AI_PROVIDER_UNAVAILABLE",
+   "label": "TEST",
+   "submitted": false
+  },
+  "ai_malformed": {
+   "ai_decision": "REJECT",
+   "ai_reason_codes": [
+    "AI_INVALID_RESPONSE"
+   ],
+   "ai_decision_id": "aid_8c3df588d58d40a882fbc1391c12aaa4",
+   "gate": "AI_NO_TRADE:AI_INVALID_RESPONSE",
+   "label": "TEST",
+   "submitted": false
+  },
+  "risk_rejection": {
+   "ai_decision": "APPROVE",
+   "ai_reason_codes": [
+    "AI_APPROVED",
+    "OK"
+   ],
+   "ai_decision_id": "aid_ed211e3a8d144203a63d367cf9c12e79",
+   "gate": "PASS",
+   "label": "TEST",
+   "submitted": false,
+   "pipeline_reason": "MAX_POSITIONS",
+   "signal_id": ""
+  },
+  "duplicate_setup_first": {
+   "ai_decision": "APPROVE",
+   "ai_reason_codes": [
+    "AI_APPROVED",
+    "OK"
+   ],
+   "ai_decision_id": "aid_6ec8f50378a2456cacbf1d1165925275",
+   "gate": "PASS",
+   "label": "TEST",
+   "submitted": false,
+   "pipeline_reason": "MAX_POSITIONS",
+   "signal_id": ""
+  },
+  "duplicate_setup": {
+   "label": "TEST",
+   "provider_calls_total": 1,
+   "one_inference_proven": true,
+   "same_decision_id": true,
+   "ai_decision": "APPROVE"
+  },
+  "restart_after_approval": {
+   "ai_decision": "APPROVE",
+   "ai_reason_codes": [
+    "AI_APPROVED",
+    "OK"
+   ],
+   "ai_decision_id": "aid_6ec8f50378a2456cacbf1d1165925275",
+   "gate": "PASS",
+   "label": "TEST",
+   "submitted": false,
+   "pipeline_reason": "MAX_POSITIONS",
+   "signal_id": "",
+   "replayed_without_inference": true
+  }
+ },
+ "ledger": {
+  "trades_total": 1,
+  "all_test_labeled": true,
+  "trade_ids": [
+   "80a7910c-5581-4ad5-9bf4-d30ddfdc8235"
+  ]
+ },
+ "db_path": "C:\\Users\\anand\\AppData\\Local\\Temp\\ai_rehearsal_4r_hw4im\\rehearsal.db",
+ "ai_decision_rows": 5
+}

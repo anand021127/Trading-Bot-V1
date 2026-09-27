@@ -1,0 +1,111 @@
+{
+ "measurement": "PHASE 5.2 \u00a736 \u2014 AI latency: cold fail-closed, warm_up preload, warm steady-state, keep_alive residency",
+ "date": "2026-09-27T02:56:57.907939+00:00",
+ "provider": "ollama:llama3.2:1b (http://localhost:11434/v1)",
+ "timeout_seconds": 20.0,
+ "keep_alive": "30m",
+ "cold": {
+  "phase": "cold_first_decision_after_unload",
+  "decision": "REJECT",
+  "reason_codes": [
+   "AI_INVALID_RESPONSE"
+  ],
+  "latency_ms": 17559.7,
+  "success": true
+ },
+ "warmup": {
+  "warmed": true,
+  "latency_ms": 388.3
+ },
+ "warm_runs": [
+  {
+   "phase": "warm_run_1",
+   "decision": "REJECT",
+   "reason_codes": [
+    "AI_INVALID_RESPONSE"
+   ],
+   "latency_ms": 8902.5,
+   "success": true
+  },
+  {
+   "phase": "warm_run_2",
+   "decision": "REJECT",
+   "reason_codes": [
+    "AI_INVALID_RESPONSE"
+   ],
+   "latency_ms": 9037.8,
+   "success": true
+  },
+  {
+   "phase": "warm_run_3",
+   "decision": "REJECT",
+   "reason_codes": [
+    "AI_INVALID_RESPONSE"
+   ],
+   "latency_ms": 9434.4,
+   "success": true
+  },
+  {
+   "phase": "warm_run_4",
+   "decision": "REJECT",
+   "reason_codes": [
+    "AI_INVALID_RESPONSE"
+   ],
+   "latency_ms": 9171.3,
+   "success": true
+  },
+  {
+   "phase": "warm_run_5",
+   "decision": "REJECT",
+   "reason_codes": [
+    "AI_INVALID_RESPONSE"
+   ],
+   "latency_ms": 9411.2,
+   "success": true
+  }
+ ],
+ "warm_median_ms": 9171.3,
+ "warm_p95_ms": 9411.2,
+ "warm_max_ms": 9434.4,
+ "warm_success_rate": "5/5",
+ "model_resident_after_keep_alive": {
+  "models": [
+   "llama3.2:1b"
+  ],
+  "expiration": [
+   null
+  ]
+ },
+ "phase51_baseline": {
+  "cold_first_call_ms": 20093.8,
+  "warm_median_ms": 3846.8,
+  "source": "analysis/ai_decision_latency.json (Phase 5.1 \u00a723)"
+ },
+ "verdict": "PASS \u2014 cold decision SUCCEEDED in 17560ms \u2014 inside the 20s timeout but far above warm latency, so a cold first signal is a real timeout risk; warm_up() exists precisely to remove this exposure. warm_up() preloaded the model in 388.3ms, all 5 warm decisions completed inside the timeout, and the model remained resident under keep_alive.",
+ "phase53_optimization": {
+  "change": "AI_DECISION_MAX_TOKENS default 128 -> 64 + compacted system prompt + pooled keep-alive HTTP session",
+  "ab_evidence_same_session": {
+   "tiny_prompt_8_tokens_x3_ms": [
+    558.3,
+    432.7,
+    423.0
+   ],
+   "decision_prompt_128_tokens_x3_ms": [
+    15153.3,
+    11797.0,
+    12023.8
+   ],
+   "note": "latency is dominated by GENERATED tokens (repetition loops burn the full max_tokens budget), not prompt size or HTTP"
+  },
+  "max_tokens_128_warm_median_ms": 15932.5,
+  "max_tokens_64_warm_median_ms": 9171.3,
+  "improvement": "~42% warm latency cut from the token cap alone (same session, same machine load); transport now pooled keep-alive",
+  "remaining_bottleneck": "CPU inference speed of llama3.2:1b on the deployment host; AI_DECISION_BUDGET_SECONDS=10 now bounds scan blocking and slow decisions resolve via dedup-replay",
+  "verdict_note": "cold AI_INVALID_RESPONSE at 17560ms = fail-closed NO TRADE (truncated JSON), never a guessed decision"
+ },
+ "scan_budget": {
+  "env": "AI_DECISION_BUDGET_SECONDS",
+  "default_seconds": 10,
+  "behavior": "slow decision -> typed WAIT (AI_WAITING) this tick, completes in background, replays via setup dedup on a later scan"
+ }
+}

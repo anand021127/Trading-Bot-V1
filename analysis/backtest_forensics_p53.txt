@@ -1,0 +1,158 @@
+==============================================================================================================
+V8-D FORENSIC ANALYTICS — REAL UPSTOX v3 BACKTEST (2025-09-26 → 2026-09-27, 6 symbols)
+==============================================================================================================
+Trades parsed: 277  | CSV cross-check: 277 trades, WR 28.88%, net -81511.32, PF 0.61
+
+LIFECYCLE VIOLATIONS: 18 trades with expiry/session issues (18 entry-session violations)
+  HEADLINE: SENSEX2630579900CE entry 2026-03-05T15:25:00+05:30 expiry 2026-03-05 exit 2026-09-25T15:25:00+05:30 (BACKTEST_END) gross=0.0 — issues: ['exit 2026-09-25 AFTER contract expiry 2026-03-05', 'entry 15:25:00 after 14:45 last-entry cutoff', 'entry 15:25:00 at/after 15:00 — past square-off zone']
+  - FINNIFTY2593025950PE: entry 14:50:00 after 14:45 last-entry cutoff | exit_reason=INTRADAY_SQUARE_OFF
+  - MIDCPNIFTY2593012550PE: entry 14:50:00 after 14:45 last-entry cutoff | exit_reason=INTRADAY_SQUARE_OFF
+  - NIFTY25N1125700CE: entry 14:50:00 after 14:45 last-entry cutoff | exit_reason=STOP_LOSS_HIT
+  - NIFTY25N1125700CE: entry 15:00:00 after 14:45 last-entry cutoff, entry 15:00:00 at/after 15:00 — past square-off zone | exit_reason=STOP_LOSS_HIT
+  - SENSEX25N1383900CE: entry 15:10:00 after 14:45 last-entry cutoff, entry 15:10:00 at/after 15:00 — past square-off zone | exit_reason=INTRADAY_SQUARE_OFF
+  - SENSEX25D1185100PE: entry 14:55:00 after 14:45 last-entry cutoff | exit_reason=INTRADAY_SQUARE_OFF
+  - NIFTY25D0925950PE: entry 14:55:00 after 14:45 last-entry cutoff | exit_reason=INTRADAY_SQUARE_OFF
+  - MIDCPNIFTY25D3013725PE: entry 15:00:00 after 14:45 last-entry cutoff, entry 15:00:00 at/after 15:00 — past square-off zone | exit_reason=INTRADAY_SQUARE_OFF
+  - NIFTY2620325800CE: entry 14:55:00 after 14:45 last-entry cutoff | exit_reason=STOP_LOSS_HIT
+  - SENSEX2630579900CE: exit 2026-09-25 AFTER contract expiry 2026-03-05, entry 15:25:00 after 14:45 last-entry cutoff, entry 15:25:00 at/after 15:00 — past square-off zone | exit_reason=BACKTEST_END
+  - NIFTY2640723050CE: entry 14:50:00 after 14:45 last-entry cutoff | exit_reason=TARGET_HIT
+  - BANKNIFTY2642855500PE: entry 15:00:00 after 14:45 last-entry cutoff, entry 15:00:00 at/after 15:00 — past square-off zone | exit_reason=TARGET_HIT
+
+A. OVERALL:
+  trades                           277
+  wins                             80
+  losses                           197
+  win_rate_pct                     28.88
+  gross_profit                     125831.63
+  gross_loss                       -207342.95
+  net_pnl                          -81511.32
+  profit_factor                    0.607
+  expectancy                       -294.26
+  avg_win                          1572.9
+  avg_loss                         -1052.5
+  avg_r                            -0.157
+  median_r                         -0.04
+  max_consecutive_wins             7
+  max_consecutive_losses           17
+  worst_loss_streak_pnl            -21799.01
+  max_drawdown_pct_exit_ordered    557.83
+
+B. BY SYMBOL
+  BANKEX             n=14   wr=14.29 % net=  -8305.98 PF=0.267 exp= -593.28 avgR=-0.274
+  BANKNIFTY          n=25   wr=32.0  % net=  -6412.57 PF=0.749 exp=  -256.5 avgR=-0.088
+  FINNIFTY           n=31   wr=22.58 % net=   -9522.0 PF=0.62 exp= -307.16 avgR=-0.219
+  MIDCPNIFTY         n=26   wr=30.77 % net=  -7272.65 PF=0.637 exp= -279.72 avgR=-0.206
+  NIFTY50            n=131  wr=28.24 % net= -37369.46 PF=0.593 exp= -285.26 avgR=-0.144
+  SENSEX             n=50   wr=36.0  % net= -12628.66 PF=0.624 exp= -252.57 avgR=-0.131
+
+C. BY CE/PE
+  CE                 n=134  wr=26.12 % net= -55120.95 PF=0.484 exp= -411.35 avgR=-0.215
+  PE                 n=143  wr=31.47 % net= -26390.37 PF=0.738 exp= -184.55 avgR=-0.103
+
+D. BY EXIT REASON
+  BACKTEST_END       n=1    wr=0.0   % net=     -9.44 PF=0.0 exp=   -9.44 avgR=-0.01
+  INTRADAY_SQUARE_OFF n=36   wr=44.44 % net=   1672.06 PF=1.133 exp=   46.45 avgR=0.027
+  STOP_LOSS_HIT      n=109  wr=0.0   % net=-189146.28 PF=0.0 exp=-1735.29 avgR=-1.01
+  TARGET_HIT         n=42   wr=100.0 % net= 100158.32 PF=None exp= 2384.72 avgR=1.484
+  TRAILING_STOP_HIT  n=89   wr=24.72 % net=   5814.02 PF=2.03 exp=   65.33 avgR=0.037
+
+E. BY MONTH
+  2025-09            n=2    wr=0.0   % net=   -692.95 PF=0.0 exp= -346.48 avgR=-0.2
+  2025-10            n=33   wr=45.45 % net=  13234.47 PF=1.785 exp=  401.04 avgR=0.186
+  2025-11            n=24   wr=25.0  % net= -14919.28 PF=0.18 exp= -621.64 avgR=-0.364
+  2025-12            n=19   wr=21.05 % net=  -8742.81 PF=0.385 exp= -460.15 avgR=-0.28
+  2026-01            n=25   wr=32.0  % net=  -5460.48 PF=0.709 exp= -218.42 avgR=-0.133
+  2026-02            n=29   wr=34.48 % net= -10025.24 PF=0.566 exp=  -345.7 avgR=-0.221
+  2026-03            n=27   wr=25.93 % net=  -8072.56 PF=0.521 exp= -298.98 avgR=-0.062
+  2026-04            n=25   wr=28.0  % net=  -7163.81 PF=0.584 exp= -286.55 avgR=-0.048
+  2026-05            n=26   wr=19.23 % net= -10829.62 PF=0.513 exp= -416.52 avgR=-0.237
+  2026-06            n=43   wr=30.23 % net= -11478.88 PF=0.659 exp= -266.95 avgR=-0.179
+  2026-07            n=12   wr=33.33 % net=  -4382.95 PF=0.619 exp= -365.25 avgR=-0.19
+  2026-08            n=5    wr=0.0   % net=  -7241.09 PF=0.0 exp=-1448.22 avgR=-0.792
+  2026-09            n=7    wr=14.29 % net=  -5736.12 PF=0.152 exp= -819.45 avgR=-0.357
+
+F. BY TIME OF DAY
+  09:20-10:00        n=29   wr=37.93 % net=  -6275.54 PF=0.7 exp=  -216.4 avgR=-0.108
+  10:00-11:30        n=97   wr=20.62 % net= -54645.85 PF=0.397 exp= -563.36 avgR=-0.304
+  11:30-13:00        n=58   wr=29.31 % net= -23889.14 PF=0.551 exp= -411.88 avgR=-0.232
+  13:00-14:00        n=40   wr=32.5  % net=  -3234.96 PF=0.866 exp=  -80.87 avgR=-0.017
+  14:00-14:45        n=31   wr=32.26 % net=   -731.03 PF=0.947 exp=  -23.58 avgR=0.004
+  AFTER_14:45        n=22   wr=40.91 % net=    7265.2 PF=2.534 exp=  330.24 avgR=0.143
+
+G. BY DAY OF WEEK
+  Fri                n=46   wr=36.96 % net=   2711.28 PF=1.073 exp=   58.94 avgR=0.021
+  Mon                n=78   wr=42.31 % net= -13905.83 PF=0.749 exp= -178.28 avgR=-0.073
+  Thu                n=28   wr=35.71 % net=     237.5 PF=1.015 exp=    8.48 avgR=0.053
+  Tue                n=95   wr=17.89 % net= -50623.68 PF=0.285 exp= -532.88 avgR=-0.31
+  Wed                n=30   wr=10.0  % net= -19930.59 PF=0.285 exp= -664.35 avgR=-0.363
+
+H. BY HOLDING DURATION
+  0-5m               n=42   wr=33.33 % net=   1959.36 PF=1.2 exp=   46.65 avgR=0.092
+  1-2h               n=57   wr=33.33 % net= -11165.29 PF=0.773 exp= -195.88 avgR=-0.098
+  15-30m             n=46   wr=17.39 % net= -20436.31 PF=0.425 exp= -444.27 avgR=-0.29
+  2-4h               n=24   wr=41.67 % net= -15921.06 PF=0.272 exp= -663.38 avgR=-0.3
+  30-60m             n=58   wr=31.03 % net=  -8165.71 PF=0.834 exp= -140.79 avgR=-0.071
+  4h-1d              n=9    wr=33.33 % net=  -2439.61 PF=0.622 exp= -271.07 avgR=-0.124
+  5-15m              n=40   wr=20.0  % net= -25333.26 PF=0.283 exp= -633.33 avgR=-0.401
+  >1d                n=1    wr=0.0   % net=     -9.44 PF=0.0 exp=   -9.44 avgR=-0.01
+
+I. BY DTE
+  DTE_0              n=120  wr=20.0  % net= -53851.56 PF=0.319 exp= -448.76 avgR=-0.25
+  DTE_1              n=69   wr=34.78 % net= -21214.58 PF=0.614 exp= -307.46 avgR=-0.153
+  DTE_2              n=13   wr=46.15 % net=  -6083.31 PF=0.5 exp= -467.95 avgR=-0.224
+  DTE_3              n=10   wr=50.0  % net=    560.26 PF=1.087 exp=   56.03 avgR=0.038
+  DTE_4              n=36   wr=30.56 % net=  -3914.97 PF=0.874 exp= -108.75 avgR=-0.048
+  DTE_5              n=11   wr=36.36 % net=   2626.73 PF=1.31 exp=  238.79 avgR=0.125
+  DTE_6              n=18   wr=33.33 % net=    366.11 PF=1.024 exp=   20.34 avgR=-0.006
+
+J. BY ENTRY PREMIUM
+  100-150            n=69   wr=23.19 % net= -27361.69 PF=0.595 exp= -396.55 avgR=-0.211
+  150-250            n=23   wr=13.04 % net= -12442.99 PF=0.395 exp=  -541.0 avgR=-0.306
+  250-400            n=35   wr=40.0  % net=  -9270.89 PF=0.715 exp= -264.88 avgR=-0.129
+  50-100             n=82   wr=32.93 % net= -18854.83 PF=0.612 exp= -229.94 avgR=-0.12
+  <50                n=60   wr=28.33 % net= -10233.72 PF=0.657 exp= -170.56 avgR=-0.102
+  >=400              n=8    wr=37.5  % net=   -3347.2 PF=0.598 exp=  -418.4 avgR=-0.179
+
+K. BY STOP DISTANCE
+  25-30%             n=168  wr=32.74 % net= -38898.36 PF=0.715 exp= -231.54 avgR=-0.123
+  >=30%              n=109  wr=22.94 % net= -42612.96 PF=0.397 exp= -390.94 avgR=-0.211
+
+L. BY TARGET DISTANCE
+  40-50%             n=175  wr=33.14 % net= -38663.53 PF=0.721 exp= -220.93 avgR=-0.117
+  50-60%             n=26   wr=19.23 % net= -10696.38 PF=0.361 exp=  -411.4 avgR=-0.181
+  >=60%              n=76   wr=22.37 % net= -32151.41 PF=0.383 exp= -423.04 avgR=-0.24
+
+M. INDICATOR FIELDS:
+  setup_score unique values: [100.0]
+  setup_score is constant 100 for every accepted trade — it is a transparency score (all conditions passed), NOT an edge signal. Deeper indicator fields (EMA20/50, RSI, ATR, pullback distance) are NOT in this CSV; backtest-only signal_diagnostics capture was added to the engine this session for future runs.
+
+N. REGIME CLUSTERING:
+  active_trading_days: 104
+  days_with_losses: 80
+  worst_5_days_sum: -32239.92
+  worst_5_days_share_of_net_pct: 39.6
+  interpretation: Losses are persistent across months and symbols (no single regime dominates), consistent with a strategy whose edge is negative after costs rather than one good/bad market phase.
+  worst 10 days:
+    2026-02-03  net=  -9214.51  trades=6
+    2026-05-26  net=  -7651.88  trades=7
+    2026-01-27  net=  -5518.99  trades=5
+    2026-06-29  net=  -5409.92  trades=11
+    2026-07-24  net=  -4444.62  trades=2
+    2026-01-28  net=  -4331.37  trades=3
+    2025-11-21  net=  -4279.14  trades=2
+    2025-11-07  net=  -3874.21  trades=2
+    2025-11-25  net=  -3826.99  trades=6
+    2025-10-20  net=  -3691.16  trades=3
+  deepest loss streaks:
+    length=17  pnl=-21799.01
+    length=8  pnl=-13695.42
+    length=11  pnl=-10576.77
+    length=11  pnl=-10369.52
+    length=11  pnl=-10125.46
+    length=9  pnl=-9490.74
+
+COSTS:
+  total_fees: 5729.03
+  total_slippage: 297.24
+  gross_abs_pnl: 331583.95
+  fees_vs_gross_turnover_pct: 1.73

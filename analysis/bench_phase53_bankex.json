@@ -1,0 +1,113 @@
+{
+  "benchmark": "PHASE 5.3 \u00a728 \u2014 staged backtest benchmark incl. BANKEX",
+  "date": "2026-09-27",
+  "strategy": "V8_D_PULLBACK_ATM (parameters untouched)",
+  "symbols": {
+    "NIFTY50": {
+      "stages": {
+        "data_loading_seconds": 0.09,
+        "options_cache_contracts": 0,
+        "options_cache_candles": 0
+      },
+      "results": {
+        "5d": {
+          "bars": 225,
+          "options_required": {
+            "status": "RAN",
+            "seconds": 0.271,
+            "trades": 0,
+            "net_pnl": 0,
+            "coverage_status": "UNKNOWN"
+          },
+          "spot_only_demo": {
+            "data_mode": "SPOT_ONLY",
+            "seconds": 0.116,
+            "bars_per_second": 1939.7,
+            "trades": 0,
+            "signals": 0,
+            "net_pnl": 0,
+            "ai_backtest_status": "AI_BACKTEST_UNAVAILABLE",
+            "rejections_total": 165,
+            "note": "SPOT_ONLY path \u2014 strategy/engine correctness demo, NOT an options backtest"
+          }
+        },
+        "25d": {
+          "bars": 1200,
+          "options_required": {
+            "status": "RAN",
+            "seconds": 1.986,
+            "trades": 0,
+            "net_pnl": 0,
+            "coverage_status": "UNKNOWN"
+          },
+          "spot_only_demo": {
+            "data_mode": "SPOT_ONLY",
+            "seconds": 1.877,
+            "bars_per_second": 639.3,
+            "trades": 0,
+            "signals": 0,
+            "net_pnl": 0,
+            "ai_backtest_status": "AI_BACKTEST_UNAVAILABLE",
+            "rejections_total": 1140,
+            "note": "SPOT_ONLY path \u2014 strategy/engine correctness demo, NOT an options backtest"
+          }
+        }
+      }
+    },
+    "BANKEX": {
+      "stages": {
+        "data_loading_seconds": 0.055,
+        "options_cache_contracts": 0,
+        "options_cache_candles": 0
+      },
+      "results": {
+        "5d": {
+          "bars": 225,
+          "options_required": {
+            "status": "RAN",
+            "seconds": 0.075,
+            "trades": 0,
+            "net_pnl": 0,
+            "coverage_status": "UNKNOWN"
+          },
+          "spot_only_demo": {
+            "data_mode": "SPOT_ONLY",
+            "seconds": 0.075,
+            "bars_per_second": 3000.0,
+            "trades": 0,
+            "signals": 0,
+            "net_pnl": 0,
+            "ai_backtest_status": "AI_BACKTEST_UNAVAILABLE",
+            "rejections_total": 165,
+            "note": "SPOT_ONLY path \u2014 strategy/engine correctness demo, NOT an options backtest"
+          }
+        },
+        "25d": {
+          "bars": 1200,
+          "options_required": {
+            "status": "RAN",
+            "seconds": 1.381,
+            "trades": 0,
+            "net_pnl": 0,
+            "coverage_status": "UNKNOWN"
+          },
+          "spot_only_demo": {
+            "data_mode": "SPOT_ONLY",
+            "seconds": 1.32,
+            "bars_per_second": 909.1,
+            "trades": 0,
+            "signals": 0,
+            "net_pnl": 0,
+            "ai_backtest_status": "AI_BACKTEST_UNAVAILABLE",
+            "rejections_total": 1140,
+            "note": "SPOT_ONLY path \u2014 strategy/engine correctness demo, NOT an options backtest"
+          }
+        }
+      }
+    }
+  },
+  "honesty": {
+    "ai_backtest": "AI_BACKTEST_UNAVAILABLE (unchanged, never fabricated)",
+    "options_data": "local historical options cache is EMPTY \u2014 options-required runs are refused/failed honestly; spot-only rows are labelled demo and are NOT options backtests"
+  }
+}
