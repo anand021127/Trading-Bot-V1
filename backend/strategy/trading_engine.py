@@ -849,6 +849,13 @@ class TradingEngine:
             except Exception:
                 pass
 
+        # PHASE 5.2 §5: real reconciliation state from the durable settings —
+        # "1"=ok, "0"/unknown=pending-or-failed (V8-D rejects on both).
+        # Display path stays honest; never a hardcoded True.
+        try:
+            _rec_state = str(self.db_manager.get_setting("paper_reconcile_ok", "") or "")
+        except Exception:
+            _rec_state = ""
         sig, decision_log = strat.evaluate_v8d_signal(
             underlying_symbol=underlying_symbol,
             underlying_candles=candles,
@@ -857,7 +864,7 @@ class TradingEngine:
             account_equity=equity,
             trades_today=trades_today,
             kill_switch_active=kill,
-            reconciliation_ok=True,
+            reconciliation_ok=(_rec_state == "1"),
         )
         # Attach structured decision for scanner UI
         if getattr(sig, "indicators", None) is None:

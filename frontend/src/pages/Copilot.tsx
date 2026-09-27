@@ -80,6 +80,7 @@ type AIDecisionStatus = {
   approval_semantics: string
   backtest_status: string
   latency: AILatency
+  decision_counters?: Record<string, unknown>
   recent_decisions: AIRecentDecision[]
   note: string
 }
@@ -239,6 +240,20 @@ function AIDecisionPanel() {
           <span key={code} className="text-amber-400">{code}: {n}</span>
         ))}
       </div>
+
+      {/* Decision counters (§14) */}
+      {status.decision_counters && Object.keys(status.decision_counters).length > 0 && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-400">
+          {Object.entries(status.decision_counters).map(([k, v]) =>
+            k === 'rejection_breakdown' ? null : (
+              <span key={k} className="capitalize">{k}: <span className="text-slate-200">{String(v)}</span></span>
+            ))}
+          {typeof status.decision_counters.rejection_breakdown === 'object' && status.decision_counters.rejection_breakdown !== null &&
+            Object.entries(status.decision_counters.rejection_breakdown as Record<string, number>).map(([code, n]) => (
+              <span key={code} className="text-orange-400">{code.replace(/_/g, ' ').toLowerCase()}: {n}</span>
+            ))}
+        </div>
+      )}
 
       {/* Recent decisions — AI confidence, never probability of profit (§11) */}
       {status.recent_decisions.length > 0 && (

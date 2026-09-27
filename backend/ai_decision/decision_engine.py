@@ -21,10 +21,16 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
+
+try:
+    import requests as _requests
+except ImportError:  # pragma: no cover — stdlib fallback path
+    _requests = None
 
 from backend.ai_decision.contract import (
     APPROVE,
@@ -33,6 +39,7 @@ from backend.ai_decision.contract import (
     R_DECISION_INVALID,
     R_INVALID_RESPONSE,
     R_MODEL_UNAVAILABLE,
+    R_PERSISTENCE_FAILED,
     R_PROVIDER_UNAVAILABLE,
     R_REJECTED,
     R_STRATEGY_MISMATCH,
@@ -48,6 +55,7 @@ from backend.ai_decision.context import (
     snapshot_hash,
 )
 from backend.ai_decision.store import AIDecisionStore, make_decision_idempotency_key
+from backend.ai_decision.setup_identity import build_setup_id
 from backend.copilot.provider_errors import (
     AIProviderError,
     AIModelUnavailableError,
@@ -84,7 +92,12 @@ def load_ai_decision_settings() -> Dict[str, Any]:
         "timeout_seconds": _env_float("AI_DECISION_TIMEOUT_SECONDS", 20.0),
         # Ollama supports temperature 0 = deterministic decoding.
         "temperature": _env_float("AI_DECISION_TEMPERATURE", 0.0),
-        "max_tokens": int(_env_float("AI_DECISION_MAX_TOKENS", 128)),
+        # PHASE 5.3 §13: the valid decision envelope needs <50 generated
+        # tokens; a 64-token cap bounds the worst case (repetition loops
+        # burn the whole budget) at ~2x the fastest possible answer.
+        # Truncated JSON parses as None → typed AI_INVALID_RESPONSE →
+        # NO TRADE (fail-closed), never a guessed decision.
+        "max_tokens": int(_env_float("AI_DECISION_MAX_TOKENS", 64)),
     }
 
 
@@ -129,25 +142,21 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
 
 
 _DECISION_SYSTEM_PROMPT = (
+    # PHASE 5.3 §13: compacted for inference speed — every SAFETY rule kept
+    # (JSON-only, three verdicts, 0-100 confidence, ≤3 UPPER_SNAKE reason
+    # codes, no invented data → WAIT, APPROVE criteria, no repetition).
+    # Fewer prompt tokens = measurably less inference time per decision.
     "You are the AI decision layer of an options trading bot. You evaluate ONE "
-    "candidate trade signal produced by a deterministic strategy (V8-D Pullback ATM) "
-    "using ONLY the verified market data provided. You cannot fetch data, place "
-    "orders, or change anything.\n"
-    "Respond with JSON ONLY — exactly this one object and nothing else:\n"
-    '{"decision": "APPROVE" | "REJECT" | "WAIT", "confidence": <number 0-100>, '
-    '"reason_codes": ["SHORT_CODE", "SHORT_CODE"]}\n'
-    "Guidance:\n"
-    "- APPROVE only when trend, pullback quality, momentum (RSI), volatility (ATR), "
-    "option spread and risk/reward all support the entry.\n"
-    "- REJECT for clearly poor setups (bad risk/reward, wide spread, momentum against "
-    "the direction, exhausted move, risk limits nearly exhausted).\n"
-    "- WAIT when data is ambiguous, indicators conflict, or freshness/margin context "
-    "makes the entry unsafe to judge right now.\n"
-    "- confidence is your confidence in your own analysis under this data — NOT a "
-    "probability of profit. You have no such statistic.\n"
-    "- Use only values present in the data. If something critical is missing, answer WAIT.\n"
-    "- Keep it SHORT: at most 3 reason codes, UPPER_SNAKE_CASE, and no explanation "
-    "text outside the JSON object. Never repeat keys or values."
+    "candidate trade from a deterministic strategy (V8-D Pullback ATM) using ONLY "
+    "the provided data. You cannot fetch data or place orders.\n"
+    "Respond with JSON ONLY, exactly:\n"
+    '{"decision":"APPROVE|REJECT|WAIT","confidence":<0-100>,"reason_codes":["SHORT_CODE"]}\n'
+    "- APPROVE only if trend, pullback quality, RSI, ATR, option spread and risk/reward "
+    "all support the entry.\n"
+    "- REJECT poor setups (bad risk/reward, wide spread, momentum against, exhausted move, "
+    "risk limits nearly exhausted). WAIT if data is ambiguous/missing/critical — never invent values.\n"
+    "- confidence is confidence in the analysis under this data, NOT a profit probability.\n"
+    "- Max 3 reason codes, UPPER_SNAKE_CASE. No text outside the JSON. Never repeat keys/values."
 )
 
 
@@ -156,7 +165,22 @@ class OllamaDecisionProvider:
 
     It knows how to do exactly one thing: POST a chat completion and return
     the message text. It holds no broker credentials, never receives them,
-    and has no order-placement capability (§19)."""
+    and has no order-placement capability (§19).
+
+    PHASE 5.3 §13: uses ONE pooled keep-alive HTTP session per process
+    (connection reuse saves a TCP handshake per decision — measurable on
+    the 2s scan cadence), falling back to urllib when requests is absent.
+    """
+
+    _shared_session: Any = None
+    _shared_session_lock = threading.Lock()
+
+    @classmethod
+    def _session(cls) -> Any:
+        with cls._shared_session_lock:
+            if cls._shared_session is None and _requests is not None:
+                cls._shared_session = _requests.Session()
+            return cls._shared_session
 
     def __init__(self, *, base_url: str, model: str, timeout_seconds: float,
                  temperature: float = 0.0, max_tokens: int = 256) -> None:
@@ -165,6 +189,12 @@ class OllamaDecisionProvider:
         self.timeout_seconds = timeout_seconds
         self.temperature = temperature
         self.max_tokens = max_tokens
+
+    # PHASE 5.2 §8/§25: keep the model resident so idle periods don't
+    # unload it (cold start then costs a full model load on the NEXT
+    # decision). `keep_alive` is an Ollama API extension; other OpenAI-
+    # compatible providers ignore unknown fields harmlessly.
+    DEFAULT_KEEP_ALIVE = os.environ.get("AI_DECISION_KEEP_ALIVE", "30m").strip() or "30m"
 
     def chat_json(self, snapshot: Dict[str, Any]) -> str:
         """Send the snapshot and return raw assistant text. Raises typed
@@ -181,24 +211,77 @@ class OllamaDecisionProvider:
             # Grammar-constrained JSON (supported by Ollama's OpenAI-compatible
             # endpoint; harmless if a provider ignores it).
             "response_format": {"type": "json_object"},
+            "keep_alive": self.DEFAULT_KEEP_ALIVE,
         }
-        req = urllib.request.Request(
-            self.base_url + "/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise classify_provider_exception(exc)
-        except ValueError as exc:
-            raise AIProviderError(f"malformed provider response envelope: {exc}")
+        url = self.base_url + "/chat/completions"
+        body = json.dumps(payload).encode("utf-8")
+        session = self._session()
+        if session is not None:
+            try:
+                resp = session.post(url, data=body,
+                                    headers={"Content-Type": "application/json"},
+                                    timeout=self.timeout_seconds)
+                if resp.status_code >= 400:
+                    raise AIProviderUnavailableError(
+                        f"provider HTTP {resp.status_code}")
+                data = resp.json()
+            except AIProviderError:
+                raise
+            except (_requests.Timeout,) if _requests is not None else ():
+                raise AIProviderTimeoutError(f"provider timeout after {self.timeout_seconds}s")
+            except Exception as exc:  # noqa: BLE001 — classified, never leaked
+                raise AIProviderUnavailableError(f"provider connection failed: {type(exc).__name__}")
+        else:
+            req = urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/json"}, method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+                raise classify_provider_exception(exc)
+            except ValueError as exc:
+                raise AIProviderError(f"malformed provider response envelope: {exc}")
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise AIProviderError(f"malformed provider response envelope: {exc}")
+
+    def warm_up(self) -> Dict[str, Any]:
+        """Preload the model with a minimal generation (PHASE 5.2 §25).
+
+        Deliberately NOT the real decision prompt: it only needs to force
+        the model weights into memory. Returns a result dict — NEVER raises
+        (warm-up failure must not crash the trading system; the engine
+        remains fail-closed if the provider is unavailable).
+        """
+        t0 = time.monotonic()
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": "Reply with the single word: ready"}],
+            "temperature": 0.0,
+            "max_tokens": 8,
+            "keep_alive": self.DEFAULT_KEEP_ALIVE,
+        }
+        url = self.base_url + "/chat/completions"
+        body = json.dumps(payload).encode("utf-8")
+        session = self._session()
+        try:
+            if session is not None:
+                resp = session.post(url, data=body,
+                                    headers={"Content-Type": "application/json"},
+                                    timeout=max(self.timeout_seconds, 30.0))
+                _ = resp.content  # drain body (requests Response has no .read())
+            else:
+                req = urllib.request.Request(
+                    url, data=body, headers={"Content-Type": "application/json"}, method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=max(self.timeout_seconds, 30.0)) as resp:
+                    resp.read()
+            return {"warmed": True, "latency_ms": round((time.monotonic() - t0) * 1000, 1)}
+        except Exception as exc:  # noqa: BLE001 — warmup must never crash startup
+            return {"warmed": False, "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+                    "error": f"{type(exc).__name__}"}
 
 
 # ── the engine ────────────────────────────────────────────────────────────
@@ -218,10 +301,85 @@ class AITradingDecisionEngine:
             max_tokens=self.settings["max_tokens"],
         )
         self.store = AIDecisionStore(db) if db is not None else None
+        self._warmup_lock = threading.Lock()
+        self.warmup_result: Dict[str, Any] = {}
+        self._warmup_started = threading.Event()
+        if self.enabled:
+            # PHASE 5.2 §8/§25: non-blocking model preload at worker start.
+            # Startup NEVER waits on Ollama; a failure leaves the engine
+            # fail-closed (typed NO-TRADE on the first real evaluation).
+            threading.Thread(target=self._warmup_worker, name="ai-decision-warmup", daemon=True).start()
+
+    def _warmup_worker(self) -> None:
+        try:
+            result = self.provider.warm_up() if hasattr(self.provider, "warm_up") else {"warmed": False, "error": "provider lacks warm_up"}
+        except Exception as exc:  # noqa: BLE001
+            result = {"warmed": False, "error": type(exc).__name__}
+        self.warmup_result = result
+        self._warmup_started.set()
+
+    def warmup_status(self) -> Dict[str, Any]:
+        """Snapshot of warm-up state for observability (never blocks)."""
+        out = dict(self.warmup_result)
+        out["started"] = self._warmup_started.is_set()
+        out["in_progress"] = not self._warmup_started.is_set()
+        return out
 
     @property
     def enabled(self) -> bool:
         return bool(self.settings["enabled"])
+
+    # ── bounded-blocking decide (PHASE 5.3 §12/§13) ───────────────────
+    def decide_with_budget(
+        self, *, max_wait_seconds: float, **decide_kwargs: Any,
+    ) -> AITradingDecision:
+        """Decide without ever blocking the trading loop longer than
+        `max_wait_seconds`.
+
+        A decision that finishes inside the budget is returned normally.
+        If the model is still thinking at the deadline, the FIRST call
+        returns typed WAIT (AI_WAITING — NO TRADE this tick) while the
+        inference continues on its worker thread; a LATER tick with the
+        SAME setup replays the persisted verdict through the normal dedup
+        chain (no second inference). The signal is never held stale while
+        the model thinks, and the budget is always ≤ the provider timeout
+        so this can never exceed decide()'s own bound.
+        """
+        budget = max(0.0, min(float(max_wait_seconds), float(self.settings["timeout_seconds"])))
+        result: Dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                result["decision"] = self.decide(**decide_kwargs)
+            except BaseException as exc:  # pragma: no cover — decide never raises
+                result["decision"] = AITradingDecision.fail_closed(
+                    "AI_PROVIDER_UNAVAILABLE", reasoning=f"decide thread error: {type(exc).__name__}")
+
+        t = threading.Thread(target=_run, name="ai-decide-budget", daemon=True)
+        t.start()
+        t.join(budget)
+        if t.is_alive():
+            from backend.ai_decision.contract import WAIT
+            return AITradingDecision(
+                decision=WAIT,
+                confidence=0.0,
+                reason_codes=["AI_WAITING"],
+                strategy=str(getattr(decide_kwargs.get("signal"), "strategy_name", "")),
+                symbol=str(getattr(decide_kwargs.get("signal"), "symbol", "")),
+                market_timestamp="",
+                model_provider=f"ollama:{self.settings['provider']}",
+                model_name=str(self.settings["model"]),
+                model_version="local-ollama",
+                reasoning=(f"AI inference exceeded the {budget:.0f}s scan budget — "
+                           "NO TRADE this tick; the decision completes in the "
+                           "background and replays on a later scan of the same setup."),
+                input_snapshot_hash="",
+                **self._contract_fields(
+                    decide_kwargs.get("signal"),
+                    decide_kwargs.get("contract") or {},
+                    str(decide_kwargs.get("expiry") or "")),  # type: ignore[arg-type]
+            )
+        return result["decision"]
 
     # ── context + snapshot ────────────────────────────────────────────
     def build_snapshot(
@@ -263,6 +421,7 @@ class AITradingDecisionEngine:
         risk: RiskContext,
         session: MarketSession,
         pipeline_strategy: str = "",
+        setup_id: str = "",
     ) -> AITradingDecision:
         """Produce the structured AI decision for one V8-D BUY signal.
 
@@ -292,13 +451,30 @@ class AITradingDecisionEngine:
             )
         input_hash = snapshot_hash(snapshot)
 
-        # 2. Idempotency: identical evaluation replays the stored decision.
+        # 2. PHASE 5.2 §2/§3 — TWO dedup layers before any provider call:
+        #
+        #    a) SETUP dedup: the same continuing opportunity (same strategy/
+        #       instrument/strike/expiry/market bar) reuses the stored
+        #       decision regardless of scan tick — a new generated_at must
+        #       NOT cause repeated Ollama inference for an unchanged setup.
+        #    b) EXACT idempotency (Phase 5.1): same setup id + snapshot
+        #       hash + model identity replays the stored decision.
+        #
+        #    A genuinely NEW setup (new bar / different contract or
+        #    direction) gets a fresh evaluation.
+        setup_id = setup_id or build_setup_id(
+            signal=signal, contract=contract, expiry=expiry, candles=candles)
         idem_key = make_decision_idempotency_key(
-            signal_id=signal_id, input_snapshot_hash=input_hash,
+            signal_id=setup_id, input_snapshot_hash=input_hash,
             model_provider=provider_id, model_name=model_name, model_version=model_version,
         )
         if self.store is not None:
             existing = self.store.get_decision_by_key(idem_key)
+            if existing is None:
+                # No decision for this exact snapshot — reuse the setup's
+                # earlier verdict if one exists (same market bar, possibly
+                # different risk numbers).
+                existing = self.store.get_latest_setup_decision(setup_id)
             if existing is not None:
                 return self._from_stored(existing, signal, contract, expiry)
 
@@ -311,7 +487,7 @@ class AITradingDecisionEngine:
                 reasoning="Market candle data is stale — refusing to judge the signal on old data.",
                 codes=[R_WAIT, "STALE_DATA"],
             )
-            return self._store_and_return(decision, idem_key, signal_id, started)
+            return self._store_and_return(decision, idem_key, signal_id, started, setup_id=setup_id)
         if not ctx["option"]["instrument_key"] or not ctx["option"]["ltp"]:
             decision = self._wait(
                 strategy_name, provider_id, model_name, model_version, input_hash, started,
@@ -319,7 +495,7 @@ class AITradingDecisionEngine:
                 reasoning="Resolved option contract is incomplete (no instrument key or LTP).",
                 codes=[R_WAIT, "INCOMPLETE_CONTRACT"],
             )
-            return self._store_and_return(decision, idem_key, signal_id, started)
+            return self._store_and_return(decision, idem_key, signal_id, started, setup_id=setup_id)
 
         # 4. Provider call.
         try:
@@ -397,7 +573,7 @@ class AITradingDecisionEngine:
                 timeout_seconds=float(self.settings["timeout_seconds"]),
                 success=True,
             )
-        return self._store_and_return(decision, idem_key, signal_id, started)
+        return self._store_and_return(decision, idem_key, signal_id, started, setup_id=setup_id)
 
     # ── helpers ───────────────────────────────────────────────────────
     @staticmethod
@@ -494,11 +670,38 @@ class AITradingDecisionEngine:
         )
 
     def _store_and_return(self, decision: AITradingDecision, idem_key: str,
-                          signal_id: str, started: float) -> AITradingDecision:
-        if self.store is not None:
-            latency_ms = (time.monotonic() - started) * 1000.0
-            self.store.save_decision(decision.to_dict(), idem_key, signal_id, latency_ms)
-        return decision
+                          signal_id: str, started: float,
+                          setup_id: str = "") -> AITradingDecision:
+        """Persist the decision and return it.
+
+        PHASE 5.2 §4 fail-closed rule: a decision that could NOT be durably
+        stored can never authorize a trade — the trade must remain
+        auditable from stored state alone. Any storage failure converts an
+        APPROVE into the typed NO-TRADE decision
+        AI_DECISION_PERSISTENCE_FAILED. REJECT/WAIT outcomes are returned
+        as-is (they are no-trade regardless).
+        """
+        if self.store is None:
+            # No store wired (unit-test engines only). Never production.
+            return decision
+        latency_ms = (time.monotonic() - started) * 1000.0
+        saved = self.store.save_decision(decision.to_dict(), idem_key, signal_id, latency_ms,
+                                         setup_id=setup_id)
+        if saved:
+            return decision
+        if decision.decision != APPROVE:
+            return decision  # already NO TRADE
+        return AITradingDecision.fail_closed(
+            R_PERSISTENCE_FAILED,
+            strategy=decision.strategy,
+            symbol=decision.symbol,
+            input_snapshot_hash=decision.input_snapshot_hash,
+            model_provider=decision.model_provider,
+            model_name=decision.model_name,
+            model_version=decision.model_version,
+            market_timestamp=decision.market_timestamp,
+            reasoning="AI decision could not be durably persisted — an unrecorded approval must never execute.",
+        )
 
     def _from_stored(self, stored: Dict[str, Any], signal: Any, contract: Dict[str, Any],
                      expiry: str) -> AITradingDecision:

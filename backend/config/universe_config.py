@@ -6,7 +6,37 @@ from typing import Any, Dict, List, Optional
 
 MODE_OPTIONS = "OPTIONS"
 VALID_MODES = (MODE_OPTIONS,)
-VALID_OPTION_INDICES = ["NIFTY50", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+# The SIX supported index option underlyings (PHASE 5.3 §2 adds BANKEX).
+# Everything index-specific (exchange segment, strike step, static fallback
+# instrument key) is derived from the broker metadata at runtime; this list
+# is only the whitelist of what the bot may trade at all.
+VALID_OPTION_INDICES = ["NIFTY50", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"]
+
+# Exchange segment per underlying (informational + tests; the live instrument
+# key ALWAYS comes from the daily-refreshed Upstox instrument master — never
+# from this table).
+INDEX_EXCHANGE = {
+    "NIFTY50": "NSE",
+    "BANKNIFTY": "NSE",
+    "FINNIFTY": "NSE",
+    "MIDCPNIFTY": "NSE",
+    "SENSEX": "BSE",
+    "BANKEX": "BSE",
+}
+
+# Nominal ATM strike steps, used ONLY as a plausibility cross-check in the
+# contract validator (a resolved ATM strike far off-grid signals a bad
+# chain row). The broker chain response is authoritative for what strikes
+# exist; exchange strike schemes do change, so the validator warns via
+# rejection only for the specific index it knows, and never for unknown ones.
+INDEX_STRIKE_STEP = {
+    "NIFTY50": 50,
+    "BANKNIFTY": 100,
+    "FINNIFTY": 50,
+    "MIDCPNIFTY": 75,
+    "SENSEX": 100,
+    "BANKEX": 100,
+}
 
 _UNIVERSE_KEY = "universe_config_json"
 

@@ -39,6 +39,17 @@ logger = logging.getLogger(__name__)
 INSTRUMENT_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
 REFRESH_TTL_SECONDS = 24 * 60 * 60  # matches Upstox's own daily refresh cadence
 
+# PHASE 5.3 §4: one pooled keep-alive session per process instead of a new
+# connection per daily refresh (large download — handshake cost matters).
+_SHARED_HTTP_SESSION: Any = None
+
+
+def _shared_session() -> Any:
+    global _SHARED_HTTP_SESSION
+    if _SHARED_HTTP_SESSION is None and requests is not None:
+        _SHARED_HTTP_SESSION = requests.Session()
+    return _SHARED_HTTP_SESSION
+
 # Segments/instrument_types we actually need — filtering these out of the
 # full multi-exchange file (which also includes F&O, MCX, etc.) keeps the
 # in-memory lookup small.
@@ -59,8 +70,9 @@ class InstrumentMaster:
         return (time.monotonic() - self._fetched_at) > REFRESH_TTL_SECONDS
 
     def _fetch_and_parse(self) -> Dict[str, str]:
-        if requests is not None:
-            resp = requests.get(INSTRUMENT_MASTER_URL, timeout=self.timeout)
+        session = _shared_session()
+        if session is not None:
+            resp = session.get(INSTRUMENT_MASTER_URL, timeout=self.timeout)
             resp.raise_for_status()
             content = resp.content
         else:

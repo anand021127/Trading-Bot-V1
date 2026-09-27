@@ -107,10 +107,20 @@ class RiskContext:
     daily_loss_pct: Optional[float] = None
     kill_switch: bool = False
     kill_switch_level: str = "OFF"
-    reconciliation_ok: bool = True
+    # PHASE 5.2 §5: REAL reconciliation state — True (ok), False (failed),
+    # or None (not yet checked). Never fabricated by the caller.
+    reconciliation_ok: Optional[bool] = None
     max_positions: Optional[int] = None
     max_daily_trades: Optional[int] = None
     max_daily_loss_pct: Optional[float] = None
+
+    @property
+    def reconciliation_status(self) -> str:
+        if self.reconciliation_ok is True:
+            return "OK"
+        if self.reconciliation_ok is False:
+            return "FAILED"
+        return "UNKNOWN"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -122,6 +132,7 @@ class RiskContext:
             "kill_switch_active": self.kill_switch,
             "kill_switch_level": self.kill_switch_level,
             "reconciliation_ok": self.reconciliation_ok,
+            "reconciliation_status": self.reconciliation_status,
             "max_positions": self.max_positions,
             "max_daily_trades": self.max_daily_trades,
             "max_daily_loss_pct": self.max_daily_loss_pct,
@@ -257,7 +268,10 @@ def build_market_context(
         "market_timestamp": last_ts or "",
         "data_freshness": {
             "candles_fresh": bool(candles_fresh),
-            "candle_age_seconds": _round(candle_age_seconds, 1),
+            # PHASE 5.2 §3: the numeric age is deliberately NOT part of the
+            # AI snapshot — it changes every scan tick and would poison the
+            # input_snapshot_hash, defeating setup-level decision reuse.
+            # Freshness is carried by the boolean + the bar's timestamp.
         },
         "strategy_conditions": conditions,
         "pullback_conditions": pullback_conditions,

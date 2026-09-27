@@ -3,6 +3,34 @@
 Operating assumption: PAPER MODE. Timezone: IST (Asia/Kolkata). DB:
 `data/trading_bot.db` (WAL). Worker heartbeat keys live in the `settings` table.
 
+## 0. Operations dashboard & control plane (PHASE 5.3)
+
+The one-screen operational view is the **Operations** page (`/operations`,
+served by `GET /api/bot/operations`) — mode, strategy, AI, broker, market
+session, API/data health, reconciliation state+age, kill switch, and the
+LIVE readiness verdict with exact blocked reasons, refreshed every 5 s.
+
+Server-side controls (all guarded by `CONTROL_TOKEN` when set — see
+`backend/api/control_auth.py`):
+
+* `POST /api/bot/ai-toggle` `{"enabled": true|false}` — flips the AI trading
+  decision layer at runtime (DB override read EVERY scan tick; no restart).
+  AI ON never bypasses hard risk.
+* `POST /api/bot/mode` `{"mode": "paper"|"live"}` — PAPER is always allowed;
+  LIVE is evaluated by `backend/execution/live_gate.py` against REAL state
+  (auth, funds, instrument master, reconciliation fresh-OK, risk config,
+  kill switch clear, strategy == V8_D_PULLBACK_ATM, all six underlyings
+  resolvable). LIVE BLOCKED lists the exact failing checks. Even when
+  LIVE READY, arming execution still requires a worker restart with
+  `TRADING_MODE=live` — two-step arming, a UI click alone never arms live.
+* `POST /api/bot/kill` / `/api/bot/reset-kill` — unchanged (§11 runbook below).
+
+AI scan-budget: `AI_DECISION_BUDGET_SECONDS` (default 10) bounds how long a
+scan may block on one AI decision; a slow decision returns typed WAIT and
+resolves via setup dedup on a later tick. `AI_DECISION_MAX_TOKENS=64` bounds
+inference worst-case.
+
+
 Fast triage one-liners:
 
 ```bash

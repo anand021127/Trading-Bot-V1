@@ -131,13 +131,13 @@ Per-decision provider/model/latency/timeout/success/error-code telemetry is stor
 
 - `TRADING_MODE=paper`, `TRADING_STRATEGY=V8_D_PULLBACK_ATM`, `UPSTOX_ORDER_PRODUCT=I` — **unchanged** (verified).
 - V8-D strategy parameters — **unchanged** (verified; no edits to `v8d_strategy.py`).
-- New env (all in `.env.example`, all default-safe): `AI_DECISION_ENABLED=false`, `AI_DECISION_PROVIDER=ollama`, `AI_DECISION_MODEL=llama3.2:1b`, `AI_DECISION_BASE_URL=http://localhost:11434/v1`, `AI_DECISION_TIMEOUT_SECONDS=20`, `AI_DECISION_TEMPERATURE=0`, `AI_DECISION_MAX_TOKENS=128`.
-- Enabling the AI layer is an env change + worker restart — **no runtime API toggle exists**.
+- New env (all in `.env.example`, all default-safe): `AI_DECISION_ENABLED=false`, `AI_DECISION_PROVIDER=ollama`, `AI_DECISION_MODEL=llama3.2:1b`, `AI_DECISION_BASE_URL=http://localhost:11434/v1`, `AI_DECISION_TIMEOUT_SECONDS=20`, `AI_DECISION_TEMPERATURE=0`, `AI_DECISION_MAX_TOKENS=64` (PHASE 5.3: bounds worst-case inference; truncated JSON fails closed), `AI_DECISION_BUDGET_SECONDS=10` (PHASE 5.3: max seconds a scan may block on one AI decision).
+- PHASE 5.3: enabling the AI layer no longer requires editing .env — `POST /api/bot/ai-toggle` persists a DB override read every scan tick (no restart); the env var remains the default. See the Operations dashboard (`/operations`).
 
 ## 14. Remaining limitations
 
 1. **llama3.2:1b is a small model**: its reasoning is shallow (it echoes context, gives high confidence, and needed contract-side guardrails against schema echo and repetition loops). It is a *demonstration-grade* decision gate, not a proven alpha source. A larger local model (e.g. llama3.1:8b) works via the same adapter but is slower.
-2. **Cold-start latency** can exceed the timeout after model unload; the first decision may fail closed (`AI_TIMEOUT`). Mitigations: `ollama keep_alive`, or a warm-up call at worker start (future work).
+2. **Cold-start latency** can exceed the timeout after model unload; the first decision fails closed (`AI_TIMEOUT`). Mitigations (implemented): `warm_up()` preload at engine start, `keep_alive=30m`, `AI_DECISION_MAX_TOKENS=64`, `AI_DECISION_BUDGET_SECONDS=10` so a slow decision never blocks a scan while holding a stale signal (typed WAIT + dedup-replay).
 3. **AI backtest remains unavailable** (see §10) — no AI-assisted performance numbers exist or are claimed.
 4. **Confidence is not calibrated** — displayed as "AI confidence" only, never probability of profit.
 5. **No profitability claims** of any kind are made — this phase establishes architecture and correctness only.

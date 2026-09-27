@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import json
 import glob
+import bisect
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -129,6 +130,21 @@ class HistoricalOptionsDataLoader:
         self._lookup_index: Dict[Tuple[str, str, float, str], str] = {}
         # contract_key -> contract metadata (lot_size, underlying, etc.)
         self._contracts_metadata: Dict[str, Dict[str, Any]] = {}
+
+        # PHASE 5.2 §17 per-contract acceleration structures (pure speed;
+        # contents of every returned snapshot are unchanged):
+        #   _contract_ts_sorted: contract_key -> [(timestamp, record), ...] sorted
+        #   _contract_days: contract_key -> {date_str: [records sorted by ts]}
+        #   _contract_atr: contract_key -> {timestamp: ATR(14) at/before ts}
+        #     (Wilder recursion carried forward incrementally per contract)
+        self._contract_ts_sorted: Dict[str, list] = {}
+        self._contract_days: Dict[str, Dict[str, list]] = {}
+        self._contract_atr: Dict[str, Dict[str, float]] = {}
+        self._atr_period = 14
+        # (underlying, option_type) -> [(expiry, strike, lookup_key), ...] sorted
+        self._chain_lookup_cache: Dict[tuple, list] = {}
+        # (contract_key, date_str) -> [timestamps] for bisect day lookups
+        self._day_ts_index: Dict[tuple, list] = {}
         
         # 1. Load user specified data directory if provided
         if data_directory and os.path.exists(data_directory):
@@ -179,12 +195,72 @@ class HistoricalOptionsDataLoader:
                 record.option_type.upper(),
             )
             self._lookup_index[lookup_tuple] = contract_key
+            # invalidate acceleration structures for this contract
+            self._contract_ts_sorted.pop(contract_key, None)
+            self._contract_days.pop(contract_key, None)
+            self._contract_atr.pop(contract_key, None)
             
         self._contracts_data[contract_key].append(record)
         self._timestamp_index[(contract_key, record.timestamp)] = record
         norm_ts = record.timestamp.replace(" ", "T")
         if norm_ts != record.timestamp:
             self._timestamp_index[(contract_key, norm_ts)] = record
+
+    def _ensure_contract_accelerators(self, contract_key: str) -> None:
+        """Build (once) the sorted-timestamp list, per-day buckets and the
+        incremental Wilder-ATR table for a contract. Pure derived state —
+        rebuilt from the same records, so outputs are identical (§17)."""
+        if contract_key in self._contract_ts_sorted:
+            return
+        records = self._contracts_data.get(contract_key, [])
+        ordered = sorted(records, key=lambda r: r.timestamp or "")
+        self._contract_ts_sorted[contract_key] = ordered
+        days: Dict[str, list] = {}
+        for r in ordered:
+            days.setdefault((r.timestamp or "")[:10], []).append(r)
+        self._contract_days[contract_key] = days
+        # Wilder ATR carried forward once over the ordered history — the
+        # same arithmetic the previous per-bar recompute performed, cached.
+        atr_table: Dict[str, float] = {}
+        highs = [float(r.high) for r in ordered]
+        lows = [float(r.low) for r in ordered]
+        closes = [float(r.close) for r in ordered]
+        n = len(closes)
+        if n >= 2 and len(highs) == n and len(lows) == n:
+            period = self._atr_period
+            trs = []
+            for i in range(1, n):
+                trs.append(max(
+                    highs[i] - lows[i],
+                    abs(highs[i] - closes[i - 1]),
+                    abs(lows[i] - closes[i - 1]),
+                ))
+            if len(trs) >= period:
+                atr = sum(trs[:period]) / period
+                # match calculate_atr rounding (6dp) for identical values
+                atr_table[ordered[period].timestamp or ""] = round(atr, 6)
+                for i in range(period, len(trs)):
+                    atr = ((period - 1) * atr + trs[i]) / period
+                    ts_i = ordered[i + 1].timestamp or ""
+                    atr_table[ts_i] = round(atr, 6)
+        self._contract_atr[contract_key] = atr_table
+
+    def _atr_at_or_before(self, contract_key: str, timestamp: str) -> float:
+        """Cached ATR(14) at or before `timestamp` (never future bars)."""
+        self._ensure_contract_accelerators(contract_key)
+        table = self._contract_atr.get(contract_key) or {}
+        if timestamp in table:
+            return table[timestamp]
+        best = 0.0
+        best_ts = ""
+        ordered = self._contract_ts_sorted.get(contract_key) or []
+        # walk the table keys via the ordered list for a bisectable lookup
+        atr_keys = sorted(table.keys())
+        if atr_keys:
+            idx = bisect.bisect_right(atr_keys, timestamp) - 1
+            if idx >= 0:
+                return table[atr_keys[idx]]
+        return best
 
     def load_contract_candles(
         self,
@@ -471,12 +547,21 @@ class HistoricalOptionsDataLoader:
         chain: List[Dict[str, Any]] = []
 
         for opt_type in ("CE", "PE"):
-            matching = [
-                k for k in self._lookup_index.keys()
-                if k[0] == und_key and k[3] == opt_type and k[1] >= target_date_str
-            ]
-            if exact_atm_only:
-                matching = [k for k in matching if abs(k[2] - atm_strike) < 0.01]
+            # PHASE 5.2 §17: per-(underlying, type) expiry-sorted key cache
+            # replaces the full index rescan on every bar.
+            cache_key = (und_key, opt_type)
+            candidates = self._chain_lookup_cache.get(cache_key)
+            if candidates is None:
+                candidates = sorted(
+                    (k for k in self._lookup_index.keys()
+                     if k[0] == und_key and k[3] == opt_type),
+                    key=lambda x: (x[1], x[2]),
+                )
+                self._chain_lookup_cache[cache_key] = candidates
+            matching = [k for k in candidates
+                        if k[1] >= target_date_str and abs(k[2] - atm_strike) < 0.01] \
+                if exact_atm_only else \
+                [k for k in candidates if k[1] >= target_date_str]
             if not matching:
                 continue
             matching.sort(key=lambda x: (x[1], abs(x[2] - atm_strike)))
@@ -484,45 +569,30 @@ class HistoricalOptionsDataLoader:
             contract_key = self._lookup_index[best]
             expiry_str, strike_val = best[1], best[2]
 
+            self._ensure_contract_accelerators(contract_key)
             rec = self.get_candle_at(contract_key, timestamp)
             if rec is None:
                 # Same calendar day only — still real OHLCV, not interpolated
-                day_candidates = [
-                    r for r in self._contracts_data.get(contract_key, [])
-                    if (r.timestamp or "")[:10] == target_date_str
-                ]
+                # (bisect over the contract's per-day bucket, no full rescan).
+                day_candidates = (self._contract_days.get(contract_key) or {}).get(target_date_str)
                 if not day_candidates:
                     continue
-                # Prefer last candle at or before timestamp on that day
-                day_candidates.sort(key=lambda r: r.timestamp)
-                rec = day_candidates[-1]
-                for r in day_candidates:
-                    if r.timestamp <= timestamp:
-                        rec = r
-                    else:
-                        break
+                ts_list = self._day_ts_index.get((contract_key, target_date_str))
+                if ts_list is None:
+                    ts_list = [r.timestamp for r in day_candidates]
+                    self._day_ts_index[(contract_key, target_date_str)] = ts_list
+                idx = bisect.bisect_right(ts_list, timestamp) - 1
+                rec = day_candidates[idx] if idx >= 0 else None
 
             if rec is None or float(rec.close) <= 0:
                 continue
 
             meta = self._contracts_metadata.get(contract_key, {})
 
-            # Historical option ATR up to (and including) current timestamp only.
-            # Uses real option OHLCV; never future bars or synthetic prices.
-            option_atr = 0.0
-            atr_period = 14
-            hist = [
-                r for r in self._contracts_data.get(contract_key, [])
-                if (r.timestamp or "") <= timestamp
-            ]
-            hist.sort(key=lambda r: r.timestamp or "")
-            if len(hist) >= atr_period + 1:
-                highs = [float(r.high) for r in hist]
-                lows = [float(r.low) for r in hist]
-                closes = [float(r.close) for r in hist]
-                atr_vals = calculate_atr(highs, lows, closes, atr_period)
-                if atr_vals:
-                    option_atr = float(atr_vals[-1])
+            # Historical option ATR at/before the current timestamp only —
+            # served from the contract's incremental Wilder-ATR cache
+            # (identical values to the previous full recompute; no lookahead).
+            option_atr = self._atr_at_or_before(contract_key, timestamp)
 
             chain.append({
                 "strike": float(strike_val),

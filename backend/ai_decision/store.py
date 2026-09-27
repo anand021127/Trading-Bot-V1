@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from typing import Any, Dict, Optional
 
 
@@ -48,6 +49,15 @@ CREATE INDEX IF NOT EXISTS ix_ai_decisions_signal
     ON ai_decisions (signal_id);
 """
 
+# PHASE 5.2 §2: additive migration — setup identity column for dedup
+# lookups (signal_id stays the pipeline signal id, so decisions still join
+# to executed trades).
+_MIGRATE = """
+ALTER TABLE ai_decisions ADD COLUMN setup_id TEXT;
+CREATE INDEX IF NOT EXISTS ix_ai_decisions_setup
+    ON ai_decisions (setup_id);
+"""
+
 
 def make_decision_idempotency_key(
     *, signal_id: str, input_snapshot_hash: str, model_provider: str, model_name: str, model_version: str
@@ -57,41 +67,69 @@ def make_decision_idempotency_key(
 
 
 class AIDecisionStore:
-    """SQLite-backed store for AI trading decisions + latency telemetry."""
+    """SQLite-backed store for AI trading decisions + latency telemetry.
+
+    PHASE 5.2 §4: persistence is STRICT — save_decision returns False when
+    the row could not be durably written (DB unavailable, locked, schema
+    error, write failure). The engine turns any such failure into
+    AI_DECISION_PERSISTENCE_FAILED → NO TRADE: an AI approval may NEVER
+    exist only in memory (a trade must remain auditable from stored state).
+    Writes are serialized with a lock (API threads + worker share the DB).
+    """
 
     def __init__(self, db: Any) -> None:
         # `db` is the runtime's DatabaseManager (settings table carrier). We
         # create the additive table on the same connection.
         self.db = db
+        self._lock = threading.Lock()
+        self.available: bool = True   # False after any hard store failure
         try:
             conn = db._connect()
             conn.executescript(_SCHEMA)
             conn.commit()
         except Exception:
-            # Table creation must never break the trading loop; the engine
-            # treats store failures as non-fatal (decision is still returned).
-            pass
+            # Schema creation failure does not crash construction, but the
+            # store is marked unavailable — the engine will fail closed.
+            self.available = False
+            return
+        try:
+            # Idempotent additive migration for pre-5.2 databases.
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(ai_decisions)").fetchall()}
+            if "setup_id" not in cols:
+                conn.executescript(_MIGRATE)
+                conn.commit()
+        except Exception:
+            self.available = False
 
     # ── idempotent decision persistence ───────────────────────────────
     def save_decision(self, decision_dict: Dict[str, Any], idempotency_key: str,
-                      signal_id: str, latency_ms: Optional[float] = None) -> bool:
-        """Insert a decision. Returns False if an identical evaluation
-        (same idempotency key) was already stored — the caller must replay
-        that stored decision rather than keeping a second one."""
-        try:
-            conn = self.db._connect()
+                      signal_id: str, latency_ms: Optional[float] = None,
+                      setup_id: str = "") -> bool:
+        """Durably insert a decision. STRICT result semantics:
+
+        True  → row committed; the decision may proceed (subject to the
+                normal hard risk gates).
+        False → NOT persisted (already-stored duplicate, OR any storage
+                failure: DB unavailable / locked / schema error / write
+                failure). The caller must treat False as unsaved: an
+                APPROVE that could not be persisted MUST NOT execute
+                (AI_DECISION_PERSISTENCE_FAILED → NO TRADE).
+        """
+        with self._lock:
             try:
+                conn = self.db._connect()
                 conn.execute(
                     """INSERT INTO ai_decisions (
-                         decision_id, idempotency_key, signal_id, strategy, symbol,
-                         decision, confidence, reason_codes, reasoning,
+                         decision_id, idempotency_key, signal_id, setup_id, strategy,
+                         symbol, decision, confidence, reason_codes, reasoning,
                          model_provider, model_name, model_version,
                          input_snapshot_hash, market_timestamp, created_at, latency_ms
-                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         str(decision_dict.get("decision_id") or ""),
                         idempotency_key,
                         str(signal_id or ""),
+                        str(setup_id or ""),
                         str(decision_dict.get("strategy") or ""),
                         str(decision_dict.get("symbol") or ""),
                         str(decision_dict.get("decision") or ""),
@@ -110,11 +148,21 @@ class AIDecisionStore:
                 conn.commit()
                 return True
             except sqlite3.IntegrityError:
-                return False  # duplicate evaluation — replay the stored one
-        except Exception:
-            return True  # store failure must never crash the trading loop
+                # Same idempotency key already stored — treat as already
+                # persisted (the caller replays the stored row).
+                return True
+            except sqlite3.OperationalError:
+                # locked / unavailable / timeout / malformed schema
+                self.available = False
+                return False
+            except Exception:
+                self.available = False
+                return False
 
     def get_decision_by_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
+        """Fetch a stored decision. Read failures return None (the engine
+        then treats the evaluation as unseen and re-evaluates; a write will
+        surface any hard store failure)."""
         try:
             row = self.db._connect().execute(
                 "SELECT * FROM ai_decisions WHERE idempotency_key=?", (idempotency_key,)
@@ -149,6 +197,26 @@ class AIDecisionStore:
         try:
             row = self.db._connect().execute(
                 "SELECT * FROM ai_decisions WHERE decision_id=?", (decision_id,)
+            ).fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        return self.get_decision_by_key(row["idempotency_key"])
+
+    def get_latest_setup_decision(self, setup_id: str) -> Optional[Dict[str, Any]]:
+        """Most recent stored decision for a SETUP identity (PHASE 5.2 §2).
+
+        The setup id is stored in the signal_id column (the engine keys
+        idempotency on setup identity). Used to reuse an earlier verdict for
+        the same continuing opportunity without re-calling the provider.
+        Read failures return None (the engine then re-evaluates).
+        """
+        try:
+            row = self.db._connect().execute(
+                """SELECT idempotency_key FROM ai_decisions
+                   WHERE setup_id=? ORDER BY created_at DESC LIMIT 1""",
+                (str(setup_id or ""),),
             ).fetchone()
         except Exception:
             return None

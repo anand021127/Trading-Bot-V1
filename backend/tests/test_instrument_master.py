@@ -30,6 +30,22 @@ def _fake_response(rows: list) -> MagicMock:
     return resp
 
 
+def _patch_http(rows: list):
+    """Patch the pooled keep-alive HTTP session used by the instrument
+    master (PHASE 5.3 §4). The master fetches through a shared requests
+    Session now, so the HTTP seam is the session, not module-level
+    requests.get — a test must never touch the real CDN either way."""
+    session = MagicMock()
+    session.get.return_value = _fake_response(rows)
+    return patch("backend.broker.instrument_master._shared_session", return_value=session)
+
+
+def _patch_http_failure(exc: Exception):
+    session = MagicMock()
+    session.get.side_effect = exc
+    return patch("backend.broker.instrument_master._shared_session", return_value=session)
+
+
 SAMPLE_ROWS = [
     {"segment": "MCX_FO", "trading_symbol": "GOLD", "instrument_key": "MCX|IGNORED"},
     {"segment": "NSE_INDEX", "trading_symbol": "NIFTY50", "instrument_key": "NSE_INDEX|Nifty 50"},
@@ -40,24 +56,24 @@ SAMPLE_ROWS = [
 class TestInstrumentMaster:
     def test_fetches_and_resolves_current_instrument_key(self) -> None:
         master = InstrumentMaster()
-        with patch("requests.get", return_value=_fake_response(SAMPLE_ROWS)):
+        with _patch_http(SAMPLE_ROWS):
             key = master.resolve("NIFTY50")
         assert key == "NSE_INDEX|Nifty 50"
 
     def test_filters_out_irrelevant_segments(self) -> None:
         master = InstrumentMaster()
-        with patch("requests.get", return_value=_fake_response(SAMPLE_ROWS)):
+        with _patch_http(SAMPLE_ROWS):
             master.ensure_fresh()
         assert master.resolve("GOLD") is None
 
     def test_unknown_symbol_returns_none_not_a_guess(self) -> None:
         master = InstrumentMaster()
-        with patch("requests.get", return_value=_fake_response(SAMPLE_ROWS)):
+        with _patch_http(SAMPLE_ROWS):
             assert master.resolve("TOTALLY_UNKNOWN_SYMBOL") is None
 
     def test_fetch_failure_does_not_raise(self) -> None:
         master = InstrumentMaster()
-        with patch("requests.get", side_effect=ConnectionError("network down")):
+        with _patch_http_failure(ConnectionError("network down")):
             master.ensure_fresh()  # must not raise
         status = master.status()
         assert status["last_error"] is not None
@@ -65,25 +81,25 @@ class TestInstrumentMaster:
 
     def test_caches_within_ttl_does_not_refetch(self) -> None:
         master = InstrumentMaster()
-        with patch("requests.get", return_value=_fake_response(SAMPLE_ROWS)) as mock_get:
+        with _patch_http(SAMPLE_ROWS) as mock_shared:
             master.resolve("NIFTY50")
             master.resolve("NIFTY50")
             master.resolve("NIFTY26FEBFUT")
-        assert mock_get.call_count == 1  # only fetched once across 3 calls
+        assert mock_shared.return_value.get.call_count == 1  # fetched once
 
     def test_refetches_after_ttl_expires(self) -> None:
         import time
         from backend.broker.instrument_master import REFRESH_TTL_SECONDS
         master = InstrumentMaster()
-        with patch("requests.get", return_value=_fake_response(SAMPLE_ROWS)) as mock_get:
+        with _patch_http(SAMPLE_ROWS) as mock_shared:
             master.resolve("NIFTY50")
             master._fetched_at = time.monotonic() - REFRESH_TTL_SECONDS - 1  # force staleness
             master.resolve("NIFTY50")
-        assert mock_get.call_count == 2
+        assert mock_shared.return_value.get.call_count == 2
 
     def test_status_reports_symbol_count_and_freshness(self) -> None:
         master = InstrumentMaster()
-        with patch("requests.get", return_value=_fake_response(SAMPLE_ROWS)):
+        with _patch_http(SAMPLE_ROWS):
             master.ensure_fresh()
         status = master.status()
         assert status["symbols_loaded"] == 2

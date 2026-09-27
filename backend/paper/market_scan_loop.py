@@ -21,6 +21,7 @@ IST = ZoneInfo("Asia/Kolkata")
 # the hard risk/execution gates that run AFTER it.
 from backend.ai_decision.context import MarketSession, RiskContext
 from backend.ai_decision.decision_engine import apply_ai_decision_gate
+from backend.ai_decision.setup_identity import build_setup_id
 from backend.orders.idempotency import make_signal_id
 
 
@@ -169,6 +170,49 @@ def build_scan_signal_id(sig: Any, expiry: str) -> str:
     )
 
 
+# PHASE 5.3 §6: reconciliation verdicts older than this are STALE — no new
+# trades until a fresh reconcile resolves state. The worker reconciles every
+# 5th tick (~10s), so 15 minutes is generous even across long backfills.
+RECONCILE_MAX_AGE_SECONDS = 15 * 60.0
+
+
+def read_reconciliation_state(runtime: Any) -> tuple:
+    """Read the runtime's persisted reconciliation verdict.
+
+    Returns (state, detail_dict, age_seconds):
+      state: "1" ok · "0" failed · "" never checked
+      age_seconds: seconds since the last reconcile CHECK, or None when the
+        verdict carries no timestamp (legacy row / never persisted).
+    """
+    import json as _json
+    try:
+        state = str(runtime.db.get_setting("paper_reconcile_ok", "") or "")
+    except Exception:
+        state = ""
+    detail: Dict[str, Any] = {}
+    try:
+        raw = runtime.db.get_setting("paper_reconcile_detail", "") or ""
+        detail = _json.loads(raw) if raw else {}
+    except Exception:
+        detail = {}
+    age: Optional[float] = None
+    checked_at = str(detail.get("checked_at") or "")
+    if not checked_at:
+        try:
+            checked_at = str(runtime.db.get_setting("paper_reconcile_checked_at", "") or "")
+        except Exception:
+            checked_at = ""
+    if checked_at:
+        try:
+            ca = datetime.fromisoformat(checked_at)
+            if ca.tzinfo is None:
+                ca = ca.replace(tzinfo=timezone.utc)
+            age = max(0.0, (datetime.now(timezone.utc) - ca).total_seconds())
+        except Exception:
+            age = None
+    return state, detail, age
+
+
 class PaperMarketScanner:
     """One scan cycle: candles → V8-D → AI decision → optional paper entry."""
 
@@ -211,6 +255,27 @@ class PaperMarketScanner:
         # holidays (Muhurat special sessions are honored by the calendar).
         if not _is_trading_session(now):
             return ScanResult(False, False, "market_closed")
+        # PHASE 5.2 §5 + 5.3 §6: read the runtime's persisted reconciliation
+        # verdict ONCE per scan (with age). "1"=ok, "0"=failed,
+        # ""/missing=not yet checked, stale=ok-but-too-old.
+        reconciliation_state, rec_detail, rec_age = read_reconciliation_state(runtime)
+        if reconciliation_state == "1" and rec_age is not None and rec_age > RECONCILE_MAX_AGE_SECONDS:
+            return ScanResult(
+                True, False, "AI_NO_TRADE:RECONCILIATION_STALE", signal="BUY",
+                details={
+                    "reconciliation_age_seconds": round(rec_age, 1),
+                    "max_age_seconds": RECONCILE_MAX_AGE_SECONDS,
+                    "rejection": ["RECONCILIATION_STALE"],
+                },
+            )
+        # PHASE 5.3 §7: CURRENT equity, never the frozen startup capital.
+        # The runtime carries realized P&L-adjusted equity (persisted across
+        # restarts); the constructor default is only a last-resort fallback.
+        try:
+            current_equity = float(getattr(runtime, "realized_equity", 0.0) or 0.0) \
+                or float(self.account_equity)
+        except (TypeError, ValueError):
+            current_equity = float(self.account_equity)
         try:
             candles = self.data.get_current_candles(self.underlying, self.interval, limit=120)
         except Exception as exc:
@@ -255,10 +320,13 @@ class PaperMarketScanner:
                 underlying_candles=candles,
                 spot_price=spot,
                 option_chain=chain,
-                account_equity=self.account_equity,
+                account_equity=current_equity,
                 trades_today=trades_today,
                 kill_switch_active=kill_switch_active,
-                reconciliation_ok=True,
+                # PHASE 5.2 §5: real reconciliation state, never a hardcoded
+                # True. "1" = ok; "0" or unknown/pending = NOT ok (the V8-D
+                # strategy itself rejects on mismatch or pending).
+                reconciliation_ok=(reconciliation_state == "1"),
             )
         except Exception as exc:
             logger.exception("V8-D evaluate failed")
@@ -284,19 +352,59 @@ class PaperMarketScanner:
         # Ensure contract carries expiry for validator
         payload["expiry"] = expiry
 
-        # ── AI TRADING DECISION gate (PHASE 5.1 §6) ───────────────────
+        # ── AI TRADING DECISION gate (PHASE 5.1 §6, 5.3 §8) ───────────
         # V8-D produced a BUY signal; the AI decision layer now evaluates it
         # BEFORE the hard risk/execution gates. REJECT/WAIT/provider failure
         # here means NO paper order regardless of the V8-D signal. The gate
         # only consumes the structured AITradingDecision — it never calls
         # the broker — and hard risk still runs after it inside
         # runtime.submit_entry (kill switch → pipeline → sizer).
-        if self.ai_engine is not None and getattr(self.ai_engine, "enabled", False):
+        #
+        # PHASE 5.3 §8: the operator toggle (control API → DB override)
+        # wins over the env-configured default and is re-read EVERY scan,
+        # so the UI switch takes effect within one tick without a restart.
+        ai_on = False
+        if self.ai_engine is not None:
+            try:
+                override = str(runtime.db.get_setting("ai_decision_enabled_override", "") or "")
+            except Exception:
+                override = ""
+            if override == "1":
+                ai_on = True
+            elif override == "0":
+                ai_on = False
+            else:
+                ai_on = bool(getattr(self.ai_engine, "enabled", False))
+        if self.ai_engine is not None and ai_on:
             contract = (getattr(sig, "indicators", None) or {}).get("selected_contract") or {}
             try:
                 kill_level = runtime.kill.level()
             except Exception:
                 kill_level = "UNKNOWN"
+
+            # PHASE 5.2 §5: REAL reconciliation state — read from the
+            # runtime's own last reconcile() verdict (persisted by the
+            # worker every 5th tick), never a hardcoded True.
+            rec_ok: Optional[bool]
+            if reconciliation_state == "1":
+                rec_ok = True
+            elif reconciliation_state == "0":
+                rec_ok = False
+            else:
+                rec_ok = None  # reconciliation not yet run this session
+
+            # Reconciliation failure → do NOT call the AI at all. The final
+            # decision is a typed NO-TRADE with RECONCILIATION_NOT_READY.
+            if rec_ok is False:
+                return ScanResult(
+                    True, False, "AI_NO_TRADE:RECONCILIATION_NOT_READY", signal="BUY",
+                    details={
+                        "ai_decision": "REJECT",
+                        "ai_reason_codes": ["RECONCILIATION_NOT_READY"],
+                        "rejection": list(getattr(sig, "rejected_reasons", None) or []),
+                    },
+                )
+
             risk_ctx = RiskContext(
                 equity=float(getattr(runtime, "realized_equity", 0.0) or 0.0),
                 open_positions=len([
@@ -307,13 +415,24 @@ class PaperMarketScanner:
                 daily_realized_pnl=float(getattr(runtime, "daily_realized_pnl", 0.0) or 0.0),
                 kill_switch=bool(kill_switch_active) or kill_level != "OFF",
                 kill_switch_level=str(kill_level),
-                reconciliation_ok=True,  # scanner already gates on this before V8-D
+                reconciliation_ok=rec_ok,
             )
             session = MarketSession(open=True, is_trading_day=True, label="PAPER_SCAN")
             sig_id = build_scan_signal_id(sig, expiry)
             self._last_signal_id = sig_id
-            ai_decision = self.ai_engine.decide(
+            # PHASE 5.3 §12/§13: bounded-blocking decide. The scan never
+            # holds a live signal longer than AI_DECISION_BUDGET_SECONDS
+            # (≤ provider timeout): a slow decision becomes typed WAIT this
+            # tick and resolves via dedup-replay on a later scan — the
+            # signal is never traded on stale data while the model thinks.
+            try:
+                budget = float(os.environ.get("AI_DECISION_BUDGET_SECONDS", "10"))
+            except (TypeError, ValueError):
+                budget = 10.0
+            ai_decision = self.ai_engine.decide_with_budget(
+                max_wait_seconds=budget,
                 signal_id=sig_id,
+                setup_id=build_setup_id(signal=sig, contract=contract, expiry=expiry, candles=candles),
                 signal=sig,
                 contract=contract,
                 expiry=expiry,

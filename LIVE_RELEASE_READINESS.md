@@ -2,6 +2,39 @@
 
 Date: 2026-09-26 · Baseline: Phase 4 FINAL · Verdicts: **PASS / FAIL / BLOCKED / NOT TESTABLE**, each with evidence.
 
+---
+
+# PHASE 5.3 ADDENDUM — FINAL PRODUCTION READINESS MATRIX (2026-09-27)
+
+Verdicts only PASS / FAIL / BLOCKED / NOT TESTED. Nothing was upgraded without evidence; see `PHASE5_3_FINAL_REPORT.md` for details.
+
+| # | Area | Verdict | Evidence / exact reason |
+|---|---|---|---|
+| 1 | Single execution path (strategy→AI→risk→sizer→pipeline→broker) | **TESTED · PASS** | 970 tests green incl. single-execution-path AST guard; parity test proves paper/live identical pre-broker decisions |
+| 2 | Order state machine (CREATED…UNKNOWN, CANCEL_REQUESTED, partial fills, avg price) | **TESTED · PASS** | `order_state` transition/terminal tests; UNKNOWN never auto-promoted; FillAggregator tracks requested/filled/remaining/avg |
+| 3 | Duplicate-order protection | **TESTED · PASS** | POST removed from HTTP retry allowed_methods (was a real duplicate risk on ambiguous 5xx); durable intent store; SUBMISSION_UNKNOWN reconcile-first |
+| 4 | Restart/crash safety | **TESTED · PASS** | idempotent start, durable intents + equity snapshot + ledger hydration; no duplicate order on restart (regression suite) |
+| 5 | Reconciliation freshness gate | **TESTED · PASS** | OK/FAILED/never/STALE(>15 min) all no-trade; age persisted (`checked_at`) and exposed via `/api/bot/operations` |
+| 6 | Current equity flow (no frozen startup capital) | **TESTED · PASS** | scan path uses runtime.realized_equity (persisted, P&L-adjusted); test asserts 104 250 flows to V8-D |
+| 7 | BANKEX as 6th index | **TESTED · PASS (code)** | universe gate + BSE_FO segment authority + master-resolved lot size/tick/expiry; 8 dedicated tests; never substitutes/guesses |
+| 8 | BANKEX historical options backtest | **BLOCKED** | local historical options cache EMPTY (0 files) — engine refuses honestly; no synthetic data; populate cache to unlock |
+| 9 | AI trading decision layer (fail-closed, dedup, persistence) | **TESTED · PASS** | 56 AI tests + budget tests; persistence failure → NO TRADE; same-setup → 1 inference |
+| 10 | AI latency for live | **TESTED · PASS with caveat** | warm median 9 171 ms after max_tokens=64 (−42% measured); scan budget 10 s → typed WAIT; **caveat:** CPU-bound, ~9 s is real — AI OFF switch provided |
+| 11 | Operations control plane (mode/AI/kill, server-enforced) | **TESTED · PASS** | `/api/bot/operations`, `/ai-toggle`, `/mode`; CONTROL_TOKEN guard; two-step live arming (UI click alone never arms live) |
+| 12 | LIVE readiness gate | **TESTED · PASS (logic)** | 10 real-state checks with exact blocked reasons (`live_gate.py`); refuses LIVE until every condition holds |
+| 13 | Upstox API integration | **TESTED · PASS (offline) / BLOCKED (live network)** | offline guard blocks real HTTP in tests by design; live read-only exercise (profile/funds/chain) not yet performed |
+| 14 | LIVE BROKER E2E (real order) | **BLOCKED** | no sandbox available; real-money test orders prohibited by phase rules — nothing fabricated |
+| 15 | Live signal→order latency p50/p95/p99 | **NOT TESTED** | requires live broker RTT; runbook documents what to record at enablement |
+| 16 | Security (secrets, tokens, control auth) | **TESTED · PASS** | secret scan 373 files: 0 hits; tokens fingerprint-only in logs; control endpoints authenticated |
+| 17 | Frontend build/tsc/lint | **TESTED · PASS** | npm ci/build ✓; tsc 0 errors; lint 0 errors (21 pre-existing warnings) |
+| 18 | Profitability | **NOT ESTABLISHED** | no claim in either direction; AI backtest honestly UNAVAILABLE |
+
+**Bottom line:** PAPER **READY**. LIVE **NOT CLAIMED** — engineering complete and gated; live readiness becomes evaluable only with a real Upstox token (auth+funds) and fresh reconciliation, then two-step arming per the runbook.
+
+---
+
+# ORIGINAL PHASE 5 DOCUMENT (superseded verdicts below; see addendum above)
+
 ## Headline verdicts
 
 > **PAPER READY — YES.** Hardened, deterministic, restart-safe, fully tested (828 backend + 30 integration tests, 0 failures).

@@ -899,7 +899,10 @@ def test_store_schema_additive_and_independent(clean_env, tmp_path):
         signal_id="s", input_snapshot_hash="h", model_provider="p",
         model_name="m", model_version="v")
     assert ai_store.save_decision(d.to_dict(), key, "s") is True
-    assert ai_store.save_decision(d.to_dict(), key, "s") is False  # duplicate
+    # PHASE 5.2 §4 semantics: a duplicate idempotency key means the decision
+    # IS already persisted (True). False is reserved for persistence
+    # FAILURES (which must fail an APPROVE closed).
+    assert ai_store.save_decision(d.to_dict(), key, "s") is True  # already stored
     order_store.remember_intent("sigX", {"a": 1})
     assert order_store.get("sigX") is not None
     assert ai_store.get_decision_by_key(key)["decision"] == "REJECT"

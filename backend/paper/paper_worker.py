@@ -145,13 +145,35 @@ class PaperWorker:
             logger.exception("Manual exit queue drain failed")
             self._write_hb("manual_exit_error", str(exc))
 
-        # Reconcile periodically
+        # Reconcile periodically. PHASE 5.2 §5: the verdict is PERSISTED so
+        # the AI decision layer reads the REAL reconciliation state (never a
+        # hardcoded ok) — a failed reconcile also blocks new AI evaluation.
         if self._loop % 5 == 0:
             try:
                 rec = self.runtime.reconcile()
-                if not rec.get("ok"):
+                ok = bool(rec.get("ok"))
+                self.db.save_setting("paper_reconcile_ok", "1" if ok else "0")
+                self.db.save_setting(
+                    "paper_reconcile_detail",
+                    __import__("json").dumps({"ok": ok, "action": rec.get("action"),
+                                              "error": rec.get("error"),
+                                              "checked_at": __import__("datetime").datetime.now(
+                                                  __import__("datetime").timezone.utc).isoformat()},
+                                             default=str)[:1000],
+                )
+                if not ok:
                     logger.warning("Reconcile not ok: %s", rec)
             except Exception as exc:
+                # Reconcile itself failed → state UNKNOWN: treat as not-ok
+                # for AI evaluation purposes (fail closed, §5).
+                try:
+                    self.db.save_setting("paper_reconcile_ok", "0")
+                    self.db.save_setting("paper_reconcile_detail",
+                                         __import__("json").dumps({"ok": False, "error": type(exc).__name__,
+                                                                   "checked_at": __import__("datetime").datetime.now(
+                                                                       __import__("datetime").timezone.utc).isoformat()}))
+                except Exception:
+                    pass
                 logger.exception("Reconcile error")
                 self._write_hb("reconcile_error", str(exc))
                 return
@@ -288,6 +310,30 @@ class PaperWorker:
                 continue
             self.runtime.on_option_quote(ik, mark)
 
+    @staticmethod
+    def _current_account_equity(db: Any) -> float:
+        """PHASE 5.3 §7: CURRENT equity for risk decisions, never a frozen
+        startup constant.
+
+        Priority: 1) the persisted equity snapshot the runtime maintains
+        (realized P&L-adjusted, survives restarts), 2) TRADING_CAPITAL env.
+        The scanner additionally re-reads runtime.realized_equity on every
+        scan (scan_once); this value only seeds it before the first tick.
+        """
+        try:
+            raw = db.get_setting("paper_equity_snapshot", "") or ""
+            if raw:
+                snap = json.loads(raw)
+                eq = float(snap.get("realized_equity") or 0)
+                if eq > 0:
+                    return eq
+        except Exception:
+            pass
+        try:
+            return float(os.environ.get("TRADING_CAPITAL", "100000"))
+        except (TypeError, ValueError):
+            return 100000.0
+
     def _init_market_scanner(self) -> None:
 
         """Attach Upstox-backed scanner when a token is available; else leave offline."""
@@ -325,7 +371,7 @@ class PaperWorker:
                 data=data,
                 strategy=self.runtime.strategy,
                 underlying=os.environ.get("PAPER_UNDERLYING", "NIFTY50"),
-                account_equity=float(os.environ.get("TRADING_CAPITAL", "100000")),
+                account_equity=self._current_account_equity(self.db),
                 max_candle_age_seconds=float(os.environ.get("PAPER_MAX_CANDLE_AGE_SEC", "900")),
                 min_bars=int(os.environ.get("PAPER_MIN_CANDLE_BARS", "60")),
                 ai_engine=ai_engine,

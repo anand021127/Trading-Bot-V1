@@ -9,21 +9,27 @@ from unittest import mock
 from unittest.mock import MagicMock
 
 # fastapi may be unavailable in the test image — stub so bot_control imports.
-class _NoopRouter:
-    def get(self, *a, **k):
-        def deco(fn):
-            return fn
-        return deco
+# PHASE 5.2 §33 (test order-independence): the previous guard only stubbed
+# fastapi when it was not already imported, so running this file alone (or in
+# any order where real fastapi loads first) changed module identity and broke
+# the import of Depends/APIRouter below. Now the stub is ONLY installed when
+# the real package is genuinely unavailable — identical behavior in every
+# execution order.
+try:
+    import fastapi  # noqa: F401
+except ImportError:
+    class _NoopRouter:
+        def get(self, *a, **k):
+            def deco(fn):
+                return fn
+            return deco
 
-    post = get
+        post = get
 
+    class _FastapiStub:
+        def APIRouter(self, *a, **k):
+            return _NoopRouter()
 
-class _FastapiStub:
-    def APIRouter(self, *a, **k):
-        return _NoopRouter()
-
-
-if "fastapi" not in sys.modules:
     sys.modules["fastapi"] = _FastapiStub()  # type: ignore
 
 import importlib.util

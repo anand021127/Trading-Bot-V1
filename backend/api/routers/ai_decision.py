@@ -84,6 +84,29 @@ def get_ai_decision_status() -> Dict[str, Any]:
         except Exception:
             pass
     enabled_env = bool(settings["enabled"])
+    counters: Dict[str, int] = {}
+    if db is not None:
+        try:
+            rows = db._connect().execute(
+                "SELECT decision, COUNT(*) AS n FROM ai_decisions GROUP BY decision"
+            ).fetchall()
+            for r in rows:
+                counters[str(r["decision"]).lower()] = int(r["n"])
+            fail_rows = db._connect().execute(
+                """SELECT reason_codes, COUNT(*) AS n FROM ai_decisions
+                   WHERE decision='REJECT' GROUP BY reason_codes ORDER BY n DESC LIMIT 10"""
+            ).fetchall()
+            fail_counts: Dict[str, int] = {}
+            for r in fail_rows:
+                try:
+                    codes = json.loads(r["reason_codes"] or "[]")
+                except Exception:
+                    codes = []
+                if codes:
+                    fail_counts[codes[0]] = fail_counts.get(codes[0], 0) + int(r["n"])
+            counters["rejection_breakdown"] = fail_counts  # type: ignore[assignment]
+        except Exception:
+            pass
     return {
         "ai_decision_enabled": enabled_env,
         "worker_layer_state": layer_note or None,
@@ -96,6 +119,7 @@ def get_ai_decision_status() -> Dict[str, Any]:
         "approval_semantics": "AI APPROVE is necessary but never sufficient — hard risk always overrides AI",
         "backtest_status": BACKTEST_UNAVAILABLE,
         "latency": stats,
+        "decision_counters": counters,
         "recent_decisions": recent,
         "note": (
             "AI layer enabled — every V8-D BUY is gated by an AI decision before "
@@ -138,11 +162,30 @@ def get_why_not_traded() -> Dict[str, Any]:
             "ai_model": details.get("ai_model"),
         }
         reason = str(detail.get("reason") or "")
-        # Map scan reasons to the §10 taxonomy — honest, derived only from
-        # what the scanner actually recorded.
+        # Map scan reasons to the §13 taxonomy — honest, derived only from
+        # what the scanner actually recorded. Every distinct failure mode
+        # stays distinct; nothing collapses into NO_SIGNAL.
         if reason.startswith("AI_NO_TRADE:"):
             code = reason.split(":", 1)[1]
-            if code in ("AI_WAIT",) or "STALE_DATA" in code or "INCOMPLETE_CONTRACT" in code:
+            if code == "AI_TIMEOUT":
+                breakdown["stage"] = "AI_TIMEOUT"
+            elif code in ("AI_PROVIDER_UNAVAILABLE", "AI_MODEL_UNAVAILABLE"):
+                breakdown["stage"] = code
+            elif code in ("AI_INVALID_RESPONSE", "AI_DECISION_INVALID"):
+                breakdown["stage"] = "AI_INVALID_RESPONSE"
+            elif code == "AI_DECISION_PERSISTENCE_FAILED":
+                breakdown["stage"] = "AI_DECISION_PERSISTENCE_FAILED"
+            elif code == "RECONCILIATION_NOT_READY":
+                breakdown["stage"] = "RECONCILIATION_NOT_READY"
+            elif code == "RECONCILIATION_STALE":
+                # PHASE 5.3 §6/§31: reconciliation verdict too old — a
+                # distinct no-trade stage, never folded into NO_SIGNAL.
+                breakdown["stage"] = "RECONCILIATION_STALE"
+            elif code == "AI_WAITING":
+                # PHASE 5.3 §13: bounded-budget budget timeout — model still
+                # thinking; decision completes in background and replays.
+                breakdown["stage"] = "AI_WAITING"
+            elif code in ("AI_WAIT",) or "STALE_DATA" in code or "INCOMPLETE_CONTRACT" in code:
                 breakdown["stage"] = "AI_WAITING"
             else:
                 breakdown["stage"] = "AI_REJECTED"
@@ -154,15 +197,31 @@ def get_why_not_traded() -> Dict[str, Any]:
             breakdown["stage"] = "STALE_OR_INSUFFICIENT_DATA"
         elif reason.startswith("rejected:kill_switch"):
             breakdown["stage"] = "KILL_SWITCH"
+        elif reason.startswith("rejected:MAX_DAILY_TRADES"):
+            breakdown["stage"] = "MAX_TRADES_REACHED"
+        elif reason.startswith("rejected:MAX_POSITIONS"):
+            breakdown["stage"] = "MAX_EXPOSURE_REACHED"
+        elif reason.startswith("rejected:MAX_DAILY_LOSS"):
+            breakdown["stage"] = "RISK_REJECTED"
+        elif reason.startswith("rejected:INSUFFICIENT_EQUITY"):
+            breakdown["stage"] = "INSUFFICIENT_EQUITY"
         elif reason.startswith("rejected:MAX_") or reason.startswith("rejected:INSUFFICIENT"):
             breakdown["stage"] = "RISK_REJECTED"
         elif reason.startswith("rejected:INVALID_LOT"):
             breakdown["stage"] = "NO_VALID_LOT_SIZE"
         elif reason.startswith("rejected:INVALID_CONTRACT"):
             breakdown["stage"] = "NO_VALID_CONTRACT"
+        elif reason.startswith("submit_error:") or reason.startswith("candle_fetch_error:") \
+                or reason.startswith("chain_fetch_error:") or reason.startswith("expiry_fetch_error:"):
+            # PHASE 5.3 §31: upstream/broker/data failure — distinct from a
+            # trading rejection; the scan could not even complete cleanly.
+            breakdown["stage"] = "BROKER_UNAVAILABLE"
+            breakdown["error"] = reason.split(":", 1)[1] if ":" in reason else reason
         elif reason.startswith("rejected:"):
             breakdown["stage"] = "EXECUTION_REJECTED"
             breakdown["execution_reason"] = reason.split(":", 1)[1]
+            if "BROKER" in reason.upper():
+                breakdown["stage"] = "BROKER_REJECTED"
         elif detail.get("traded"):
             breakdown["stage"] = "TRADED"
         elif reason.startswith("no_trade:"):

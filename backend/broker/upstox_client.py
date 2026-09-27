@@ -44,11 +44,17 @@ def _build_session() -> Any:
     if requests is None:
         return None
     session = requests.Session()
+    # PHASE 5.3 §5: POST is deliberately NOT in allowed_methods. A blind
+    # retry of place_order after an ambiguous broker outcome (timeout after
+    # acceptance, 5xx of unknown origin) can create a DUPLICATE real order.
+    # Order placement is single-attempt: failures are classified and either
+    # reconciled via broker order status or surfaced — never auto-resubmitted.
+    # Idempotent GETs (and cancel DELETEs) may retry safely.
     retry = Retry(
         total=3, read=3, connect=3,
         backoff_factor=0.5,
         status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=["GET", "POST", "DELETE"],
+        allowed_methods=["GET", "DELETE"],
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
@@ -77,6 +83,10 @@ class UpstoxClient:
 
     @property
     def access_token(self) -> str:
+        # PHASE 5.3 §4 note: token resolution is deliberately NOT cached per
+        # instance — the authoritative resolver picks up rotated tokens
+        # immediately (verified by the token-lifecycle regression tests),
+        # which matters more than saving one local-file read per request.
         if self._explicit_token:
             return self._explicit_token
         from backend.broker.token_resolver import resolve_upstox_token
@@ -86,6 +96,12 @@ class UpstoxClient:
     def access_token(self, token: Optional[str]) -> None:
         clean = token.strip().strip('"\'').strip() if (token and token.strip()) else None
         self._explicit_token = clean
+
+    def invalidate_token_cache(self) -> None:
+        """Kept for API stability — a 401 hook point. The authoritative
+        resolver re-reads persisted state each call, so no cached state
+        exists to invalidate here."""
+        return None
 
     def _headers(self) -> Dict[str, str]:
         h = {
@@ -135,6 +151,7 @@ class UpstoxClient:
                 raise UpstoxAPIError(503, f"Connection error: {e}")
 
             if r.status_code == 401:
+                self.invalidate_token_cache()
                 raise UpstoxAPIError(401, "Token invalid or expired — go to Settings and generate a new token.")
             if r.status_code == 410:
                 raise UpstoxAPIError(410, "This API endpoint is deprecated. Update to Upstox API v2.")
@@ -760,6 +777,8 @@ class UpstoxClient:
         data = r.json()
         if r.status_code == 200 and data.get("status") == "success":
             return {"success": True, "order_id": data.get("data", {}).get("order_id"), "raw": data}
+        if r.status_code == 401:
+            self.invalidate_token_cache()
         raise UpstoxAPIError(r.status_code, data.get("message", str(data)))
 
     def get_order_details(self, order_id: str) -> Dict[str, Any]:
