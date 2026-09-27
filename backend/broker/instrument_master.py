@@ -127,7 +127,17 @@ class InstrumentMaster:
         """Current instrument_key for `symbol`, or None if not found even
         in the live master (caller decides whether to fall back)."""
         self.ensure_fresh()
-        return self._symbol_to_key.get(symbol.upper())
+
+        normalized = symbol.upper()
+
+        # Upstox currently exposes Nifty 50 as trading_symbol "NIFTY",
+        # while the application uses canonical symbol "NIFTY50".
+        aliases = {
+            "NIFTY50": "NIFTY",
+        }
+
+        lookup_symbol = aliases.get(normalized, normalized)
+        return self._symbol_to_key.get(lookup_symbol)
 
     def status(self) -> Dict[str, Any]:
         return {

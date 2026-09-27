@@ -48,7 +48,7 @@ def _patch_http_failure(exc: Exception):
 
 SAMPLE_ROWS = [
     {"segment": "MCX_FO", "trading_symbol": "GOLD", "instrument_key": "MCX|IGNORED"},
-    {"segment": "NSE_INDEX", "trading_symbol": "NIFTY50", "instrument_key": "NSE_INDEX|Nifty 50"},
+    {"segment": "NSE_INDEX", "trading_symbol": "NIFTY", "instrument_key": "NSE_INDEX|Nifty 50"},
     {"segment": "NSE_FO", "trading_symbol": "NIFTY26FEBFUT", "instrument_key": "NSE_FO|FUTURE", "lot_size": 75, "freeze_quantity": 1800},
 ]
 
@@ -59,6 +59,28 @@ class TestInstrumentMaster:
         with _patch_http(SAMPLE_ROWS):
             key = master.resolve("NIFTY50")
         assert key == "NSE_INDEX|Nifty 50"
+
+    def test_nifty50_resolves_via_upstox_nifty_alias(self) -> None:
+        master = InstrumentMaster()
+        with _patch_http([
+            {"segment": "NSE_INDEX", "trading_symbol": "NIFTY",
+             "instrument_key": "NSE_INDEX|Nifty 50"},
+            {"segment": "NSE_INDEX", "trading_symbol": "NIFTY 100",
+             "instrument_key": "NSE_INDEX|Nifty 100"},
+            {"segment": "NSE_INDEX", "trading_symbol": "NIFTY 200",
+             "instrument_key": "NSE_INDEX|Nifty 200"},
+        ]):
+            assert master.resolve("NIFTY50") == "NSE_INDEX|Nifty 50"
+
+    def test_nifty50_does_not_match_other_nifty_indices(self) -> None:
+        master = InstrumentMaster()
+        with _patch_http([
+            {"segment": "NSE_INDEX", "trading_symbol": "NIFTY 100",
+             "instrument_key": "NSE_INDEX|Nifty 100"},
+            {"segment": "NSE_INDEX", "trading_symbol": "NIFTY 200",
+             "instrument_key": "NSE_INDEX|Nifty 200"},
+        ]):
+            assert master.resolve("NIFTY50") is None
 
     def test_filters_out_irrelevant_segments(self) -> None:
         master = InstrumentMaster()
