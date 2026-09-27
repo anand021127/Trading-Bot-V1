@@ -1,0 +1,51 @@
+====================================================================================================
+OLD (277) vs NEW (14) — corrected engine, unchanged V8-D: mechanism decomposition
+====================================================================================================
+group                                 old      new     delta
+technical_pullback_not_met         105947   105947        +0
+daily_trade_limit                       0    43590    +43590
+zero_lot_sizing                      1214     1242       +28
+risk_cap_violation                      0      225      +225
+entry_session_restricted                0       23       +23
+position_already_open                 496        3      -493
+same_bar_cooldown                      14        0       -14
+expectancy_too_low                      3        0        -3
+contract_resolution_failure          2463     2445       -18
+other                                   0        0        +0
+
+* 1. Daily trade limit was INERT in the old engine (context had no trades_today) and is ACTIVE now: 43,590 'Daily trade limit reached: 3/3' rejections in the new run. In paper/live the strategy rejects every evaluation once 3 trades are open-today — the backtest now matches that. This caps trades at ~3/day portfolio-wide.
+
+* 2. REGRESSION (fixed in this session): the 14-trade run used a LIFETIME per-symbol counter (symbol_stats[trades]) instead of a per-DAY portfolio counter — the per-symbol totals 3/2/3/3/3/0 are the freeze pattern. Corrected: counter resets at each new session date and counts the whole portfolio, exactly like paper/live.
+
+* 3. Sizing parity: the old engine force-fed a minimum 1 lot (risk cap ignored); the 14-run rejected 1-lot-breaches (227) using the ENGINE's own 1% risk. This session the engine now honors the strategy's own sizing (2.5% risk / 18% allocation, 0-lot reject) — restoring paper/live semantics, which will legitimately raise the trade count above 14 on the next run.
+
+* 4. Entry-window enforcement: 23 ENTRY_SESSION_RESTRICTED (14:50-15:25 and 09:15 entries that live could never place).
+
+* 5. Expiry lifecycle: the SENSEX2630579900CE frozen-expired trade is gone (BACKTEST_END no longer overrides expiry).
+
+* 6. Technical selectivity unchanged: 105,947 pullback rejections in BOTH runs — V8-D itself was not touched.
+
+* 7. Contract-resolution failures unchanged (~2,463): missing historical chain data (environmental), not a code path change.
+
+old lifecycle-violation records: 18; matched in new: 0
+removed (all 18 + the frozen-expired trade):
+  FINNIFTY2593025950PE  2025-09-26T14:50:00+05:30  INTRADAY_SQUARE_OFF
+  MIDCPNIFTY2593012550PE  2025-09-26T14:50:00+05:30  INTRADAY_SQUARE_OFF
+  NIFTY25N1125700CE  2025-11-11T14:50:00+05:30  STOP_LOSS_HIT
+  NIFTY25N1125700CE  2025-11-11T15:00:00+05:30  STOP_LOSS_HIT
+  SENSEX25N1383900CE  2025-11-11T15:10:00+05:30  INTRADAY_SQUARE_OFF
+  SENSEX25D1185100PE  2025-12-08T14:55:00+05:30  INTRADAY_SQUARE_OFF
+  NIFTY25D0925950PE  2025-12-08T14:55:00+05:30  INTRADAY_SQUARE_OFF
+  MIDCPNIFTY25D3013725PE  2025-12-26T15:00:00+05:30  INTRADAY_SQUARE_OFF
+  NIFTY2620325800CE  2026-02-03T14:55:00+05:30  STOP_LOSS_HIT
+  SENSEX2630579900CE  2026-03-05T15:25:00+05:30  BACKTEST_END
+  NIFTY2640723050CE  2026-04-07T14:50:00+05:30  TARGET_HIT
+  BANKNIFTY2642855500PE  2026-04-28T15:00:00+05:30  TARGET_HIT
+  NIFTY2651223450PE  2026-05-12T14:50:00+05:30  TARGET_HIT
+  NIFTY2660223800PE  2026-05-29T14:50:00+05:30  TARGET_HIT
+  NIFTY2660223400PE  2026-06-01T15:10:00+05:30  INTRADAY_SQUARE_OFF
+  NIFTY2660223450CE  2026-06-02T14:50:00+05:30  STOP_LOSS_HIT
+  NIFTY2662323850PE  2026-06-23T15:00:00+05:30  STOP_LOSS_HIT
+  BANKEX2662565600CE  2026-06-24T15:20:00+05:30  INTRADAY_SQUARE_OFF
+
+NEW 14 trades per symbol: {"BANKNIFTY": 2, "FINNIFTY": 3, "MIDCPNIFTY": 3, "NIFTY50": 3, "SENSEX": 3}

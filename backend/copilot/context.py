@@ -149,6 +149,15 @@ def build_context(
     q = question or ""
     sections: Dict[str, Any] = {}
 
+    # PHASE 5.3C: the configured strategy is ALWAYS in context (read-only,
+    # structured, no secrets) so Copilot can answer V8-D questions from real
+    # data — never again "I don't have information about V8-D".
+    try:
+        from backend.copilot.strategy_context import build_strategy_context
+        sections["strategy_context"] = build_strategy_context()
+    except Exception as e:  # pragma: no cover
+        sections["strategy_context"] = {"available": False, "reason": str(e)}
+
     if include_bot or _question_is_about_health(q):
         sections.update(build_bot_context(tools))
 

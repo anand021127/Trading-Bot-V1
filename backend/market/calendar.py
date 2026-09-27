@@ -42,8 +42,13 @@ logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
 # Session constants (regular NSE/BSE equity & F&O sessions)
+# LAST_ENTRY is the canonical V8-D new-entry cutoff: 14:45 IST (inclusive),
+# per the documented session_manager policy. It governs ONLY the calendar's
+# session_status() OPEN window used for NEW-ENTRY gating (paper scan loop,
+# live trading engine, backtest parity) — trading-day determination, holidays,
+# Muhurat/Budget special-session hours and square-off are all unchanged.
 MARKET_OPEN = time(9, 15)
-LAST_ENTRY = time(9, 45)       # intraday option entries only in the first 30 min
+LAST_ENTRY = time(14, 45)      # documented V8-D entry cutoff (14:45 inclusive)
 SQUARE_OFF = time(15, 15)      # mandatory EOD square-off
 MARKET_CLOSE = time(15, 30)
 
@@ -246,8 +251,12 @@ class SessionCalendar:
         t = dt.timetz().replace(tzinfo=None)
         if t < st.open:
             return "BEFORE_OPEN", f"before session open {st.open.strftime('%H:%M')} IST ({st.name})"
-        if t < st.last_entry:
-            return "OPEN", f"session open — new entries allowed ({st.name})"
+        if t <= st.last_entry:
+            # Inclusive cutoff: 14:45:00 itself may still enter (the documented
+            # V8-D boundary spec: 14:44 accept, 14:45 accept, 14:46 reject).
+            # NOTE: new entries additionally require >= 09:20 IST (entry start,
+            # enforced by session_manager.is_entry_window and the scan gates).
+            return "OPEN", f"session open — new entries 09:20-{st.last_entry.strftime('%H:%M')} IST ({st.name})"
         if t < st.square_off:
             return "AFTER_LAST_ENTRY", f"after last-entry cutoff {st.last_entry.strftime('%H:%M')} IST — positions managed, no new entries"
         if t < st.close:

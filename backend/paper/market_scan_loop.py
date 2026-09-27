@@ -266,7 +266,10 @@ class PaperMarketScanner:
         try:
             from backend.strategy.session_manager import session_manager as _sm
             _wall = now.astimezone(IST).time() if now.tzinfo else now.time()
-            if _wall < _sm.entry_start or _wall >= _sm.last_entry:
+            # 09:20 inclusive start, 14:45 INCLUSIVE cutoff (documented spec:
+            # 14:45 may still enter, 14:46 cannot) — same boundaries as the
+            # backtest engine gate and session_manager.is_entry_window.
+            if _wall < _sm.entry_start or _wall > _sm.last_entry:
                 return ScanResult(
                     False, False,
                     f"entry_window_closed:{_wall.strftime('%H:%M')}-outside-"

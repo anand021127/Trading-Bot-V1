@@ -582,6 +582,9 @@ def test_paper_path_ai_approve_flows_to_submission(clean_env, tmp_path):
             return sig, log
 
     runtime = _runtime(_runtime_env(str(tmp_path)))
+    # Pin the runtime clock: submit_entry's EOD gate uses now_fn (wall clock
+    # by default) and must not see a real-time past 15:15 during full runs.
+    runtime.now_fn = lambda: now
 
     class FakeKill:
         def level(self):
@@ -668,6 +671,7 @@ def test_paper_path_ai_approve_with_kill_switch_blocked(clean_env, tmp_path):
             return sig, log
 
     runtime = _runtime(_runtime_env(str(tmp_path)))
+    runtime.now_fn = lambda: now  # pin clock: EOD gate in submit_entry must not see wall-clock past 15:15
 
     class FakeKill:
         def level(self):
@@ -714,6 +718,7 @@ def test_paper_path_ai_approve_with_risk_fail_blocked(clean_env, tmp_path):
     env = _runtime_env(str(tmp_path))
     env["TRADING_CAPITAL"] = "100"  # notional 85*75 = 6375 > 100 equity
     runtime = _runtime(env)
+    runtime.now_fn = lambda: now  # pin clock: EOD gate in submit_entry must not see wall-clock past 15:15
 
     class FakeKill:
         def level(self):

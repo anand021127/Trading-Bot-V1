@@ -141,16 +141,27 @@ class IntradaySessionManager:
 
     def is_entry_window(self, now: Optional[datetime] = None) -> bool:
         """Whether NEW entries are allowed right now (OPEN session only).
-        After last-entry cutoff or outside a trading day: False."""
+
+        Canonical documented policy: 09:20 (inclusive) → 14:45 IST cutoff
+        (INCLUSIVE — 14:45:00 may still enter; 14:46 cannot). Outside a
+        trading day: False."""
         try:
             from backend.market.calendar import exchange_calendar
             status, _desc = exchange_calendar.session_status(now or datetime.now(IST))
-            return status == "OPEN"
+            if status != "OPEN":
+                return False
+            t = (now or datetime.now(IST)).timetz().replace(tzinfo=None) \
+                if (now is not None and getattr(now, "tzinfo", None) is not None) else None
+            if t is None:
+                _now = now or datetime.now(IST)
+                t = _now.time() if _now.tzinfo is None else _now.astimezone(IST).time()
+            # 09:20 entry start (inclusive), 14:45 cutoff (inclusive)
+            return self.entry_start <= t <= self.last_entry
         except Exception:  # pragma: no cover
             now = now or datetime.now(IST)
             if now.weekday() >= 5:
                 return False
-            return self.market_open <= now.time() < self.last_entry
+            return self.entry_start <= now.time() <= self.last_entry
 
 
 # Shared global singleton with standard institutional parameters

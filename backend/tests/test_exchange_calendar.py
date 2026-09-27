@@ -198,11 +198,16 @@ class TestSessionStatus(unittest.TestCase):
         # Trading-day early morning -> BEFORE_OPEN
         s, _ = exchange_calendar.session_status(datetime(2024, 10, 9, 9, 0, tzinfo=IST))
         self.assertEqual(s, "BEFORE_OPEN")
-        # Inside session -> OPEN (before last entry 09:45)
+        # Inside session -> OPEN (last entry 14:45 inclusive per the
+        # documented V8-D policy; entries also require >= 09:20 via the
+        # session_manager entry gates)
         s, _ = exchange_calendar.session_status(datetime(2024, 10, 9, 9, 30, tzinfo=IST))
         self.assertEqual(s, "OPEN")
-        # Mid-session after last entry
+        # Mid-session before the 14:45 cutoff is still OPEN
         s, _ = exchange_calendar.session_status(datetime(2024, 10, 9, 12, 0, tzinfo=IST))
+        self.assertEqual(s, "OPEN")
+        # After the 14:45 (inclusive) cutoff
+        s, _ = exchange_calendar.session_status(datetime(2024, 10, 9, 14, 46, tzinfo=IST))
         self.assertEqual(s, "AFTER_LAST_ENTRY")
         # After square-off, before close
         s, _ = exchange_calendar.session_status(datetime(2024, 10, 9, 15, 20, tzinfo=IST))

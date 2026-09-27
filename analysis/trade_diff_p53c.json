@@ -1,0 +1,95 @@
+{
+  "old_run": {
+    "trades": 277,
+    "signals": 808,
+    "rejected": 110137,
+    "rejections": {
+      "technical_pullback_not_met": 105947,
+      "daily_trade_limit": 0,
+      "zero_lot_sizing": 1214,
+      "risk_cap_violation": 0,
+      "entry_session_restricted": 0,
+      "position_already_open": 496,
+      "same_bar_cooldown": 14,
+      "expectancy_too_low": 3,
+      "contract_resolution_failure": 2463,
+      "other": 0
+    },
+    "net_pnl": -81511.32,
+    "pf": 0.61,
+    "wr": 28.88
+  },
+  "new_run": {
+    "trades": 14,
+    "signals": 265,
+    "rejected": 110400,
+    "rejections": {
+      "technical_pullback_not_met": 105947,
+      "daily_trade_limit": 43590,
+      "zero_lot_sizing": 1242,
+      "risk_cap_violation": 225,
+      "entry_session_restricted": 23,
+      "position_already_open": 3,
+      "same_bar_cooldown": 0,
+      "expectancy_too_low": 0,
+      "contract_resolution_failure": 2445,
+      "other": 0
+    },
+    "net_pnl": -2897.0,
+    "pf": 0.45,
+    "wr": 21.43,
+    "per_symbol_counts": {
+      "BANKNIFTY": 2,
+      "FINNIFTY": 3,
+      "MIDCPNIFTY": 3,
+      "NIFTY50": 3,
+      "SENSEX": 3
+    }
+  },
+  "rejection_delta": {
+    "technical_pullback_not_met": 0,
+    "daily_trade_limit": 43590,
+    "zero_lot_sizing": 28,
+    "risk_cap_violation": 225,
+    "entry_session_restricted": 23,
+    "position_already_open": -493,
+    "same_bar_cooldown": -14,
+    "expectancy_too_low": -3,
+    "contract_resolution_failure": -18,
+    "other": 0
+  },
+  "lifecycle_violation_records": {
+    "old_total": 18,
+    "matched_in_new": 0,
+    "removed": [
+      "FINNIFTY2593025950PE 2025-09-26T14:50:00+05:30",
+      "MIDCPNIFTY2593012550PE 2025-09-26T14:50:00+05:30",
+      "NIFTY25N1125700CE 2025-11-11T14:50:00+05:30",
+      "NIFTY25N1125700CE 2025-11-11T15:00:00+05:30",
+      "SENSEX25N1383900CE 2025-11-11T15:10:00+05:30",
+      "SENSEX25D1185100PE 2025-12-08T14:55:00+05:30",
+      "NIFTY25D0925950PE 2025-12-08T14:55:00+05:30",
+      "MIDCPNIFTY25D3013725PE 2025-12-26T15:00:00+05:30",
+      "NIFTY2620325800CE 2026-02-03T14:55:00+05:30",
+      "SENSEX2630579900CE 2026-03-05T15:25:00+05:30",
+      "NIFTY2640723050CE 2026-04-07T14:50:00+05:30",
+      "BANKNIFTY2642855500PE 2026-04-28T15:00:00+05:30",
+      "NIFTY2651223450PE 2026-05-12T14:50:00+05:30",
+      "NIFTY2660223800PE 2026-05-29T14:50:00+05:30",
+      "NIFTY2660223400PE 2026-06-01T15:10:00+05:30",
+      "NIFTY2660223450CE 2026-06-02T14:50:00+05:30",
+      "NIFTY2662323850PE 2026-06-23T15:00:00+05:30",
+      "BANKEX2662565600CE 2026-06-24T15:20:00+05:30"
+    ]
+  },
+  "mechanism": [
+    "1. Daily trade limit was INERT in the old engine (context had no trades_today) and is ACTIVE now: 43,590 'Daily trade limit reached: 3/3' rejections in the new run. In paper/live the strategy rejects every evaluation once 3 trades are open-today — the backtest now matches that. This caps trades at ~3/day portfolio-wide.",
+    "2. REGRESSION (fixed in this session): the 14-trade run used a LIFETIME per-symbol counter (symbol_stats[trades]) instead of a per-DAY portfolio counter — the per-symbol totals 3/2/3/3/3/0 are the freeze pattern. Corrected: counter resets at each new session date and counts the whole portfolio, exactly like paper/live.",
+    "3. Sizing parity: the old engine force-fed a minimum 1 lot (risk cap ignored); the 14-run rejected 1-lot-breaches (227) using the ENGINE's own 1% risk. This session the engine now honors the strategy's own sizing (2.5% risk / 18% allocation, 0-lot reject) — restoring paper/live semantics, which will legitimately raise the trade count above 14 on the next run.",
+    "4. Entry-window enforcement: 23 ENTRY_SESSION_RESTRICTED (14:50-15:25 and 09:15 entries that live could never place).",
+    "5. Expiry lifecycle: the SENSEX2630579900CE frozen-expired trade is gone (BACKTEST_END no longer overrides expiry).",
+    "6. Technical selectivity unchanged: 105,947 pullback rejections in BOTH runs — V8-D itself was not touched.",
+    "7. Contract-resolution failures unchanged (~2,463): missing historical chain data (environmental), not a code path change."
+  ],
+  "old_removed_pnl_note": "Of the old net -81,511, the removed trades carried most of the loss: the old run's largest buckets (4-6 lot over-risked positions on deep-OTM premiums, unlimited daily re-entries, late-window entries) no longer exist. The -2,897 on 14 trades is NOT comparable evidence of strategy quality — the sample is tiny and the sizing/daily-limit mechanisms changed between runs."
+}
