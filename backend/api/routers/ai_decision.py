@@ -84,6 +84,25 @@ def get_ai_decision_status() -> Dict[str, Any]:
         except Exception:
             pass
     enabled_env = bool(settings["enabled"])
+    # PHASE 5.3 QA: report the AUTHORITATIVE runtime state, not just the env
+    # default. The runtime AI toggle (POST /api/bot/ai-toggle) writes a DB
+    # override that the scan loop re-reads EVERY tick — the status endpoint
+    # previously reported env-only, so the UI badge could contradict the
+    # actual gating (e.g. env=false + override="1" showed DISABLED while AI
+    # was genuinely gating every signal). Same authority chain as
+    # bot_control.ai_effectively_enabled: override "1"/"0" wins, env default
+    # otherwise, fail-closed OFF when the DB is unreadable.
+    enabled_effective = enabled_env
+    try:
+        from backend.api.routers.bot_control import AI_ENABLED_OVERRIDE_KEY
+        if db is not None:
+            override = str(db.get_setting(AI_ENABLED_OVERRIDE_KEY, "") or "")
+            if override == "1":
+                enabled_effective = True
+            elif override == "0":
+                enabled_effective = False
+    except Exception:
+        pass
     counters: Dict[str, int] = {}
     if db is not None:
         try:
@@ -108,7 +127,8 @@ def get_ai_decision_status() -> Dict[str, Any]:
         except Exception:
             pass
     return {
-        "ai_decision_enabled": enabled_env,
+        "ai_decision_enabled": enabled_effective,
+        "env_default_enabled": enabled_env,
         "worker_layer_state": layer_note or None,
         "provider": settings["provider"],
         "model": settings["model"],
@@ -124,8 +144,9 @@ def get_ai_decision_status() -> Dict[str, Any]:
         "note": (
             "AI layer enabled — every V8-D BUY is gated by an AI decision before "
             "hard risk. AI failures fail closed to NO TRADE."
-            if enabled_env
+            if enabled_effective
             else "AI layer disabled — paper trading runs V8-D-only; enable with "
+                 "the AI toggle on /operations (runtime override) or "
                  "AI_DECISION_ENABLED=true (env change + worker restart)."
         ),
     }

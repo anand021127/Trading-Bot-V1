@@ -1105,6 +1105,16 @@ class BacktestEngine:
                     "current_bar_timestamp": ts,
                     "evaluation_date": bar_date,
                     "spot_price": spot_close,
+                    # PHASE 5.3 QA parity: give the strategy the SAME runtime
+                    # inputs paper/live provide — current realized equity (the
+                    # engine's simulated account equity, P&L-adjusted) and the
+                    # per-symbol trades-today count. Previously these context
+                    # keys were absent in the backtest, so V8-D's own
+                    # max_daily_trades and equity-based sizing gates ran on
+                    # hardcoded defaults (the real CSV shows 4 same-symbol
+                    # entries in one day — the 3/day limit was inert).
+                    "account_equity": equity,
+                    "trades_today": symbol_stats[sym]["trades"],
                 }
 
                 if symbol_trend_series[sym]:
@@ -1373,7 +1383,39 @@ class BacktestEngine:
 
                         risk_per_unit = opt_entry_price - opt_stop_loss
                         risk_amount = equity * self.risk_pct_per_trade
-                        num_lots = max(1, int(risk_amount / (risk_per_unit * lot_size))) if risk_per_unit > 0 else 1
+                        # PHASE 5.3 QA parity fix (V8-D only): V8-D (paper + live)
+                        # REJECTS a trade when even 1 lot breaches the risk cap —
+                        # it never forces a minimum 1 lot through. The engine
+                        # previously did max(1, ...) for every strategy, silently
+                        # opening V8-D positions whose risk exceeded the cap (the
+                        # real CSV shows 450/525-quantity trades — 6/7 lots — on
+                        # ₹5.60 premiums). Legacy OPTION_PREMIUM keeps its
+                        # historical forced-minimum behavior.
+                        is_v8d = "V8_D_PULLBACK_ATM" in strategy_names
+                        if risk_per_unit > 0:
+                            num_lots = int(risk_amount / (risk_per_unit * lot_size))
+                        else:
+                            num_lots = 0
+                        if num_lots < 1:
+                            if is_v8d:
+                                result.risk_rejections += 1
+                                result.risk_rejections_breakdown["min_lot_violates_risk_cap"] = (
+                                    result.risk_rejections_breakdown.get("min_lot_violates_risk_cap", 0) + 1
+                                )
+                                rej_reason = (
+                                    "RISK_REJECTED — 1 lot (" + str(lot_size) + ") breaches the "
+                                    "per-trade risk cap (" + f"₹{risk_amount:.2f}" + ") for this "
+                                    "stop distance; paper/live V8-D sizing would reject"
+                                )
+                                rejected_total += 1
+                                reason_counts[rej_reason] = reason_counts.get(rej_reason, 0) + 1
+                                symbol_stats[sym]["risk_rejections"] += 1
+                                if len(rejected_sample) < self.rejected_sample_size:
+                                    rejected_sample.append(RejectedSignal(
+                                        symbol=sym, timestamp=ts, strategy=best.strategy_name, reasons=[rej_reason],
+                                    ))
+                                continue
+                            num_lots = 1  # legacy OPTION_PREMIUM: historical behavior
                         opt_qty = num_lots * lot_size
 
                         max_affordable_qty = int(equity / opt_entry_price) if opt_entry_price > 0 else 0

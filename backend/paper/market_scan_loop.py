@@ -369,6 +369,28 @@ class PaperMarketScanner:
         if not payload:
             return ScanResult(True, False, "signal_payload_incomplete", signal="BUY")
 
+        # PHASE 5.3 QA: per-underlying duplicate-position guard. The engine and
+        # the live path both refuse a second position for the SAME underlying
+        # ("POSITION_ALREADY_OPEN"); the paper broker only enforces per-
+        # instrument-key uniqueness, so a second different contract for the same
+        # underlying could previously stack exposure. Fail-closed, cheap, and
+        # consistent with the backtest/live semantics.
+        try:
+            _scan_underlying = str(payload.get("underlying") or getattr(sig, "symbol", "") or "").upper()
+            for _p in getattr(runtime.broker, "positions", {}).values():
+                if int(_p.get("quantity") or 0) == 0:
+                    continue
+                if str(_p.get("underlying") or "").upper() == _scan_underlying:
+                    return ScanResult(
+                        True, False,
+                        f"POSITION_ALREADY_OPEN — Position already active for {_scan_underlying}",
+                        signal="BUY",
+                        details={"rejection": ["POSITION_ALREADY_OPEN"]},
+                    )
+        except Exception as exc:
+            logger.warning("Duplicate-position check failed (%s) — fail-closed", type(exc).__name__)
+            return ScanResult(True, False, f"position_check_error:{type(exc).__name__}", signal="BUY")
+
         # Ensure contract carries expiry for validator
         payload["expiry"] = expiry
 

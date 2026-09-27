@@ -421,6 +421,11 @@ def test_scan_gate_respects_ai_override_off(tmp_path):
         scanner.ai_engine = engine
         res = scanner.scan_once(rt, now=SESSION_NOW)
         assert CountingProvider.calls == 0          # override OFF: no AI call
+        # PHASE 5.3 QA: the scan 1 above may now have OPENED a paper position
+        # (the new per-underlying duplicate guard sits BEFORE the AI gate,
+        # matching backtest/live POSITION_ALREADY_OPEN ordering). Clear any
+        # open position so scan 2 tests the AI override specifically.
+        rt.broker.positions.clear()
         # Now flip ON via the same DB the API would write.
         rt.db.save_setting("ai_decision_enabled_override", "1")
         res = scanner.scan_once(rt, now=SESSION_NOW)
