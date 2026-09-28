@@ -115,14 +115,6 @@ class OrderSettings:
 @dataclass
 class NotificationSettings:
     telegram_enabled: bool = False
-    email_enabled: bool = False
-    sender_email: str = field(default_factory=lambda: _s("SENDER_EMAIL", ""))
-    recipient_email: str = field(default_factory=lambda: _s("RECIPIENT_EMAIL", ""))
-    # Optional SMTP settings (placeholders only; never bake secrets in)
-    smtp_server: str = field(default_factory=lambda: _s("SMTP_SERVER", "smtp.gmail.com"))
-    smtp_port: int = field(default_factory=lambda: int(_s("SMTP_PORT", "587")))
-    smtp_username: str = field(default_factory=lambda: _s("SMTP_USERNAME", ""))
-    smtp_password: str = field(default_factory=lambda: _s("SMTP_PASSWORD", ""))
 
 
 @dataclass

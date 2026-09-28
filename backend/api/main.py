@@ -96,11 +96,9 @@ async def lifespan(app: FastAPI):
     try:
         from backend.strategy.trading_engine import TradingEngine
         from backend.notifications.telegram_alerts import TelegramAlerts
-        from backend.notifications.email_alerts import EmailAlerts
         engine = await asyncio.to_thread(
             TradingEngine,
             telegram_alerts=TelegramAlerts() if s.notifications.telegram_enabled else None,
-            email_alerts=EmailAlerts() if s.notifications.email_enabled else None,
         )
         set_engine(engine)
         set_strategy_engine(engine)

@@ -67,10 +67,7 @@ def _yaml_defaults() -> Dict[str, Any]:
             "volume_multiplier": getattr(settings.indicators, "volume_multiplier", 1.5),
         },
         "notifications": {
-            "email_enabled":    getattr(settings.notifications, "email_enabled",    False),
             "telegram_enabled": getattr(settings.notifications, "telegram_enabled", False),
-            "sender_email":     bool(os.getenv("SENDER_EMAIL") or os.getenv("NOTIFICATION_EMAIL") or getattr(settings.notifications, "sender_email", "")),
-            "recipient_email":  bool(os.getenv("RECIPIENT_EMAIL") or os.getenv("NOTIFICATION_EMAIL") or getattr(settings.notifications, "recipient_email", "")),
         },
     }
 
@@ -154,9 +151,6 @@ async def get_env_status() -> Dict[str, bool]:
         "UPSTOX_CLIENT_ID":     has_cid,
         "UPSTOX_CLIENT_SECRET": has_sec,
         "UPSTOX_ACCESS_TOKEN":  bool(os.getenv("UPSTOX_ACCESS_TOKEN") or db_token),
-        "EMAIL_PASSWORD":       bool(os.getenv("EMAIL_PASSWORD")),
-        "SENDER_EMAIL":         bool(os.getenv("SENDER_EMAIL") or os.getenv("NOTIFICATION_EMAIL")),
-        "RECIPIENT_EMAIL":      bool(os.getenv("RECIPIENT_EMAIL") or os.getenv("NOTIFICATION_EMAIL")),
         "TELEGRAM_BOT_TOKEN":   bool(os.getenv("TELEGRAM_BOT_TOKEN")),
         "TELEGRAM_CHAT_ID":     bool(os.getenv("TELEGRAM_CHAT_ID")),
     }

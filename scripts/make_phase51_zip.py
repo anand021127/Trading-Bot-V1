@@ -46,7 +46,6 @@ SECRET_PATTERNS = (
     (re.compile(r"sk-[A-Za-z0-9]{20,}"), "openai-style key"),
     # A real private key: header followed by a base64 body
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\n\r][A-Za-z0-9+/=\n\r]{100,}"), "private key"),
-    (re.compile(r"SMTP_PASSWORD=(?!\s*$)\S{8,}"), "smtp password value"),
     (re.compile(r"SECRET_KEY=(?!\s*$)(?!\{)\S{16,}"), "secret key value"),
 )
 

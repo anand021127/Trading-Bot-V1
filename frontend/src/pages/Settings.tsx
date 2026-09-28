@@ -311,9 +311,6 @@ export default function Settings() {
     { key: 'UPSTOX_CLIENT_ID',     label: 'Upstox Client ID' },
     { key: 'UPSTOX_CLIENT_SECRET', label: 'Upstox Client Secret' },
     { key: 'UPSTOX_ACCESS_TOKEN',  label: 'Access Token (auto-refreshed)' },
-    { key: 'EMAIL_PASSWORD',        label: 'Gmail App Password' },
-    { key: 'SENDER_EMAIL',          label: 'Sender Email' },
-    { key: 'RECIPIENT_EMAIL',       label: 'Recipient Email' },
     { key: 'TELEGRAM_BOT_TOKEN',    label: 'Telegram Bot Token' },
     { key: 'TELEGRAM_CHAT_ID',      label: 'Telegram Chat ID' },
   ]
@@ -551,7 +548,6 @@ export default function Settings() {
         </div>
         <div className="text-[10px] text-slate-600 pt-1">
           Set these in Render Dashboard → Environment. Never commit to git.
-          SENDER_EMAIL and RECIPIENT_EMAIL are needed for email alerts.
         </div>
       </Section>
 
@@ -669,14 +665,11 @@ export default function Settings() {
       {/* Notifications */}
       {notif && (
         <Section title="Notifications">
-          <Field label="Email Alerts" desc="Trade entry/exit alerts and daily summary by email">
-            <Toggle value={!!notif.email_enabled} onChange={v => update(['notifications', 'email_enabled'], v)} />
-          </Field>
           <Field label="Telegram Alerts" desc="Instant trade alerts on your phone via Telegram">
             <Toggle value={!!notif.telegram_enabled} onChange={v => update(['notifications', 'telegram_enabled'], v)} />
           </Field>
           <div className="text-[10px] text-slate-600 p-2.5 bg-[#0f1628] border border-[#1e2d45] rounded-lg">
-            Add SENDER_EMAIL, RECIPIENT_EMAIL, EMAIL_PASSWORD, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+            Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
             as Render environment variables to enable alerts.
           </div>
         </Section>

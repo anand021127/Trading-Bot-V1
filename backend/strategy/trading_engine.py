@@ -36,7 +36,6 @@ from backend.indicators.choppiness import choppiness_index
 from backend.indicators.ema import calculate_ema
 from backend.indicators.rsi import calculate_rsi
 from backend.logging_system.trade_logger import TradeLogger
-from backend.notifications.email_alerts import EmailAlerts
 from backend.notifications.telegram_alerts import TelegramAlerts
 from backend.orders.order_manager import OrderManager, OrderError
 from backend.orders.order_models import OrderRequest, OrderStatus
@@ -237,7 +236,6 @@ class TradingEngine:
         position_sizer: Optional[PositionSizer] = None,
         exit_manager: Optional[ExitManager] = None,
         telegram_alerts: Optional[TelegramAlerts] = None,
-        email_alerts: Optional[EmailAlerts] = None,
         strategy_name: str = "V8_D_PULLBACK_ATM",
     ) -> None:
         self.client = client or UpstoxClient()
@@ -272,7 +270,6 @@ class TradingEngine:
             stop_loss_pct=settings.risk.max_risk_per_trade_pct,
         )
         self.telegram_alerts = telegram_alerts
-        self.email_alerts = email_alerts
         configured = (getattr(settings.strategy, "name", "") or "").strip()
         explicit = (strategy_name or "").strip() if strategy_name else ""
         chosen = configured or explicit
@@ -1694,16 +1691,12 @@ class TradingEngine:
 
     def notify(self, message: str) -> None:
         def _dispatch():
-            for notifier in [self.telegram_alerts, self.email_alerts]:
-                if notifier is None:
-                    continue
-                try:
-                    if isinstance(notifier, TelegramAlerts):
-                        notifier.send_message(message)
-                    elif isinstance(notifier, EmailAlerts):
-                        notifier.send_email("Upstox Bot Alert", message)
-                except Exception:
-                    pass
+            if self.telegram_alerts is None:
+                return
+            try:
+                self.telegram_alerts.send_message(message)
+            except Exception:
+                pass
         threading.Thread(target=_dispatch, daemon=True).start()
 
     # ─── Legacy compat ────────────────────────────────────────────────────────

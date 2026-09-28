@@ -12,13 +12,6 @@ def _settings_with(**notif_kwargs):
     s = Settings()
     base = {
         "telegram_enabled": False,
-        "email_enabled": False,
-        "sender_email": "",
-        "recipient_email": "",
-        "smtp_server": "smtp.example.com",
-        "smtp_port": 587,
-        "smtp_username": "",
-        "smtp_password": "",
     }
     base.update(notif_kwargs)
     s.notifications = NotificationSettings(**base)
@@ -31,9 +24,7 @@ def test_alerts_status_endpoint() -> None:
         response = client.get("/api/alerts/")
     assert response.status_code == 200
     json_data = response.json()
-    assert "email_enabled" in json_data
     assert "telegram_enabled" in json_data
-    assert "smtp_server" in json_data
 
 
 def test_alerts_send_test_telegram(monkeypatch) -> None:
@@ -46,14 +37,13 @@ def test_alerts_send_test_telegram(monkeypatch) -> None:
     assert response.json()["channel"] == "telegram"
 
 
-def test_alerts_send_test_email(monkeypatch) -> None:
+def test_alerts_email_channel_removed() -> None:
+    """Email alerts were removed from the product entirely; the endpoint must
+    refuse the channel instead of attempting any SMTP operation."""
     client = TestClient(app)
-    with patch("backend.api.routers.alerts.load_settings", return_value=_settings_with(email_enabled=True)):
-        with patch("backend.api.routers.alerts.EmailAlerts.send_email") as mocked:
-            mocked.return_value = None
-            response = client.post("/api/alerts/test?channel=email")
-    assert response.status_code == 200
-    assert response.json()["channel"] == "email"
+    response = client.post("/api/alerts/test?channel=email")
+    assert response.status_code == 400
+    assert response.json()["detail"] == "unsupported channel"
 
 
 def test_alerts_test_channel_invalid() -> None:

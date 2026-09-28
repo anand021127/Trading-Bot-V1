@@ -6,6 +6,7 @@ import os
 import time
 from datetime import datetime
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
 
@@ -266,43 +267,6 @@ async def _test_telegram() -> Dict[str, Any]:
         return _result("telegram", "FAIL", ms, "", str(e))
 
 
-async def _test_email() -> Dict[str, Any]:
-    t0 = time.monotonic()
-    pwd       = os.getenv("EMAIL_PASSWORD", "")
-    sender    = (os.getenv("SENDER_EMAIL") or os.getenv("NOTIFICATION_EMAIL")
-                 or getattr(settings.notifications, "sender_email", "") or "")
-    recipient = (os.getenv("RECIPIENT_EMAIL") or os.getenv("NOTIFICATION_EMAIL")
-                 or getattr(settings.notifications, "recipient_email", "") or "")
-    missing = []
-    if not pwd:       missing.append("EMAIL_PASSWORD")
-    if not sender:    missing.append("SENDER_EMAIL")
-    if not recipient: missing.append("RECIPIENT_EMAIL")
-    if missing:
-        ms = (time.monotonic() - t0) * 1000
-        return _result("email", "FAIL", ms, "",
-                        f"Missing: {', '.join(missing)}. Add as Render environment variables.")
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        smtp_server = getattr(settings.notifications, "smtp_server", "smtp.gmail.com")
-        smtp_port   = getattr(settings.notifications, "smtp_port",   587)
-        msg = MIMEText("✅ Upstox Bot — Email alert test successful!")
-        msg["Subject"] = "Upstox Bot — Test Email"
-        msg["From"]    = sender
-        msg["To"]      = recipient
-        with smtplib.SMTP(smtp_server, smtp_port, timeout=15) as s:
-            s.ehlo(); s.starttls(); s.login(sender, pwd); s.send_message(msg)
-        ms = (time.monotonic() - t0) * 1000
-        return _result("email", "PASS", ms, f"Test email sent to {recipient}")
-    except smtplib.SMTPAuthenticationError:
-        ms = (time.monotonic() - t0) * 1000
-        return _result("email", "FAIL", ms, "",
-                        "Gmail auth failed. Use App Password (not login password). Enable 2FA first.")
-    except Exception as e:
-        ms = (time.monotonic() - t0) * 1000
-        return _result("email", "FAIL", ms, "", str(e))
-
-
 TEST_MAP = {
     "authentication":     _test_authentication,
     "historical_data":    _test_historical_data,
@@ -314,7 +278,6 @@ TEST_MAP = {
     "indicators":         _test_indicators,
     "risk_manager":       _test_risk_manager,
     "telegram":           _test_telegram,
-    "email":              _test_email,
 }
 
 
@@ -327,7 +290,7 @@ async def diagnostics_overview() -> Dict[str, Any]:
 @router.get("/env")
 async def environment_status() -> Dict[str, Any]:
     """Expose configuration presence without returning secret values."""
-    keys = ("UPSTOX_ACCESS_TOKEN", "FRONTEND_URL", "TELEGRAM_BOT_TOKEN", "NOTIFICATION_EMAIL")
+    keys = ("UPSTOX_ACCESS_TOKEN", "FRONTEND_URL", "TELEGRAM_BOT_TOKEN")
     return {
         "mode": settings.mode,
         "frontend_url": os.getenv("FRONTEND_URL", ""),

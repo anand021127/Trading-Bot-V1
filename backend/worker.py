@@ -46,7 +46,6 @@ async def main() -> None:
     try:
         from backend.strategy.trading_engine import TradingEngine, BotState
         from backend.notifications.telegram_alerts import TelegramAlerts
-        from backend.notifications.email_alerts import EmailAlerts
 
         if settings.mode == "paper":
             from backend.paper.paper_runtime import PaperStartupError, PaperTradingRuntime
@@ -58,7 +57,6 @@ async def main() -> None:
 
         engine = TradingEngine(
             telegram_alerts=TelegramAlerts() if settings.notifications.telegram_enabled else None,
-            email_alerts=EmailAlerts()    if settings.notifications.email_enabled    else None,
         )
 
         # IMPORTANT: this process does NOT auto-start the bot. BotState is

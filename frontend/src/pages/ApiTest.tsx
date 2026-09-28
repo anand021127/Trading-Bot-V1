@@ -13,7 +13,6 @@ const ALL_TESTS = [
   { name: 'indicators', label: 'Indicators', desc: 'Compute EMA, ATR, RSI, Choppiness on 100 real candles' },
   { name: 'risk_manager', label: 'Risk Manager', desc: 'Simulate daily loss limit and consecutive loss rules' },
   { name: 'telegram', label: 'Telegram Alert', desc: 'Send a test message to your Telegram bot' },
-  { name: 'email', label: 'Email Alert', desc: 'Send a test email via Gmail SMTP' },
 ]
 
 type TestStatus = 'PENDING' | 'RUNNING' | 'PASS' | 'FAIL'
@@ -205,7 +204,6 @@ export default function ApiTest() {
             { title: 'Historical Data fails', fix: 'Market may be closed. Data still available but check API status at status.upstox.com' },
             { title: 'WebSocket fails', fix: 'WebSocket URL must use wss:// in production. Check VITE_WS_URL in Vercel env vars.' },
             { title: 'Telegram fails', fix: 'Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in backend environment variables.' },
-            { title: 'Email fails', fix: 'Use Gmail App Password (not your login password). Ensure 2FA is enabled on Gmail.' },
             { title: 'Database fails', fix: 'On Render: ensure /data persistent disk is attached. Run setup_db.py script.' },
           ].map(item => (
             <div key={item.title} className="rounded-lg bg-[#0f1628] border border-[#1e2d45] p-3">

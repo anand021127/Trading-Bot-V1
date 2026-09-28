@@ -43,7 +43,6 @@ SECRET_PATTERNS = (
     (re.compile(r"LTpk[A-Za-z0-9._\-]{20,}"), "upstox LTpk token"),
     (re.compile(r"sk-[A-Za-z0-9]{20,}"), "openai-style key"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\n\r][A-Za-z0-9+/=\n\r]{100,}"), "private key"),
-    (re.compile(r"SMTP_PASSWORD=(?!\s*$)\S{8,}"), "smtp password value"),
     (re.compile(r"SECRET_KEY=(?!\s*$)(?!\{)\S{16,}"), "secret key value"),
 )
 # The scanner scripts contain only these regex DEFINITIONS (self-match, not

@@ -91,12 +91,7 @@ def _get_default_settings_dict():
         },
         "database": {"path": "data_cache/trading_bot.db"},
         "notifications": {
-            "email_enabled": False,
             "telegram_enabled": False,
-            "smtp_server": "smtp.gmail.com",
-            "smtp_port": 587,
-            "sender_email": "",
-            "recipient_email": "",
             "rate_limit_seconds": 60,
         },
         "backtest": {

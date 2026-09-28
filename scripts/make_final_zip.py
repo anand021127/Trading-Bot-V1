@@ -25,6 +25,9 @@ EXCLUDE_DIRS = {
     ".git", "__pycache__", "node_modules", "dist", "venv", ".venv",
     "env", ".pytest_cache", ".mypy_cache", ".ruff_cache", "data",
     ".freebuff", "build", ".vercel", "coverage", ".next",
+    # P53C packaging rule: runtime logs and temporary analysis outputs are
+    # generated artifacts, not application code (nothing imports analysis/).
+    "logs", "analysis",
 }
 EXCLUDE_FILE_EXACT = {".env", "th.db", "trading_bot.db", "backtest_jobs.db"}
 EXCLUDE_FILE_PREFIXES = (
@@ -39,7 +42,6 @@ SECRET_PATTERNS = (
     (re.compile(r"LTpk[A-Za-z0-9._\-]{20,}"), "upstox LTpk token"),
     (re.compile(r"sk-[A-Za-z0-9]{20,}"), "openai-style key"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\n\r][A-Za-z0-9+/=\n\r]{100,}"), "private key"),
-    (re.compile(r"SMTP_PASSWORD=(?!\s*$)\S{8,}"), "smtp password value"),
     (re.compile(r"SECRET_KEY=(?!\s*$)(?!\{)\S{16,}"), "secret key value"),
     (re.compile(r"Bearer\s+[A-Za-z0-9._\-]{30,}"), "bearer token literal"),
 )

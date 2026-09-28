@@ -252,10 +252,7 @@ export interface Settings {
   broker_base_url?: string
   websocket_url?: string
   notifications?: {
-    email_enabled?: boolean
     telegram_enabled?: boolean
-    sender_email?: boolean | string
-    recipient_email?: boolean | string
   }
   capital?: { total: number; max_allocation_per_trade: number; cash_buffer: number }
   risk?: {
