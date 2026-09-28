@@ -140,26 +140,55 @@ async def _test_websocket() -> Dict[str, Any]:
         status = get_broker_ws_status()
         ms = (time.monotonic() - t0) * 1000
 
+        # Explicit lifecycle state from the WS client's state machine:
+        #   DISCONNECTED → CONNECTING → CONNECTED → SUBSCRIBED → STREAMING
+        # STREAMING is reachable ONLY by decoding a real market-data message,
+        # so PASS here proves an actual tick was received — never a mere
+        # successful handshake or subscription.
+        state = status.get("state") or status.get("connection_status")
         conn = status.get("connection_status")
-        if conn == "connected":
-            age = status.get("last_tick_age_seconds")
-            stale_note = " (no ticks yet — market may be closed)" if status.get("is_stale") else ""
+        market_open = bool(status.get("market_open"))
+        ticks = status.get("ticks_received", 0) or 0
+        age = status.get("last_tick_age_seconds")
+
+        if state == "streaming" and status.get("streaming") is True:
             return _result(
                 "websocket", "PASS", ms,
-                f"v3 feed CONNECTED. {status.get('subscribed_instruments', 0)} instruments subscribed. "
-                f"Last tick {age}s ago{stale_note}.",
+                f"v3 feed STREAMING — {ticks} market-data ticks received "
+                f"({status.get('subscribed_instruments', 0)} instruments subscribed). "
+                f"Last tick {age}s ago.",
             )
-        if conn == "auth_failed":
-            return _result("websocket", "FAIL", ms, "",
-                            status.get("last_error") or "Auth failed — regenerate token in Settings.")
-        if conn in ("connecting", "reconnecting"):
+
+        if state in ("connected", "subscribed"):
+            # Connected/subscription accepted but NO real data message yet —
+            # never a PASS. Distinguish market-closed from stale.
+            if not market_open:
+                return _result(
+                    "websocket", "WARN", ms,
+                    f"v3 feed {state.upper()} — subscription accepted, but the market is "
+                    "closed so no live tick can arrive. This is expected and is NOT "
+                    "reported as streaming.",
+                )
             return _result(
                 "websocket", "WARN", ms,
-                f"v3 feed is {conn} (attempt {status.get('reconnect_attempts', 0)}). "
+                f"v3 feed {state.upper()} but no market-data message received yet "
+                f"({ticks} ticks so far) — waiting for ticks. If this persists "
+                "during market hours, check the subscription/entitlement.",
+            )
+
+        if state == "reconnect_wait" or conn in ("connecting", "reconnecting"):
+            return _result(
+                "websocket", "WARN", ms,
+                f"v3 feed is {state or conn} (attempt {status.get('reconnect_attempts', 0)}). "
                 "Not yet streaming — check again shortly.",
             )
+
+        if conn == "auth_failed" or status.get("auth_failed") is True:
+            return _result("websocket", "FAIL", ms, "",
+                            status.get("last_error") or "Auth failed — regenerate token in Settings.")
+
         return _result("websocket", "FAIL", ms, "",
-                        status.get("last_error") or f"v3 feed status: {conn}")
+                        status.get("last_error") or f"v3 feed status: {state or conn}")
     except Exception as e:
         ms = (time.monotonic() - t0) * 1000
         return _result("websocket", "FAIL", ms, "", str(e))
