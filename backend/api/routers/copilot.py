@@ -90,14 +90,49 @@ def _resolve_context(question: str, tools: CopilotTools, state: Any) -> Dict[str
         include_trades=intent == INTENT_TRADING,
     )
 
+    # PHASE B — ground EVERY chat turn in the authoritative context. The
+    # old intent routing starved whole domains ("Explain the latest
+    # rejection" produced "I'm not aware..." because no section was
+    # included). The full builder is bounded (~a few KB redacted JSON), so
+    # we now ALWAYS embed it; question-relevant sections remain ordered
+    # first so intent still shapes emphasis.
+    full_ctx: Dict[str, Any] = {}
+    try:
+        from backend.copilot.full_context import build_full_context as _bfc
+        try:
+            app_state = state.app_state  # type: ignore[attr-defined]
+        except Exception:
+            app_state = None
+        full_ctx = _bfc(app_state) or {}
+    except Exception:
+        full_ctx = {}
+
     merged: Dict[str, Any] = dict(extra)
     for k, v in base_ctx.items():
         if not k.startswith("_"):
             merged[k] = v
+    for k, v in full_ctx.items():
+        merged.setdefault(k, v)
     merged["_intent"] = intent
     if base_ctx.get("_symbol"):
         merged["_symbol"] = base_ctx["_symbol"]
     return merged
+
+
+@router.get("/context")
+def copilot_context(request: Request) -> Dict[str, Any]:
+    """THE ONE authoritative read-only Copilot context (PHASE B).
+
+    Returns the full structured bot state the Copilot chat is grounded in:
+    bot/config/market/data/websocket/scanner, latest signal/decision/
+    rejection with the FULL why-didn't-we-trade gate chain, today, risk,
+    positions, recent trades, execution, reconciliation, broker, AI trading
+    decision state, backtest summary, configuration mismatches, and recent
+    errors. Every section carries `source` provenance + `as_of` freshness.
+    Read-only; no secrets (the payload passes the secret redaction layer).
+    """
+    from backend.copilot.full_context import build_full_context
+    return build_full_context(request.app.state)
 
 
 @router.get("/status")

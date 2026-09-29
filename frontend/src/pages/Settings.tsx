@@ -266,9 +266,12 @@ export default function Settings() {
     if (!settings) return
     setSaving(true)
     try {
-      await updateSettings(settings)
+      const res = await updateSettings(settings)
       setSaved(true)
-      toast.success('Settings saved to database — persists across restarts!')
+      toast.success('Settings saved to database — they are now the AUTHORITATIVE runtime values (no restart needed).')
+      if (res?.worker_restart_note) {
+        toast(res.worker_restart_note, { icon: 'ℹ️', duration: 10000 })
+      }
       setTimeout(() => setSaved(false), 4000)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Failed to save')
@@ -606,9 +609,9 @@ export default function Settings() {
             <NumInput value={risk.max_daily_loss_pct * 100}
               onChange={v => update(['risk', 'max_daily_loss_pct'], v / 100)} min={1} max={5} step={0.25} />
           </Field>
-          <Field label="Max Trades Per Day">
+          <Field label="Max Trades Per Day" desc="Allowed range 1–20 (backend validated). Takes effect on the next trade decision — no restart needed.">
             <NumInput value={risk.max_trades_per_day}
-              onChange={v => update(['risk', 'max_trades_per_day'], v)} min={1} max={10} />
+              onChange={v => update(['risk', 'max_trades_per_day'], v)} min={1} max={20} />
           </Field>
           <Field label="Max Concurrent Positions">
             <NumInput value={risk.max_concurrent_positions}

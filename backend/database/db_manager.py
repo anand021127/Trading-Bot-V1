@@ -170,6 +170,20 @@ class DatabaseManager:
                 trades_taken INTEGER NOT NULL DEFAULT 0,
                 realized_pnl REAL NOT NULL DEFAULT 0.0
             );
+            -- Performance snapshots (phase-B fix): the Performance router has
+            -- always queried this table but init_db() never created it, so the
+            -- endpoint 500'd with "no such table: performance_snapshots" and the
+            -- frontend showed Network Error on a fresh database.
+            CREATE TABLE IF NOT EXISTS performance_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                equity REAL,
+                net_pnl REAL,
+                total_trades INTEGER,
+                win_rate REAL,
+                max_drawdown_pct REAL,
+                created_at TEXT
+            );
             """
         )
         # Migrations: purely additive, idempotent, restart-safe. Guarded by
@@ -402,8 +416,52 @@ class DatabaseManager:
         self._connect().commit()
 
     def list_performance_snapshots(self) -> List[Dict[str, Any]]:
-        rows = self._connect().execute("SELECT * FROM performance_snapshots ORDER BY id").fetchall()
+        # performance_snapshots is created in init_db() (phase-B fix); on a
+        # legacy DB whose creation somehow failed, retry additively here so
+        # the Performance endpoint degrades to an empty list — never a 500.
+        try:
+            rows = self._connect().execute(
+                "SELECT * FROM performance_snapshots ORDER BY id"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            self._connect().execute(
+                """CREATE TABLE IF NOT EXISTS performance_snapshots (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       date TEXT, equity REAL, net_pnl REAL,
+                       total_trades INTEGER, win_rate REAL,
+                       max_drawdown_pct REAL, created_at TEXT
+                   )"""
+            )
+            self._connect().commit()
+            rows = self._connect().execute(
+                "SELECT * FROM performance_snapshots ORDER BY id"
+            ).fetchall()
         return [dict(r) for r in rows]
+
+    def insert_performance_snapshot(
+        self,
+        *,
+        date: Optional[str] = None,
+        equity: Optional[float] = None,
+        net_pnl: Optional[float] = None,
+        total_trades: Optional[int] = None,
+        win_rate: Optional[float] = None,
+        max_drawdown_pct: Optional[float] = None,
+    ) -> int:
+        """Persist one performance snapshot row; returns the row id."""
+        with self._transaction() as conn:
+            cur = conn.execute(
+                """INSERT INTO performance_snapshots
+                       (date, equity, net_pnl, total_trades, win_rate,
+                        max_drawdown_pct, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    date or self._now().date().isoformat(),
+                    equity, net_pnl, total_trades, win_rate, max_drawdown_pct,
+                    self._now().isoformat(),
+                ),
+            )
+        return int(cur.lastrowid or 0)
 
     # ── tokens ──────────────────────────────────────────────
     def _decode_jwt_claims(self, token: str) -> Dict[str, Any]:

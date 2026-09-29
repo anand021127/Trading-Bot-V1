@@ -41,6 +41,8 @@ const QUICK_PROMPTS = [
   'Explain the latest backtest',
   'What is my current risk?',
   'Explain V8-D',
+  'Is the bot using the capital I configured?',
+  'What configuration mismatch exists?',
 ]
 
 const POLL_INTERVAL_MS = 1000
@@ -279,6 +281,274 @@ function AIDecisionPanel() {
         Backtest AI layer: <span className="text-amber-300">{status.backtest_status.replace(/_/g, ' ')}</span>
         {' '}(historical AI decisions are not reproducible — backtests are V8-D-only and labeled as such)
       </div>
+    </div>
+  )
+}
+
+/*
+ * PHASE B — Operational context cards.
+ * Render the ONE authoritative backend context (GET /api/copilot/context)
+ * directly in the UI: bot status, configuration + source labels, market,
+ * websocket, scanner, today, risk, latest signal/rejection with the full
+ * gate chain, AI trading decision, positions, recent trades, backtest,
+ * configuration mismatches and recent errors. Read-only observation —
+ * mirrors exactly what the Copilot chat is grounded in.
+ */
+type CopilotContext = {
+  generated_at?: string
+  bot?: any
+  configuration?: any
+  market?: any
+  data_health?: any
+  websocket?: any
+  scanner?: any
+  latest_signal?: any
+  latest_decision?: any
+  latest_rejection?: any
+  today?: any
+  positions?: any
+  recent_trades?: any
+  risk?: any
+  execution?: any
+  reconciliation?: any
+  broker?: any
+  ai?: any
+  backtest?: any
+  configuration_mismatches?: any[]
+  errors?: any
+}
+
+function CtxCard({ title, badge, children, defaultOpen = false }: {
+  title: string; badge?: string | null; children: React.ReactNode; defaultOpen?: boolean
+}) {
+  return (
+    <details className="bg-[#141b2d] border border-[#1e2d45] rounded-xl" open={defaultOpen}>
+      <summary className="cursor-pointer select-none px-4 py-2.5 flex items-center justify-between gap-2 text-xs font-semibold text-white">
+        <span>{title}</span>
+        {badge != null && badge !== '' && (
+          <span className="text-[10px] font-normal text-slate-400 truncate max-w-[60%]">{badge}</span>
+        )}
+      </summary>
+      <div className="px-4 pb-3 text-[11px] text-slate-300 space-y-1">{children}</div>
+    </details>
+  )
+}
+
+function KV({ k, v }: { k: string; v: React.ReactNode }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="text-slate-500">{k}</span>
+      <span className="text-right truncate">{v}</span>
+    </div>
+  )
+}
+
+const fmtINR = (n: unknown) =>
+  n == null ? '\u2014' : `\u20B9${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
+
+const stageBadgeCls = (stage?: string) =>
+  stage === 'TRADED'
+    ? 'text-emerald-300'
+    : stage === 'UNKNOWN' || stage === 'NO_SIGNAL_OR_DATA'
+      ? 'text-slate-400'
+      : 'text-amber-300'
+
+function BotContextCards() {
+  const [ctx, setCtx] = useState<CopilotContext | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    const load = () => {
+      api.get('/api/copilot/context')
+        .then(r => { if (alive) { setCtx(r.data); setFailed(false) } })
+        .catch(() => { if (alive) setFailed(true) })
+    }
+    void load()
+    const id = setInterval(load, 15000)
+    return () => { alive = false; clearInterval(id) }
+  }, [])
+
+  if (failed && !ctx) return null
+  if (!ctx) return null
+
+  const bot = ctx.bot || {}
+  const cfg = ctx.configuration || {}
+  const ws = ctx.websocket || {}
+  const scan = ctx.scanner || {}
+  const today = ctx.today || {}
+  const rej = ctx.latest_rejection || {}
+  const chain = rej?.gate_chain || {}
+  const sig = ctx.latest_signal || {}
+  const ai = ctx.ai || {}
+  const risk = ctx.risk || {}
+  const pos = ctx.positions || {}
+  const trades = ctx.recent_trades || {}
+  const bt = ctx.backtest || {}
+  const mism: any[] = ctx.configuration_mismatches || []
+
+  return (
+    <div className="space-y-2">
+      <div className="text-[10px] uppercase tracking-wider text-slate-500 flex items-center justify-between">
+        <span>Live operational context</span>
+        {ctx.generated_at && <span>updated {new Date(ctx.generated_at).toLocaleTimeString()}</span>}
+      </div>
+
+      <CtxCard title="Bot Status" defaultOpen badge={bot.running ? 'RUNNING' : 'STOPPED'}>
+        <KV k="Running" v={String(bot.running ?? '—')} />
+        <KV k="Mode" v={(bot.mode ?? '—').toUpperCase()} />
+        <KV k="Strategy" v={bot.strategy ?? '—'} />
+        <KV k="Broker" v={bot.broker ?? '—'} />
+        <KV k="Market" v={bot.market_open == null ? '—' : bot.market_open ? 'OPEN' : 'CLOSED'} />
+        <KV k="Kill switch" v={bot.kill_switch_active ? 'ACTIVE' : 'clear'} />
+      </CtxCard>
+
+      <CtxCard title="Configuration (authoritative)" defaultOpen
+        badge={`${fmtINR(cfg?.capital?.starting_capital)} · ${cfg?.risk?.max_trades_per_day ?? '\u2014'} trades/day`}>
+        <KV k="Capital" v={<>{fmtINR(cfg?.capital?.starting_capital)} <span className="text-slate-500">({cfg?.capital?.source ?? '\u2014'})</span></>} />
+        <KV k="Current equity" v={fmtINR(cfg?.capital?.current_equity)} />
+        <KV k="Max trades/day" v={<>{cfg?.risk?.max_trades_per_day ?? '\u2014'} <span className="text-slate-500">({cfg?.risk?.max_trades_source ?? '\u2014'})</span></>} />
+        <KV k="Risk per trade" v={cfg?.risk?.max_risk_per_trade_pct != null ? `${(cfg.risk.max_risk_per_trade_pct * 100).toFixed(2)}%` : '\u2014'} />
+        <KV k="Daily loss limit" v={cfg?.risk?.max_daily_loss_pct != null ? `${(cfg.risk.max_daily_loss_pct * 100).toFixed(2)}%` : '\u2014'} />
+        {mism.length > 0 && (
+          <div className="mt-1 rounded border border-amber-800/50 bg-amber-950/30 p-2 text-amber-300">
+            {mism.map((m, i) => <div key={i}>⚠ {m.message}</div>)}
+          </div>
+        )}
+      </CtxCard>
+
+      <CtxCard title="Market · Data · WebSocket"
+        badge={`${ws?.state?.toUpperCase() ?? 'UNKNOWN'}${ws?.last_tick_age_seconds != null ? ` · ${Math.round(ws.last_tick_age_seconds)}s` : ''}`}>
+        <KV k="Session" v={ctx?.market?.session_status ?? '\u2014'} />
+        <KV k="WS state" v={ws?.state ?? '\u2014'} />
+        <KV k="Streaming" v={ws?.streaming ? 'YES (real ticks)' : 'NO'} />
+        <KV k="Last tick age" v={ws?.last_tick_age_seconds != null ? `${ws.last_tick_age_seconds}s` : '\u2014'} />
+        <KV k="Market data" v={ws?.market_data_status ?? '\u2014'} />
+        {ws?.health_interpretation && <div className="text-slate-500">{ws.health_interpretation}</div>}
+      </CtxCard>
+
+      <CtxCard title="Scanner"
+        badge={scan?.available ? (scan?.scanner_status ?? scan?.worker_last_scan_reason ?? 'running') : 'no data'}>
+        {scan?.available
+          ? <>
+              {scan?.last_scan_seconds_ago != null && <KV k="Last scan" v={`${Math.round(scan.last_scan_seconds_ago)}s ago`} />}
+              {scan?.worker_last_scan_reason && <KV k="Worker last scan" v={scan.worker_last_scan_reason} />}
+              {scan?.source_detail && <div className="text-slate-500">{scan.source_detail}</div>}
+            </>
+          : <div className="text-slate-500">{scan?.reason || 'No scanner state available.'}</div>}
+      </CtxCard>
+
+      <CtxCard title="Why didn't we trade?" defaultOpen
+        badge={chain?.available === false ? 'no scan' : (chain?.stage ?? sig?.signal ?? '—')}>
+        {chain?.available === false
+          ? <div className="text-slate-500">{chain?.reason || rej?.reason || 'No scan has been recorded since bot startup.'}</div>
+          : <>
+              {chain?.human_summary && <div className="text-slate-200">{chain.human_summary}</div>}
+              {chain?.signal === 'BUY' && <KV k="V8-D signal" v="BUY" />}
+              {chain?.ai_decision && <KV k="AI decision" v={chain.ai_decision} />}
+              {chain?.scan_reason && <div className="text-slate-500">reason: {chain.scan_reason}</div>}
+              {chain?.age_seconds != null && <div className="text-slate-500">recorded {Math.round(chain.age_seconds)}s ago</div>}
+            </>
+        }
+      </CtxCard>
+
+      <CtxCard title="Latest signal"
+        badge={sig?.available ? String(sig?.signal ?? 'NONE') : 'none recorded'}>
+        {sig?.available
+          ? <>
+              <KV k="Signal" v={String(sig?.signal ?? 'NONE')} />
+              {sig?.reason && <div className="text-slate-500">{sig.reason}</div>}
+              {(sig?.rejection_reasons || []).slice(0, 2).map((r: string, i: number) => (
+                <div key={i} className="text-slate-500">{r}</div>
+              ))}
+            </>
+          : <div className="text-slate-500">{sig?.reason || 'No actionable V8-D signal has been recorded.'}</div>}
+      </CtxCard>
+
+      <CtxCard title="AI Trading Decision"
+        badge={ai?.available ? (ai?.enabled ? 'ENABLED' : 'DISABLED') : 'unknown'}>
+        {ai?.available
+          ? <>
+              <KV k="Enabled" v={String(ai?.enabled)} />
+              <KV k="Model" v={`${ai?.provider ?? '\u2014'} / ${ai?.model ?? '\u2014'}`} />
+              {ai?.latest?.available && <KV k="Latest" v={`${ai.latest.decision} (${Math.round(ai.latest.age_seconds ?? 0)}s ago)`} />}
+              {ai?.latest && !ai.latest.available && <div className="text-slate-500">{ai.latest.reason}</div>}
+              <div className="text-slate-500">Separate from the Copilot assistant — this gates V8-D BUYs before hard risk.</div>
+            </>
+          : <div className="text-slate-500">{ai?.reason || 'AI decision state unavailable.'}</div>}
+      </CtxCard>
+
+      <CtxCard title="Today"
+        badge={today?.available ? `${today?.trades_today ?? 0}/${today?.configured_max_trades ?? '?'} trades · ${fmtINR(today?.realized_pnl)}` : '\u2014'}>
+        {today?.available
+          ? <>
+              <KV k="Trades today" v={`${today?.trades_today ?? 0} / ${today?.configured_max_trades ?? '\u2014'}${today?.trades_remaining != null ? ` (${today.trades_remaining} left)` : ''}`} />
+              <KV k="Wins / Losses" v={`${today?.wins ?? 0}W · ${today?.losses ?? 0}L`} />
+              <KV k="Realized P&L" v={fmtINR(today?.realized_pnl)} />
+            </>
+          : <div className="text-slate-500">{today?.reason || 'No trades recorded today.'}</div>}
+      </CtxCard>
+
+      <CtxCard title="Risk"
+        badge={risk?.available ? `${risk?.trades_used ?? 0}/${risk?.max_trades ?? '\u2014'}` : '\u2014'}>
+        {risk?.available
+          ? <>
+              <KV k="Trades used" v={`${risk?.trades_used ?? 0}/${risk?.max_trades ?? '\u2014'}`} />
+              {risk?.daily_loss_used_pct != null && <KV k="Daily loss used" v={`${risk.daily_loss_used_pct}%`} />}
+              {risk?.daily_pnl != null && <KV k="Daily P&L" v={fmtINR(risk.daily_pnl)} />}
+              {risk?.consecutive_losses != null && <KV k="Consecutive losses" v={risk.consecutive_losses} />}
+              {risk?.stop_reason && <div className="text-amber-300">{risk.stop_reason}</div>}
+              {risk?.note && <div className="text-slate-500">{risk.note}</div>}
+            </>
+          : <div className="text-slate-500">{risk?.reason || 'Risk state unavailable.'}</div>}
+      </CtxCard>
+
+      <CtxCard title="Positions"
+        badge={pos?.available ? `${pos?.count ?? 0} open` : '\u2014'}>
+        {pos?.available
+          ? (pos?.count > 0
+              ? (pos.positions || []).map((p: any, i: number) => (
+                  <div key={i}>{p?.underlying ?? p?.symbol} {p?.strike ?? ''} {p?.option_type ?? ''} · qty {p?.quantity} @ {fmtINR(p?.average_price)}</div>
+                ))
+              : <div className="text-slate-500">No open positions.</div>)
+          : <div className="text-slate-500">{pos?.reason || 'Positions unavailable.'}</div>}
+      </CtxCard>
+
+      <CtxCard title="Recent trades"
+        badge={trades?.available ? `last ${trades?.count ?? 0}` : '\u2014'}>
+        {trades?.available
+          ? (trades?.count > 0
+              ? (trades.trades || []).slice(0, 5).map((t: any) => (
+                  <div key={t.trade_id} className="flex justify-between gap-2">
+                    <span className="truncate">{t.underlying ?? t.symbol ?? '\u2014'} {t.strike ?? ''} {t.option_type ?? ''}</span>
+                    <span className={Number(t.net_pnl) >= 0 ? 'text-emerald-300' : 'text-red-300'}>{fmtINR(t.net_pnl)}</span>
+                  </div>
+                ))
+              : <div className="text-slate-500">No trades stored yet.</div>)
+          : <div className="text-slate-500">{trades?.reason || 'Trades unavailable.'}</div>}
+      </CtxCard>
+
+      <CtxCard title="Backtest"
+        badge={bt?.available ? `${bt?.summary?.trades ?? '\u2014'} trades · net ${fmtINR(bt?.summary?.net_pnl)}` : 'none stored'}>
+        {bt?.available
+          ? <>
+              <KV k="Period" v={`${bt?.config?.start_date ?? '\u2014'} → ${bt?.config?.end_date ?? '\u2014'}`} />
+              <KV k="Trades / Win rate" v={`${bt?.summary?.trades ?? '\u2014'} · ${bt?.summary?.win_rate_pct ?? '\u2014'}%`} />
+              <KV k="Net P&L" v={fmtINR(bt?.summary?.net_pnl)} />
+              <KV k="Profit factor / MaxDD" v={`${bt?.summary?.profit_factor ?? '\u2014'} · ${bt?.summary?.max_drawdown_pct ?? '\u2014'}%`} />
+              <div className="text-slate-500">Read from the latest stored backtest result — never hardcoded.</div>
+            </>
+          : <div className="text-slate-500">{bt?.reason || 'No completed backtest result is stored.'}</div>}
+      </CtxCard>
+
+      {(mism.length > 0 || ctx?.errors?.available) && (
+        <CtxCard title="Mismatches · Errors"
+          badge={`${mism.length} mismatch${mism.length === 1 ? '' : 'es'}`}>
+          {mism.length === 0 && <div className="text-slate-500">No configuration mismatches.</div>}
+          {mism.map((m, i) => <div key={i} className="text-amber-300">⚠ {m.message}</div>)}
+          {ctx?.errors?.note && <div className="text-slate-500">{ctx.errors.note}</div>}
+        </CtxCard>
+      )}
     </div>
   )
 }
@@ -564,6 +834,8 @@ export default function Copilot() {
       )}
 
       <AIDecisionPanel />
+
+      <BotContextCards />
 
       <div className="flex-1 min-h-0 bg-[#141b2d] border border-[#1e2d45] rounded-xl flex flex-col">
         <div className="flex-1 overflow-y-auto p-4 space-y-3">

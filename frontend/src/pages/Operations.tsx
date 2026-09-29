@@ -31,7 +31,12 @@ export default function Operations() {
 
   const load = useCallback(async () => {
     try {
-      const r = await api.get('/bot/operations')
+      // PHASE B 404 FIX: these calls previously used bare bot-prefixed paths
+      // without the /api prefix — the axios baseURL is EMPTY for
+      // same-origin/duckdns deployments, so the browser hit a /bot path on
+      // the frontend origin and got 404 on every 5s poll. The backend router
+      // is mounted at /api/bot.
+      const r = await api.get('/api/bot/operations')
       setOps(r.data)
     } catch {
       /* keep last snapshot */
@@ -59,19 +64,19 @@ export default function Operations() {
     }
   }
 
-  const enableAI = () => post('ai', '/bot/ai-toggle', { enabled: true })
-  const disableAI = () => post('ai', '/bot/ai-toggle', { enabled: false })
-  const paperMode = () => post('paper', '/bot/mode', { mode: 'paper' })
+  const enableAI = () => post('ai', '/api/bot/ai-toggle', { enabled: true })
+  const disableAI = () => post('ai', '/api/bot/ai-toggle', { enabled: false })
+  const paperMode = () => post('paper', '/api/bot/mode', { mode: 'paper' })
   const liveMode = () => {
     if (window.confirm(
       'Arm LIVE trading?\n\nThis runs the full backend readiness gate (auth, funds, data, reconciliation, risk, kill switch, strategy, instruments).\n' +
       'Even when all gates pass, live execution only arms after a worker restart with TRADING_MODE=live. Continue?')) {
-      post('live', '/bot/mode', { mode: 'live' })
+      post('live', '/api/bot/mode', { mode: 'live' })
     }
   }
   const kill = () => {
     if (window.confirm('EMERGENCY KILL — stop all trading immediately?\n\nNew orders are blocked backend-side until the switch is reset.')) {
-      post('kill', '/bot/kill')
+      post('kill', '/api/bot/kill')
     }
   }
 
@@ -129,7 +134,30 @@ export default function Operations() {
             ? <span className="text-emerald-400 font-bold">LIVE READY</span>
             : <span className="text-amber-400">LIVE BLOCKED</span>}
         </Row>
+        <Row label="Capital (runtime)">
+          {ops?.runtime_config?.capital
+            ? <>₹{Number(ops.runtime_config.capital.starting_capital ?? 0).toLocaleString('en-IN')}
+                <span className="text-slate-500 text-xs ml-2">{ops.runtime_config.capital.source}</span></>
+            : '—'}
+        </Row>
+        <Row label="Max Trades/Day (runtime)">
+          {ops?.runtime_config?.risk
+            ? <>{ops.runtime_config.risk.max_trades_per_day}
+                <span className="text-slate-500 text-xs ml-2">{ops.runtime_config.risk.max_trades_source}</span></>
+            : '—'}
+        </Row>
       </div>
+
+      {!!ops?.runtime_config?.mismatches?.length && (
+        <div className="bg-amber-950/40 border border-amber-700/50 rounded-xl p-4">
+          <p className="text-amber-300 text-sm font-semibold mb-2">⚠ CONFIGURATION MISMATCH</p>
+          <ul className="list-disc list-inside text-amber-200/90 text-xs space-y-1">
+            {ops.runtime_config.mismatches.map((m: { key?: string; message?: string }, i: number) => (
+              <li key={i}>{m.message || `${m.key}: saved ≠ runtime`}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {live && !live.ready && (
         <div className="bg-[#0d1424] border border-[#1e2d45] rounded-xl p-4">

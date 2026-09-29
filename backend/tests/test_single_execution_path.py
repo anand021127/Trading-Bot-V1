@@ -246,7 +246,9 @@ def test_paper_mode_order_manager_is_paper():
 
 def test_no_direct_engine_place_order_in_source():
     """Static guard: execute_multi_signal body must not call place_order directly."""
-    src = open("backend/strategy/trading_engine.py", encoding="utf-8").read()
+    # __file__-relative: the suite may run with cwd at repo root or backend/.
+    src = open(os.path.join(os.path.dirname(__file__), "..", "strategy", "trading_engine.py"),
+               encoding="utf-8").read()
     # After the pipeline helper's place callback, the only place_order should be inside _place
     assert "order = self.order_manager.place_order(req)" not in src
     assert "_submit_entry_via_pipeline" in src

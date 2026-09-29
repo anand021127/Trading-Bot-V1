@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
 
+from backend.config.runtime_config import get_effective_settings
 from backend.config.settings import load_settings
 from backend.database.db_manager import DatabaseManager
 
@@ -32,7 +33,15 @@ async def get_performance(
     date_from: Optional[str] = Query(None),
     date_to:   Optional[str] = Query(None),
 ) -> Dict[str, Any]:
-    snapshots = db_manager.list_performance_snapshots()
+    # PHASE B: list_performance_snapshots is safe even if the table is
+    # missing (db_manager re-creates it additively) — a fresh database now
+    # yields [] instead of raising "no such table" → HTTP 500 → frontend
+    # Network Error.
+    try:
+        snapshots = db_manager.list_performance_snapshots()
+    except Exception as e:
+        logger.error("Performance snapshots load error: %s", e)
+        snapshots = []
     if snapshots:
         performance = [_row_to_dict(snapshot) for snapshot in snapshots]
         return {"total_snapshots": len(performance), "performance": performance}
@@ -96,22 +105,26 @@ async def get_performance(
 
     avg_win  = gross_w / len(wins)   if wins   else 0
     avg_loss = gross_l / len(losses) if losses else 0
-    expectancy_r = (win_rate/100 * (avg_win/settings.capital.total*100)) - ((1 - win_rate/100) * (avg_loss/settings.capital.total*100))
+    # PHASE B: R-normalizations use the AUTHORITATIVE configured capital
+    # (Settings-DB over env), not the import-time env snapshot.
+    settings_eff = get_effective_settings()
+    capital_total = float(settings_eff.capital.total) or 100000.0
+    expectancy_r = (win_rate/100 * (avg_win/capital_total*100)) - ((1 - win_rate/100) * (avg_loss/capital_total*100))
 
     return {
         "metrics": {
             "total_trades":     total,
             "win_rate":         round(win_rate, 2),
-            "avg_win_r":        round(gross_w / len(wins)   / max(settings.capital.total * 0.01, 1), 2) if wins   else 0,
-            "avg_loss_r":       round(gross_l / len(losses) / max(settings.capital.total * 0.01, 1), 2) if losses else 0,
+            "avg_win_r":        round(gross_w / len(wins)   / max(capital_total * 0.01, 1), 2) if wins   else 0,
+            "avg_loss_r":       round(gross_l / len(losses) / max(capital_total * 0.01, 1), 2) if losses else 0,
             "profit_factor":    round(pf, 2),
             "expectancy_r":     round(expectancy_r, 2),
             "max_drawdown_pct": round(max_dd, 2),
             "sharpe_ratio":     round(sharpe, 2),
             "sortino_ratio":    round(sortino, 2),
-            "calmar_ratio":     round((net_profit / settings.capital.total * 100) / max_dd, 2) if max_dd else 0,
+            "calmar_ratio":     round((net_profit / capital_total * 100) / max_dd, 2) if max_dd else 0,
             "net_profit":       round(net_profit, 2),
-            "net_profit_pct":   round(net_profit / settings.capital.total * 100, 2),
+            "net_profit_pct":   round(net_profit / capital_total * 100, 2),
             "best_day":         round(max(daily_vals), 2) if daily_vals else 0,
             "worst_day":        round(min(daily_vals), 2) if daily_vals else 0,
             "avg_daily_pnl":    round(sum(daily_vals) / len(daily_vals), 2) if daily_vals else 0,

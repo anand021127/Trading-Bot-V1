@@ -176,6 +176,31 @@ def _risk_state() -> Dict[str, Any]:
     except Exception:
         pass
     out: Dict[str, Any] = {}
+    # PHASE B — report the AUTHORITATIVE runtime limits (Settings-DB blob
+    # over env), not frozen V8D_PARAMS constants, so "is the bot really
+    # using 20 trades/day / ₹20,000?" is answerable with provenance.
+    try:
+        from backend.config.runtime_config import get_config_sources, get_effective_settings
+        eff = get_effective_settings()
+        sources = get_config_sources()
+        out.update({
+            "starting_capital": float(eff.capital.total),
+            "max_risk_per_trade_pct": float(eff.risk.max_risk_per_trade_pct),
+            "capital_alloc_pct": float(eff.capital.max_allocation_per_trade),
+            "max_daily_trades": int(eff.risk.max_trades_per_day),
+            "max_concurrent_positions": int(eff.risk.max_concurrent_positions),
+            "max_daily_loss_pct": float(eff.risk.max_daily_loss_pct),
+            "config_source": "sqlite_settings_over_env",
+            "capital_source": sources.get("capital.total", "unknown"),
+            "max_trades_source": sources.get("risk.max_trades_per_day", "unknown"),
+        })
+    except Exception as exc:
+        out["error"] = f"effective config unreadable: {type(exc).__name__}"
+        out.update({
+            "risk_pct_per_trade": V8D_PARAMS["max_account_risk_pct"],
+            "capital_alloc_pct": V8D_PARAMS["max_capital_alloc_pct"],
+            "max_daily_trades": V8D_PARAMS["max_daily_trades"],
+        })
     try:
         from backend.database.db_manager import DatabaseManager
         db = DatabaseManager(db_path=os.environ.get("DATABASE_PATH", "data/trading_bot.db"))
@@ -184,12 +209,9 @@ def _risk_state() -> Dict[str, Any]:
             out["account_equity_snapshot"] = snap
         else:
             out["missing"] = ["paper_equity_snapshot not persisted yet"]
-        out["risk_pct_per_trade"] = V8D_PARAMS["max_account_risk_pct"]
-        out["capital_alloc_pct"] = V8D_PARAMS["max_capital_alloc_pct"]
-        out["max_daily_trades"] = V8D_PARAMS["max_daily_trades"]
         out["lot_size_note"] = "per-contract from broker metadata; varies by index"
     except Exception as e:
-        out["error"] = f"risk state unreadable: {type(e).__name__}"
+        out["error"] = out.get("error") or f"risk state unreadable: {type(e).__name__}"
     return out
 
 

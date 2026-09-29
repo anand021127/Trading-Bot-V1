@@ -33,6 +33,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from backend.config.runtime_config import get_effective_settings
 from backend.database.db_manager import DatabaseManager
 from backend.paper.paper_runtime import PaperStartupError, PaperTradingRuntime
 from backend.paper.worker_lock import WorkerLock, WorkerLockError
@@ -316,7 +317,10 @@ class PaperWorker:
         startup constant.
 
         Priority: 1) the persisted equity snapshot the runtime maintains
-        (realized P&L-adjusted, survives restarts), 2) TRADING_CAPITAL env.
+        (realized P&L-adjusted, survives restarts), 2) the AUTHORITATIVE
+        configured capital (Settings-DB blob over env — phase-B fix; this
+        used to read TRADING_CAPITAL env directly, so a user who saved
+        capital=₹20,000 in the Settings UI still seeded scans at ₹100,000).
         The scanner additionally re-reads runtime.realized_equity on every
         scan (scan_once); this value only seeds it before the first tick.
         """
@@ -330,7 +334,7 @@ class PaperWorker:
         except Exception:
             pass
         try:
-            return float(os.environ.get("TRADING_CAPITAL", "100000"))
+            return float(get_effective_settings().capital.total)
         except (TypeError, ValueError):
             return 100000.0
 

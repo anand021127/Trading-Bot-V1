@@ -418,7 +418,7 @@ export default function Overview() {
         <MetricCard
           title="Available Capital"
           value={formatCurrency(cap?.available ?? 0)}
-          sub={`Used: ${formatCurrency(cap?.used ?? 0)}`}
+          sub={`Used: ${formatCurrency(cap?.used ?? 0)}${cap?.current != null ? ` · Equity: ${formatCurrency(cap.current)}` : ''}`}
           icon={<Activity size={14} />}
         />
         <MetricCard
@@ -559,6 +559,7 @@ export default function Overview() {
             {[
               { label: 'Status', val: isKilled ? 'KILLED' : isRunning ? 'Running' : 'Stopped', color: isKilled ? 'text-red-400' : isRunning ? 'text-emerald-400' : 'text-slate-400' },
               { label: 'Mode', val: (sys?.mode ?? 'paper').toUpperCase(), color: 'text-amber-400' },
+              { label: 'Capital Source', val: cap?.source ?? '—', color: 'text-slate-300' },
               { label: 'Uptime', val: botUptime > 0 ? `${Math.floor(botUptime / 3600)}h ${Math.floor((botUptime % 3600) / 60)}m ${Math.floor(botUptime % 60)}s` : '—', color: 'text-slate-300' },
               { label: 'Health', val: botHealthStatus, color: botHealthStatus === 'HEALTHY' ? 'text-emerald-400' : botHealthStatus === 'DEGRADED' ? 'text-amber-400' : 'text-slate-400' },
               { label: 'Stop Reason', val: botStatus?.stop_reason || '—', color: 'text-slate-400' },

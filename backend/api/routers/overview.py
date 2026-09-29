@@ -8,12 +8,13 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Request
 
 from ..websocket import manager as websocket_manager
+from backend.config.runtime_config import get_effective_settings
 from backend.config.settings import load_settings
 from backend.database.db_manager import DatabaseManager
 from backend.risk.risk_manager import RiskManager
 
 router = APIRouter()
-settings = load_settings()
+settings = load_settings()  # legacy module-level snapshot (fallback only — see below)
 db_manager = DatabaseManager(db_path=settings.database.path)
 
 # Fallback risk manager — used ONLY when no live engine is attached to
@@ -98,6 +99,13 @@ def _get_today_stats() -> Dict[str, Any]:
 
 @router.get("/overview")
 async def get_overview(request: Request) -> Dict[str, Any]:
+    # PHASE B — ONE authoritative config. Previously this endpoint used the
+    # module-level env snapshot `settings`, so a user who saved capital
+    # ₹20,000 in the Settings UI still saw ₹1,00,000 here. Now every request
+    # re-resolves Settings-DB-blob-over-env — the SAME authority the trading
+    # engine's RiskManager uses (trading_engine.py reads
+    # get_effective_settings() when constructing it).
+    settings = get_effective_settings()
     today_stats = _get_today_stats()
     # ROOT CAUSE FIX: previously always read the module-level
     # `_risk_manager` above, a completely separate instance from the one
@@ -123,8 +131,29 @@ async def get_overview(request: Request) -> Dict[str, Any]:
         float(p.get("average_price", 0) or 0) * int(p.get("quantity", 0) or 0)
         for p in positions
     )
-    available_capital = max(0.0, settings.capital.total - used_capital)
-    daily_pnl_pct = (today_stats["net_pnl"] / settings.capital.total * 100) if settings.capital.total else 0.0
+    # Capital definitions are kept DISTINCT (spec §20):
+    #   total     = STARTING CAPITAL (authoritative configured capital)
+    #   current   = CURRENT EQUITY (realized P&L-adjusted paper equity)
+    #   used      = USED CAPITAL (entry price × executed quantity, live positions)
+    #   available = AVAILABLE CAPITAL (current equity − deployed, floored at 0)
+    #   buffer    = CASH BUFFER (fraction of starting capital held in reserve)
+    starting_capital = float(settings.capital.total)
+    current_equity: Optional[float] = None
+    equity_source = "starting_capital_fallback"
+    try:
+        import json as _json
+        _snap_raw = db_manager.get_setting("paper_equity_snapshot", "") or ""
+        if _snap_raw:
+            _snap = _json.loads(_snap_raw)
+            _eq = float(_snap.get("realized_equity") or 0)
+            if _eq > 0:
+                current_equity = _eq
+                equity_source = "paper_equity_snapshot"
+    except Exception:
+        current_equity = None
+    equity_base = current_equity if current_equity is not None else starting_capital
+    available_capital = max(0.0, equity_base - used_capital)
+    daily_pnl_pct = (today_stats["net_pnl"] / starting_capital * 100) if starting_capital else 0.0
 
     # Real Upstox v3 feed status (not the frontend push channel).
     try:
@@ -180,10 +209,13 @@ async def get_overview(request: Request) -> Dict[str, Any]:
             "pct": round(daily_pnl_pct, 3),
         },
         "capital": {
-            "total": settings.capital.total,
+            "total": round(starting_capital, 2),
+            "current": round(current_equity, 2) if current_equity is not None else None,
             "available": round(available_capital, 2),
             "used": round(used_capital, 2),
-            "buffer": round(settings.capital.cash_buffer * settings.capital.total, 2),
+            "buffer": round(settings.capital.cash_buffer * starting_capital, 2),
+            "source": "runtime_config",  # resolved via backend/config/runtime_config.py
+            "equity_source": equity_source,
         },
         "today_stats": today_stats,
         "risk_status": risk_status,

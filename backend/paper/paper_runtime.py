@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from backend.backtest.engine import CostConfig
 from backend.broker.positions_api import fetch_positions
+from backend.config.runtime_config import get_effective_settings
 from backend.config.strategy_registry import load_strategy
 from backend.database.db_manager import DatabaseManager
 from backend.database.models import Position, Trade
@@ -66,19 +67,29 @@ class PaperTradingRuntime:
         self.db.init_db()
         self.broker = broker or PaperBroker()
         self.strategy = load_strategy(env["strategy"])
-        capital = float(os.environ.get("TRADING_CAPITAL", "100000"))
-        risk_pct = float(os.environ.get("RISK_PER_TRADE_PCT", "0.025"))
+        # PHASE B — ONE authoritative config: effective = Settings-DB blob
+        # (operator's saved capital/risk) over env/startup defaults. A user
+        # saving capital=₹20,000 / max_trades=20 in the UI previously kept
+        # trading on TRADING_CAPITAL/TRADING_CAPITAL env defaults (₹100,000/3).
+        # Strategy risk% (2.5%) and engine risk% (env RISK_PER_TRADE_PCT,
+        # default 0.025) must AGREE per build_authoritative_risk_config; the
+        # effective settings carry the env value, so engine_risk_pct uses the
+        # effective risk_per_trade_pct and strategy_risk_pct stays the
+        # strategy's own frozen 2.5% — identical to the previous resolution.
+        _eff = get_effective_settings()
+        capital = float(_eff.capital.total)
+        risk_pct = float(_eff.risk.max_risk_per_trade_pct)
         try:
             self.risk = build_authoritative_risk_config(
                 capital=capital,
                 strategy_risk_pct=float(getattr(self.strategy, "max_account_risk_pct", risk_pct)),
                 engine_risk_pct=risk_pct,
-                risk_manager_daily_loss_pct=float(os.environ.get("MAX_DAILY_LOSS_PCT", "0.02")),
+                risk_manager_daily_loss_pct=float(_eff.risk.max_daily_loss_pct),
                 configured_risk_pct=risk_pct,
-                allocation_limit_pct=float(os.environ.get("MAX_ALLOCATION_PCT", "0.18")),
-                max_daily_trades=int(os.environ.get("MAX_TRADES_PER_DAY", "3")),
-                max_positions=int(os.environ.get("MAX_CONCURRENT_POSITIONS", "1")),
-                max_daily_loss_pct=float(os.environ.get("MAX_DAILY_LOSS_PCT", "0.02")),
+                allocation_limit_pct=float(_eff.capital.max_allocation_per_trade),
+                max_daily_trades=int(_eff.risk.max_trades_per_day),
+                max_positions=int(_eff.risk.max_concurrent_positions),
+                max_daily_loss_pct=float(_eff.risk.max_daily_loss_pct),
                 lot_size_source="contract_metadata",
                 order_product=env["product"],
                 strategy_name=env["strategy"],

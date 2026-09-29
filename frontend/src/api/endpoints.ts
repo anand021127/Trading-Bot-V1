@@ -182,7 +182,7 @@ export const fetchSettings = () =>
   )
 
 export const updateSettings = (data: Partial<Settings>) =>
-  api.put<{ saved: boolean; restart_required: boolean }>('/api/settings', data).then(r => r.data)
+  api.put<{ saved: boolean; restart_required: boolean; effective_immediately?: boolean; worker_restart_note?: string }>('/api/settings', data).then(r => r.data)
 
 export const fetchEnvStatus = () =>
   api.get<Record<string, boolean>>('/api/settings/env-status').then(r => r.data)

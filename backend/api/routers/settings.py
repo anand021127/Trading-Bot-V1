@@ -11,6 +11,11 @@ from typing import Any, Dict, Optional
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 
+from backend.config.runtime_config import (
+    get_config_sources,
+    get_runtime_config_db,
+    invalidate_runtime_config_cache,
+)
 from backend.config.settings import load_settings
 from backend.database.db_manager import DatabaseManager
 
@@ -27,6 +32,23 @@ settings = load_settings()
 
 SETTINGS_PATH = Path(__file__).resolve().parents[3] / "backend" / "config" / "settings.yaml"
 _db = DatabaseManager(db_path=settings.database.path)
+
+
+def _config_db() -> DatabaseManager:
+    """PHASE B: the Settings blob must be read from and written to the SAME
+    DatabaseManager the runtime resolver (backend.config.runtime_config)
+    resolves against. Tests and embedded contexts bind an isolated DB via
+    runtime_config.set_runtime_config_db(); without a binding the legacy
+    module-global _db is used (unchanged behavior). This kills the class of
+    bug where a Settings PUT landed in one DB while the runtime read another.
+    Token endpoints below intentionally keep using _db directly."""
+    try:
+        bound = get_runtime_config_db()
+        if bound is not None:
+            return bound
+    except Exception:
+        pass
+    return _db
 
 
 def _yaml_defaults() -> Dict[str, Any]:
@@ -77,14 +99,29 @@ async def get_settings() -> Dict[str, Any]:
     """
     Return settings. Priority: DB (persistent) > YAML defaults.
     This means saved settings survive Render restarts.
+
+    PHASE B: response also carries `config_sources` (where each value came
+    from: sqlite_settings / env_<VAR> / default) so the UI can SHOW the
+    operator which source is authoritative instead of silently displaying
+    values the runtime ignores.
     """
     try:
-        blob = _db.load_settings_blob()
+        blob = _config_db().load_settings_blob()
         if blob:
+            if isinstance(blob, dict):
+                try:
+                    blob["config_sources"] = get_config_sources()
+                except Exception:
+                    pass
             return blob
     except Exception:
         pass
-    return _yaml_defaults()
+    body = _yaml_defaults()
+    try:
+        body["config_sources"] = get_config_sources()
+    except Exception:
+        pass
+    return body
 
 
 @router.put("/")
@@ -96,7 +133,7 @@ async def update_settings(body: Dict[str, Any]) -> Dict[str, Any]:
         # Load existing saved settings (or defaults)
         current: Dict[str, Any] = {}
         try:
-            current = _db.load_settings_blob() or _yaml_defaults()
+            current = _config_db().load_settings_blob() or _yaml_defaults()
         except Exception:
             current = _yaml_defaults()
 
@@ -109,7 +146,12 @@ async def update_settings(body: Dict[str, Any]) -> Dict[str, Any]:
                     current[key] = body[key]
 
         # Save to SQLite (primary persistent storage)
-        _db.save_settings_blob(current)
+        _config_db().save_settings_blob(current)
+
+        # PHASE B: the saved values are now the AUTHORITATIVE runtime values —
+        # drop the resolver cache so TradingEngine/RiskManager/Overview/
+        # Operations read them on the very next call (no restart needed).
+        invalidate_runtime_config_cache()
 
         # Also try to update settings.yaml (best-effort, may be read-only on Render)
         try:
@@ -127,7 +169,24 @@ async def update_settings(body: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass  # Read-only filesystem on Render is fine — DB is the source of truth
 
-        return {"saved": True, "restart_required": False, "storage": "database"}
+        # restart_required is FALSE for risk/capital/mode consumers that read
+        # the authoritative resolver per call (engine-internal limits like
+        # max trades/day take effect on the next trade decision; a paper
+        # WORKER process started before this save still carries its old
+        # constructor snapshot until its own restart — surfaced honestly in
+        # worker_restart_note instead of a blanket false).
+        return {
+            "saved": True,
+            "restart_required": False,
+            "storage": "database",
+            "effective_immediately": True,
+            "worker_restart_note": (
+                "A separately running paper worker process reads its capital/risk "
+                "snapshot at startup; restart the worker to re-seed it. The API "
+                "process, Overview, Operations and the next engine decision use "
+                "the saved values immediately."
+            ),
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

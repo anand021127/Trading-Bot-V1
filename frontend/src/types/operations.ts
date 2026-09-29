@@ -28,6 +28,28 @@ export type Operations = {
     blocked_reasons?: string[]
     checks?: Record<string, { ok: boolean; detail: unknown }>
   }
+  runtime_config?: {
+    available?: boolean
+    config_source?: string
+    capital?: {
+      starting_capital?: number
+      current_equity?: number | null
+      max_allocation_per_trade?: number
+      cash_buffer_pct?: number
+      source?: string
+    }
+    risk?: {
+      max_risk_per_trade_pct?: number
+      max_daily_loss_pct?: number
+      max_trades_per_day?: number
+      max_concurrent_positions?: number
+      max_trades_source?: string
+    }
+    mode?: string
+    mode_source?: string
+    sources?: Record<string, string>
+    mismatches?: Array<{ key?: string; saved_value?: unknown; runtime_value?: unknown; message?: string; severity?: string }>
+  }
   bot_running?: boolean
   generated_at?: string
 }

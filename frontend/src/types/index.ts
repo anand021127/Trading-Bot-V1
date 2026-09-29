@@ -157,7 +157,7 @@ export interface ScannerSummary {
 
 export interface OverviewData {
   daily_pnl: { amount: number; pct: number }
-  capital: { total: number; available: number; used: number; buffer: number }
+  capital: { total: number; current?: number | null; available: number; used: number; buffer: number; source?: string; equity_source?: string }
   today_stats: { total_trades: number; wins: number; losses: number; win_rate: number; net_pnl?: number }
   risk_status: RiskStatus
   trend_bias?: string

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from backend.api.control_auth import require_control_token
+from backend.config.runtime_config import get_effective_settings
 from backend.config.settings import load_settings
 from backend.strategy.trading_engine import BotState
 
@@ -17,6 +18,35 @@ from backend.strategy.trading_engine import BotState
 # (no-op unless CONTROL_TOKEN is set — see backend/api/control_auth.py).
 router = APIRouter(dependencies=[Depends(require_control_token)])
 settings = load_settings()
+
+
+def _settings_now():
+    """PHASE B: authoritative settings (Settings-DB blob over env), re-read
+    per call so a Settings-UI save reaches Operations/mode gates without a
+    process restart. `settings` above is retained only for legacy importers
+    and tests that patch it.
+
+    Legacy in-process override compat: code/tests that mutate the module-global
+    `settings.mode` AFTER import (e.g. test_single_execution_path) intend an
+    immediate override — the effective snapshot would silently shadow it. When
+    the global diverges from a fresh env load, honor it. In production the
+    global is never mutated, so effective (blob-over-env) config always wins.
+    """
+    try:
+        s_eff = get_effective_settings()
+        try:
+            _base = load_settings()
+            # Legacy in-process `mode` override only fills in when the saved
+            # blob did not set a mode (saved-blob > in-process > env default).
+            if getattr(settings, "mode", None) and \
+                    settings.mode != getattr(_base, "mode", None) and \
+                    s_eff.mode == getattr(_base, "mode", None):
+                s_eff.mode = settings.mode
+        except Exception:
+            pass
+        return s_eff
+    except Exception:
+        return settings
 logger = logging.getLogger(__name__)
 
 # Shared engine reference — set by main.py at startup
@@ -48,9 +78,20 @@ def _paper_runtime_from_app() -> Optional[Any]:
         return _paper_runtime_ref
     try:
         import backend.api.main as main_mod
-        return getattr(getattr(main_mod, "app", None), "state", None) and getattr(
-            main_mod.app.state, "paper_runtime", None
-        )
+        rt = getattr(getattr(main_mod, "app", None), "state", None)
+        rt = getattr(rt, "paper_runtime", None) if rt is not None else None
+        if rt is not None:
+            return rt
+    except Exception:
+        pass
+    # Offline test/offline API context: no runtime is constructed. Synthesize
+    # a minimal handle around the shared DatabaseManager so DB-backed control
+    # endpoints (AI toggle, mode request, kill-switch persistence) still work
+    # against real settings rows instead of refusing.
+    try:
+        from backend.database.db_manager import DatabaseManager
+        return SimpleNamespace(_synthetic_db_stub=True, db=DatabaseManager(
+            db_path=os.environ.get("DATABASE_PATH", "data/trading_bot.db")))
     except Exception:
         return None
 
@@ -168,14 +209,25 @@ async def operations_dashboard() -> Dict[str, Any]:
     try:
         from backend.execution.live_gate import evaluate_live_readiness
         client = getattr(_engine_ref, "client", None) if _engine_ref is not None else None
-        verdict = evaluate_live_readiness(client=client, db=db, settings=settings,
+        verdict = evaluate_live_readiness(client=client, db=db, settings=_settings_now(),
                                           runtime=_engine_ref)
         live_verdict = verdict.to_dict()
     except Exception as exc:  # noqa: BLE001
         live_verdict = {"ready": False, "blocked_reasons": [f"gate_error:{type(exc).__name__}"]}
 
+    # PHASE B — authoritative runtime configuration + mismatch warnings.
+    # Operations must agree with Settings/Overview/Copilot: this is the SAME
+    # DB-over-env resolution the trading engine uses, with provenance labels
+    # (sqlite_settings / env_TRADING_CAPITAL / default) per key.
+    runtime_config: Dict[str, Any] = {}
+    try:
+        from backend.config.runtime_config import runtime_config_summary
+        runtime_config = runtime_config_summary()
+    except Exception as exc:  # noqa: BLE001
+        runtime_config = {"available": False, "error": type(exc).__name__}
+
     return {
-        "mode": (settings.mode or "paper").lower(),
+        "mode": (_settings_now().mode or "paper").lower(),
         "strategy": os.environ.get("TRADING_STRATEGY", "V8_D_PULLBACK_ATM"),
         "broker": "UPSTOX",
         "market": market,
@@ -186,6 +238,7 @@ async def operations_dashboard() -> Dict[str, Any]:
                         "triggered": kill_level != "OFF" or BotState.status()["kill_switch_active"]},
         "ai": ai_status,
         "live_readiness": live_verdict,
+        "runtime_config": runtime_config,
         "bot_running": BotState.is_running(),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -241,7 +294,7 @@ async def switch_mode(request: ModeSwitchRequest) -> Dict[str, Any]:
     # requested == "live" — evaluate every gate against REAL state.
     from backend.execution.live_gate import evaluate_live_readiness
     client = getattr(_engine_ref, "client", None) if _engine_ref is not None else None
-    verdict = evaluate_live_readiness(client=client, db=db, settings=settings,
+    verdict = evaluate_live_readiness(client=client, db=db, settings=_settings_now(),
                                       runtime=_engine_ref)
     if not verdict.ready:
         return {"success": False, "mode": "live", "ready": False,
@@ -325,7 +378,7 @@ async def start_bot() -> Dict[str, Any]:
     Paper mode starts ONLY PaperTradingRuntime (never TradingEngine.run_forever).
     Live mode is not enabled from this task and remains blocked at the mode gate.
     """
-    mode = (settings.mode or "").lower()
+    mode = (_settings_now().mode or "").lower()
     if BotState.is_running():
         return {"success": False, "message": "Bot is already running"}
     if BotState.status()["kill_switch_active"]:
@@ -333,7 +386,13 @@ async def start_bot() -> Dict[str, Any]:
 
     if mode == "paper":
         paper_rt = _paper_runtime_from_app()
-        if paper_rt is None:
+        # A synthesized offline DB stub is NOT a runnable executor: START must
+        # refuse exactly as when no runtime is attached at all. (isinstance
+        # guard: MagicMock would auto-create any getattr'd flag as truthy.)
+        if paper_rt is None or (
+            isinstance(paper_rt, SimpleNamespace)
+            and getattr(paper_rt, "_synthetic_db_stub", False)
+        ):
             return {
                 "success": False,
                 "message": "PaperTradingRuntime not attached. Refusing to start TradingEngine in paper mode.",
@@ -366,7 +425,7 @@ async def start_bot() -> Dict[str, Any]:
 @router.post("/stop")
 async def stop_bot() -> Dict[str, Any]:
     """Gracefully stop the trading bot."""
-    mode = (settings.mode or "").lower()
+    mode = (_settings_now().mode or "").lower()
     if not BotState.is_running():
         return {"success": False, "message": "Bot is not running"}
 
@@ -386,7 +445,7 @@ async def stop_bot() -> Dict[str, Any]:
 @router.post("/kill")
 async def emergency_kill() -> Dict[str, Any]:
     """Emergency kill switch — immediately stops all trading."""
-    mode = (settings.mode or "").lower()
+    mode = (_settings_now().mode or "").lower()
     paper_rt = _paper_runtime_from_app()
     if paper_rt is not None and hasattr(paper_rt, "kill"):
         try:

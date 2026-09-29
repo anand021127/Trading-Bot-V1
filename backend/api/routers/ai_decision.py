@@ -154,7 +154,13 @@ def get_ai_decision_status() -> Dict[str, Any]:
 
 @router.get("/why-not-traded")
 def get_why_not_traded() -> Dict[str, Any]:
-    """'Why didn't we trade?' — the last scan's gate-by-gate breakdown (§10)."""
+    """'Why didn't we trade?' — the last scan's gate-by-gate breakdown (§10).
+
+    PHASE B: this endpoint DELEGATES to backend/copilot/gate_chain.py — the
+    ONE authoritative gate-chain builder (also embedded into the Copilot
+    context and Operations), so the panel and the Copilot can never
+    disagree about why the last scan did not trade.
+    """
     out: Dict[str, Any] = {
         "available": False,
         "reason": "no scan result recorded yet",
@@ -163,93 +169,44 @@ def get_why_not_traded() -> Dict[str, Any]:
     if db is None:
         return out
     try:
-        raw = db.get_setting("paper_worker_last_scan_detail", "")
-        if not raw:
+        from backend.copilot.gate_chain import build_gate_chain_from_db
+        chain = build_gate_chain_from_db(db)
+        if not chain.get("available"):
+            # Persist the honest reason (startup-empty state, corrupt row…)
+            # instead of the generic default above when we know more.
+            if chain.get("reason"):
+                out["reason"] = chain["reason"]
             return out
-        detail = json.loads(raw)
         out["available"] = True
-        out["reason"] = detail.get("reason")
-        out["scanned"] = detail.get("scanned")
-        out["traded"] = detail.get("traded")
-        out["signal"] = detail.get("signal")
-        details = detail.get("details") or {}
-        breakdown: Dict[str, Any] = {
-            "v8_d": "PASS" if detail.get("signal") == "BUY" else "REJECTED",
-            "v8_d_rejection_reasons": details.get("rejection") or [],
+        out["scanned"] = chain.get("scanned")
+        out["traded"] = chain.get("traded")
+        out["signal"] = chain.get("signal")
+        out["reason"] = chain.get("scan_reason")
+        out["stage"] = chain.get("stage")
+        out["gates"] = chain.get("gates") or {}
+        out["human_summary"] = chain.get("human_summary")
+        if chain.get("recorded_at"):
+            out["recorded_at"] = chain["recorded_at"]
+        if chain.get("age_seconds") is not None:
+            out["age_seconds"] = chain["age_seconds"]
+        # Legacy `breakdown` shape (Copilot.tsx AIDecisionPanel contract).
+        inner_raw = db.get_setting("paper_worker_last_scan_detail", "") or ""
+        details: Dict[str, Any] = {}
+        try:
+            details = (json.loads(inner_raw) or {}).get("details") or {}
+        except Exception:
+            details = {}
+        out["breakdown"] = {
+            "stage": chain.get("stage"),
+            "v8_d": "PASS" if chain.get("signal") == "BUY" else "REJECTED",
+            "v8_d_rejection_reasons": chain.get("v8d_rejection_reasons") or [],
             "ai_decision": details.get("ai_decision"),
             "ai_confidence": details.get("ai_confidence"),
             "ai_reason_codes": details.get("ai_reason_codes") or [],
             "ai_decision_id": details.get("ai_decision_id"),
             "ai_model": details.get("ai_model"),
+            "execution_reason": chain.get("scan_reason"),
         }
-        reason = str(detail.get("reason") or "")
-        # Map scan reasons to the §13 taxonomy — honest, derived only from
-        # what the scanner actually recorded. Every distinct failure mode
-        # stays distinct; nothing collapses into NO_SIGNAL.
-        if reason.startswith("AI_NO_TRADE:"):
-            code = reason.split(":", 1)[1]
-            if code == "AI_TIMEOUT":
-                breakdown["stage"] = "AI_TIMEOUT"
-            elif code in ("AI_PROVIDER_UNAVAILABLE", "AI_MODEL_UNAVAILABLE"):
-                breakdown["stage"] = code
-            elif code in ("AI_INVALID_RESPONSE", "AI_DECISION_INVALID"):
-                breakdown["stage"] = "AI_INVALID_RESPONSE"
-            elif code == "AI_DECISION_PERSISTENCE_FAILED":
-                breakdown["stage"] = "AI_DECISION_PERSISTENCE_FAILED"
-            elif code == "RECONCILIATION_NOT_READY":
-                breakdown["stage"] = "RECONCILIATION_NOT_READY"
-            elif code == "RECONCILIATION_STALE":
-                # PHASE 5.3 §6/§31: reconciliation verdict too old — a
-                # distinct no-trade stage, never folded into NO_SIGNAL.
-                breakdown["stage"] = "RECONCILIATION_STALE"
-            elif code == "AI_WAITING":
-                # PHASE 5.3 §13: bounded-budget budget timeout — model still
-                # thinking; decision completes in background and replays.
-                breakdown["stage"] = "AI_WAITING"
-            elif code in ("AI_WAIT",) or "STALE_DATA" in code or "INCOMPLETE_CONTRACT" in code:
-                breakdown["stage"] = "AI_WAITING"
-            else:
-                breakdown["stage"] = "AI_REJECTED"
-        elif reason.startswith("AI_STRATEGY_MISMATCH"):
-            breakdown["stage"] = "AI_REJECTED"
-        elif reason == "market_closed":
-            breakdown["stage"] = "MARKET_CLOSED"
-        elif reason.startswith("stale_candles") or reason.startswith("insufficient_candles"):
-            breakdown["stage"] = "STALE_OR_INSUFFICIENT_DATA"
-        elif reason.startswith("rejected:kill_switch"):
-            breakdown["stage"] = "KILL_SWITCH"
-        elif reason.startswith("rejected:MAX_DAILY_TRADES"):
-            breakdown["stage"] = "MAX_TRADES_REACHED"
-        elif reason.startswith("rejected:MAX_POSITIONS"):
-            breakdown["stage"] = "MAX_EXPOSURE_REACHED"
-        elif reason.startswith("rejected:MAX_DAILY_LOSS"):
-            breakdown["stage"] = "RISK_REJECTED"
-        elif reason.startswith("rejected:INSUFFICIENT_EQUITY"):
-            breakdown["stage"] = "INSUFFICIENT_EQUITY"
-        elif reason.startswith("rejected:MAX_") or reason.startswith("rejected:INSUFFICIENT"):
-            breakdown["stage"] = "RISK_REJECTED"
-        elif reason.startswith("rejected:INVALID_LOT"):
-            breakdown["stage"] = "NO_VALID_LOT_SIZE"
-        elif reason.startswith("rejected:INVALID_CONTRACT"):
-            breakdown["stage"] = "NO_VALID_CONTRACT"
-        elif reason.startswith("submit_error:") or reason.startswith("candle_fetch_error:") \
-                or reason.startswith("chain_fetch_error:") or reason.startswith("expiry_fetch_error:"):
-            # PHASE 5.3 §31: upstream/broker/data failure — distinct from a
-            # trading rejection; the scan could not even complete cleanly.
-            breakdown["stage"] = "BROKER_UNAVAILABLE"
-            breakdown["error"] = reason.split(":", 1)[1] if ":" in reason else reason
-        elif reason.startswith("rejected:"):
-            breakdown["stage"] = "EXECUTION_REJECTED"
-            breakdown["execution_reason"] = reason.split(":", 1)[1]
-            if "BROKER" in reason.upper():
-                breakdown["stage"] = "BROKER_REJECTED"
-        elif detail.get("traded"):
-            breakdown["stage"] = "TRADED"
-        elif reason.startswith("no_trade:"):
-            breakdown["stage"] = "V8D_REJECTED"
-        else:
-            breakdown["stage"] = "NO_SIGNAL_OR_DATA"
-        out["breakdown"] = breakdown
         return out
     except Exception as exc:
         return {"available": False, "reason": f"unreadable scan state: {type(exc).__name__}"}

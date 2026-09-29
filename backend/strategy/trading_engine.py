@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from backend.broker.upstox_client import UpstoxClient
+from backend.config.runtime_config import get_effective_settings
 from backend.config.settings import load_settings
 from backend.database.db_manager import DatabaseManager
 from backend.database.models import Position, Trade
@@ -254,17 +255,53 @@ class TradingEngine:
         self.db_manager = db_manager or DatabaseManager(db_path=settings.database.path)
         self._pipeline = None
         self._init_execution_pipeline()
+        # PHASE B — ONE authoritative config: effective = Settings-DB blob
+        # (what the operator saved in the UI) over env/startup defaults.
+        # Previously this read settings=<env at import time>, so a user who
+        # saved capital=₹20,000 / max_trades=20 in the UI still traded on
+        # ₹100,000 / 3 trades per day.
+        s_eff = get_effective_settings()
+        # Legacy/in-process override compat: some callers (unit tests, CLI
+        # tools) mutate the module-global `settings` object AFTER import to
+        # configure a bespoke engine (e.g. risk=0.05, capital=1,000,000). The
+        # effective snapshot would silently shadow those in-process mutations.
+        # Re-apply a divergent field ONLY when the Settings-DB blob did not
+        # override it — precedence: saved-blob > in-process override > env
+        # default. In production the module-global is never mutated, so this
+        # block is inert; in tests it also cannot carry one test's global
+        # mutation over another test's saved blob.
+        try:
+            from backend.config.settings import load_settings as _load_base
+            _live = settings
+            _base = _load_base()
+            if getattr(_live.capital, "total", None) != getattr(_base.capital, "total", None) \
+                    and s_eff.capital.total == getattr(_base.capital, "total", None):
+                s_eff.capital.total = _live.capital.total
+            if getattr(_live.capital, "max_allocation_per_trade", None) != \
+                    getattr(_base.capital, "max_allocation_per_trade", None) \
+                    and s_eff.capital.max_allocation_per_trade == \
+                    getattr(_base.capital, "max_allocation_per_trade", None):
+                s_eff.capital.max_allocation_per_trade = _live.capital.max_allocation_per_trade
+            for _f in ("max_risk_per_trade_pct", "max_daily_loss_pct",
+                       "max_trades_per_day", "max_concurrent_positions",
+                       "max_consecutive_losses", "pause_after_losses_minutes"):
+                if getattr(_live.risk, _f, None) != getattr(_base.risk, _f, None) \
+                        and getattr(s_eff.risk, _f) == getattr(_base.risk, _f, None):
+                    setattr(s_eff.risk, _f, getattr(_live.risk, _f))
+        except Exception:
+            pass
+        self.effective_settings = s_eff
         self.risk_manager = risk_manager or RiskManager(
-            capital=settings.capital.total,
-            daily_loss_limit=settings.risk.max_daily_loss_pct,
-            max_trades_per_day=settings.risk.max_trades_per_day,
-            max_concurrent_positions=settings.risk.max_concurrent_positions,
-            max_consecutive_losses=settings.risk.max_consecutive_losses,
-            pause_minutes_after_losses=settings.risk.pause_after_losses_minutes,
+            capital=s_eff.capital.total,
+            daily_loss_limit=s_eff.risk.max_daily_loss_pct,
+            max_trades_per_day=s_eff.risk.max_trades_per_day,
+            max_concurrent_positions=s_eff.risk.max_concurrent_positions,
+            max_consecutive_losses=s_eff.risk.max_consecutive_losses,
+            pause_minutes_after_losses=s_eff.risk.pause_after_losses_minutes,
         )
         self.position_sizer = position_sizer or PositionSizer(
-            capital=settings.capital.total,
-            risk_per_trade=settings.risk.max_risk_per_trade_pct,
+            capital=s_eff.capital.total,
+            risk_per_trade=s_eff.risk.max_risk_per_trade_pct,
         )
         self.exit_manager = exit_manager or ExitManager(
             stop_loss_pct=settings.risk.max_risk_per_trade_pct,
@@ -752,7 +789,7 @@ class TradingEngine:
         from backend.strategy.signal import StrategySignal
         from backend.config.settings import load_settings
 
-        s = load_settings()
+        s = get_effective_settings()
         name = (getattr(s.strategy, "name", None) or getattr(self, "strategy_name", "") or "").strip()
         mode = (s.mode or "").lower()
 
@@ -827,7 +864,7 @@ class TradingEngine:
             sig.signal = "NONE"
             return sig
 
-        equity = float(getattr(getattr(s, "capital", None), "total", 100000) or 100000)
+        equity = float(getattr(getattr(s, "capital", None), "total", 100000) or 100000)  # effective (DB-over-env) capital
         trades_today = 0
         kill = False
         try:
