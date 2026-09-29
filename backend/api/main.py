@@ -4,6 +4,7 @@ import os
 
 import asyncio
 import importlib.util
+import logging
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -245,6 +246,28 @@ async def lifespan(app: FastAPI):
             app.state.paper_runtime = PaperTradingRuntime()
             set_paper_runtime(app.state.paper_runtime)
             print("[INFO] PaperTradingRuntime attached — TradingEngine loop not auto-started in paper mode")
+
+            # Paper-worker watchdog. BotState is DB-persisted, so after an API
+            # restart / worker crash the flag can still say "running" while NO
+            # worker process exists (dashboard RUNNING, zero scans). While the
+            # bot is flagged running (and the kill switch is clear) make sure
+            # the worker is alive; respawn is bounded (1/60s, max 5) and every
+            # outcome is visible via /api/bot/status → runtime_state.
+            async def _paper_worker_watchdog() -> None:
+                from backend.paper import worker_manager as _wm
+                _log = logging.getLogger("paper_worker_watchdog")
+                while True:
+                    try:
+                        if _wm.autospawn_enabled():
+                            res = await asyncio.to_thread(_wm.watchdog_check)
+                            if res.get("action") in {"respawn", "gave_up"}:
+                                _log.warning("paper worker watchdog: %s", res)
+                    except Exception:
+                        _log.exception("paper worker watchdog tick failed")
+                    await asyncio.sleep(15)
+
+            supervisor.register("paper_worker_watchdog", factory=_paper_worker_watchdog,
+                                max_restarts=1000)
         elif s.mode == "live":
             print("[WARN] Live mode supervisor registration disabled — live trading is not enabled")
         # Live TradingEngine.run_forever is intentionally NOT registered.

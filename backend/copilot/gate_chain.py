@@ -100,6 +100,13 @@ def _stage_from_reason(reason: str) -> str:
         return "EXECUTION_REJECTED"
     if r.startswith("no_trade:"):
         return "SIGNAL_REJECTED"
+    if r.startswith(("scanner_disabled", "scanner_init_failed", "no_candles",
+                     "no_upcoming_expiry", "empty_option_chain", "no_valid_spot",
+                     "invalid_ohlc", "missing_candle_timestamp",
+                     "candle_timestamp_in_future")):
+        return "DATA_UNAVAILABLE"
+    if r.startswith(("strategy_error", "position_check_error", "scan_timeout")):
+        return "SCANNER_ERROR"
     if r in ("", None):
         return "UNKNOWN"
     return "NO_SIGNAL_OR_DATA"
@@ -123,13 +130,20 @@ def build_gate_chain_from_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
         else _gate("OK", "scan passed the market/session gate") if detail.get("scanned")
         else _gate("SKIPPED", "scan did not run")
     )
-    data_detail = inner.get("bars")
+    data_detail = inner.get("bars", inner.get("candle_count"))
+    _fetch_failed = stage == "BROKER_UNAVAILABLE" and str(reason).startswith(
+        ("candle_fetch_error", "expiry_fetch_error", "chain_fetch_error"))
+    _data_stages = ("STALE_DATA", "DATA_UNAVAILABLE")
     chain["data"] = (
-        _gate("REJECTED", reason) if stage == "STALE_DATA"
+        _gate("REJECTED", reason) if (stage in _data_stages or _fetch_failed)
         else _gate("OK", {"bars": data_detail} if data_detail else "candles fresh")
     )
+    _v8d_ran = bool(inner.get("v8d_evaluated")) or signal == "BUY" or stage in (
+        "SIGNAL_REJECTED", "NO_SIGNAL")
     chain["v8d_signal"] = (
         _gate("OK", "BUY") if signal == "BUY"
+        else _gate("NOT_EVALUATED", "market data not usable — V8-D was not evaluated")
+        if (stage in _data_stages or _fetch_failed or stage == "SCANNER_ERROR")
         else _gate("REJECTED", inner.get("rejection") or reason) if detail.get("scanned")
         else _gate("NOT_EVALUATED", "no scan")
     )
@@ -177,9 +191,31 @@ def build_gate_chain_from_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
         {"age_seconds": rec_detail} if rec_detail is not None else "verdict age unknown",
     )
 
+    diagnostics = {
+        "seq": detail.get("seq"),
+        "recorded_at_ist": detail.get("recorded_at_ist"),
+        "strategy": detail.get("strategy") or inner.get("strategy"),
+        "underlying": detail.get("underlying") or inner.get("underlying"),
+        "session_status": inner.get("session_status") or detail.get("session_status"),
+        "data_status": detail.get("data_status") or inner.get("data_status"),
+        "candle_count": inner.get("candle_count", inner.get("bars")),
+        "last_candle_ts": inner.get("last_candle_ts"),
+        "candle_age_seconds": inner.get("candle_age_seconds"),
+        "expiry": inner.get("expiry"),
+        "option_chain_count": inner.get("option_chain_count"),
+        "spot": inner.get("spot"),
+        "decision": inner.get("decision"),
+        "selected_contract": inner.get("selected_contract"),
+        "risk_decision": detail.get("risk_decision"),
+        "execution_decision": detail.get("execution_decision"),
+        "duration_ms": detail.get("duration_ms"),
+        "next_scan_at": detail.get("next_scan_at"),
+        "error": detail.get("error") or inner.get("error"),
+    }
     return {
         "available": True,
         "stage": stage,
+        "diagnostics": diagnostics,
         "final_reason": stage if not traded else "TRADED",
         "scanned": bool(detail.get("scanned")),
         "traded": traded,
@@ -203,9 +239,15 @@ def _human_summary(
                f"({reason or 'outside trading hours'})."
     if stage == "STALE_DATA":
         return f"The bot did not trade because market data is stale or insufficient ({reason})."
+    if stage == "DATA_UNAVAILABLE":
+        return (f"Scanner ran but market data is unavailable ({reason}); V8-D was not evaluated. "
+                "This is a DATA problem, not a strategy outcome.")
+    if stage == "SCANNER_ERROR":
+        return (f"The scan iteration failed ({inner.get('error') or reason}); V8-D was not evaluated. "
+                "This is a SCANNER problem, not a strategy outcome.")
     if stage == "SIGNAL_REJECTED" or stage == "NO_SIGNAL":
         reasons = inner.get("rejection") or []
-        base = "V8-D produced no actionable BUY signal this scan"
+        base = "V8-D was evaluated successfully and produced no actionable BUY signal this scan"
         return base + (f": {'; '.join(str(x) for x in reasons[:3])}" if reasons else ".")
     if stage == "AI_REJECTED":
         return "V8-D produced a BUY, but the AI trading decision layer REJECTED it" + (
@@ -229,6 +271,11 @@ def _human_summary(
         return f"Trading is blocked by reconciliation state ({stage.lower()})."
     if stage == "KILL_SWITCH":
         return "The kill switch is ACTIVE — all new entries are blocked."
+    if stage == "BROKER_UNAVAILABLE" and str(reason).startswith(
+            ("candle_fetch_error", "expiry_fetch_error", "chain_fetch_error")):
+        return (f"Scanner ran but the Upstox market-data request failed ({reason}"
+                f"{': ' + str(inner.get('error')) if inner.get('error') else ''}); V8-D was not "
+                "evaluated. This is a DATA problem, not a strategy outcome.")
     if stage in ("BROKER_REJECTED", "BROKER_UNAVAILABLE"):
         return f"Execution could not complete against the broker/paper book ({reason})."
     if stage == "EXECUTION_REJECTED":
@@ -252,14 +299,24 @@ def build_gate_chain_from_db(db: Any) -> Dict[str, Any]:
                 "stage": "UNKNOWN", "gates": {}, "human_summary":
                 "The bot's last scan state could not be read from the database."}
     if not raw:
+        cause = ""
+        runtime_state = None
+        try:
+            from backend.paper.scan_state import compute_runtime_state
+            rs = compute_runtime_state(db)
+            runtime_state = rs.get("state")
+            cause = f" Current runtime state: {rs.get('label')} — {rs.get('summary')}"
+        except Exception:
+            pass
         return {
             "available": False,
             "reason": "No scan has been recorded since bot startup — the paper "
                       "worker persists every scan to paper_worker_last_scan_detail; "
-                      "start the bot/worker and wait for the first scan tick.",
+                      "start the bot/worker and wait for the first scan tick." + cause,
             "stage": "UNKNOWN",
+            "runtime_state": runtime_state,
             "gates": {},
-            "human_summary": "No scan has been recorded since bot startup.",
+            "human_summary": "No scan has been recorded since bot startup." + cause,
         }
     try:
         detail = json.loads(raw)

@@ -89,6 +89,21 @@ def _bot_state(app_state: Any) -> Dict[str, Any]:
     body["mode"] = _mode()
     body["strategy"] = _strategy_name()
     body["broker"] = "UPSTOX"
+    # REAL operational state — the flag alone ("running") only says what was
+    # requested. runtime_* says whether a worker is alive and scans execute.
+    try:
+        from backend.paper.scan_state import compute_runtime_state
+        _db_rt = _db()
+        if _db_rt is not None:
+            _rs = compute_runtime_state(_db_rt)
+            body["runtime_state"] = _rs.get("state")
+            body["runtime_label"] = _rs.get("label")
+            body["runtime_summary"] = _rs.get("summary")
+            body["worker_alive"] = _rs.get("worker_alive")
+            body["heartbeat_age_seconds"] = _rs.get("heartbeat_age_seconds")
+            body["effective_running"] = str(_rs.get("state", "")).startswith("RUNNING")
+    except Exception:
+        pass
     try:
         from backend.config.universe_config import load_universe_config
         u = load_universe_config(_db() or app_state)
@@ -185,27 +200,60 @@ def _websocket(app_state: Any) -> Dict[str, Any]:
 
 # ── SCANNER ──────────────────────────────────────────────────────────────
 def _scanner(app_state: Any, db: Any) -> Dict[str, Any]:
+    """Scanner state for Copilot.
+
+    In PAPER mode the scan that decides trades runs in the paper WORKER
+    process, so the authoritative source is the worker heartbeat + the
+    persisted scan record (compute_runtime_state) — NOT the API process's own
+    LiveScanner heartbeat, which used to make Copilot report "RUNNING" while
+    the worker had never executed a single scan."""
     body: Dict[str, Any] = {"available": False}
+    if db is not None:
+        try:
+            from backend.paper.scan_state import compute_runtime_state
+            rs = compute_runtime_state(db)
+            last = rs.get("last_scan") or {}
+            body = {
+                "available": True,
+                "source_detail": "paper worker heartbeat + persisted scan record",
+                "scanner_status": rs.get("state"),
+                "state_label": rs.get("label"),
+                "summary": rs.get("summary"),
+                "worker_alive": rs.get("worker_alive"),
+                "heartbeat_age_seconds": rs.get("heartbeat_age_seconds"),
+                "scan_seq": rs.get("scan_seq"),
+                "last_scan_seconds_ago": rs.get("scan_age_seconds"),
+                "scan_interval_seconds": rs.get("scan_interval_seconds"),
+                "worker_last_scan_reason": last.get("reason"),
+                "last_scan_ist": last.get("recorded_at_ist"),
+                "data_status": last.get("data_status"),
+                "candle_count": last.get("candle_count"),
+                "candle_age_seconds": last.get("candle_age_seconds"),
+                "expiry": last.get("expiry"),
+                "option_chain_count": last.get("option_chain_count"),
+                "error": last.get("error") or rs.get("last_error"),
+            }
+            # Honest empty state: nothing has ever run (no worker, no record,
+            # bot stopped) -> not "available"; the reason says why.
+            if not last and not rs.get("worker_alive") and rs.get("state") == "STOPPED":
+                body["available"] = False
+                body["reason"] = ("No scanner heartbeat in this process and no persisted "
+                                  "worker scan — the scanner/worker has not run yet. "
+                                  + str(rs.get("summary") or ""))
+        except Exception as exc:
+            body = {"available": False, "reason": f"paper scanner state unreadable: {type(exc).__name__}"}
     scanner = getattr(app_state, "scanner", None)
     if scanner is not None and hasattr(scanner, "health_report"):
+        # Kept ONLY as an additional, clearly-labelled API-side component.
         try:
-            body = dict(scanner.health_report() or {})
-            body["available"] = True
-            body["source_detail"] = "LiveScanner heartbeat"
-        except Exception as exc:
-            body = {"available": False, "reason": f"scanner health failed: {type(exc).__name__}"}
-    elif db is not None:
-        try:
-            raw = db.get_setting("paper_worker_last_scan", "") or ""
-            if raw:
-                body = {"available": True, "worker_last_scan_reason": raw,
-                        "source_detail": "paper worker persisted scan state"}
+            body["api_live_scanner"] = dict(scanner.health_report() or {})
+            body["api_live_scanner_note"] = ("API-process LiveScanner heartbeat (option-universe "
+                                             "scanner UI) — NOT the paper worker that trades")
         except Exception:
             pass
-        if not body.get("available"):
-            body = {"available": False,
-                    "reason": "No scanner heartbeat in this process and no persisted worker scan — "
-                              "the scanner/worker has not run yet."}
+    if not body.get("available"):
+        body.setdefault("reason", "No scanner heartbeat in this process and no persisted "
+                                  "worker scan — the scanner/worker has not run yet.")
     return _section("SCANNER", body)
 
 
@@ -214,10 +262,17 @@ def _latest_signal(db: Any) -> Dict[str, Any]:
     try:
         raw = db.get_setting("paper_worker_last_scan_detail", "") or ""
         if not raw:
+            _why = ""
+            try:
+                from backend.paper.scan_state import compute_runtime_state
+                _rs = compute_runtime_state(db)
+                _why = f" Scanner state: {_rs.get('label')} — {_rs.get('summary')}"
+            except Exception:
+                pass
             return _section("SCANNER", {
                 "available": False,
                 "reason": "No actionable V8-D signal has been recorded — no scan "
-                          "result has been persisted since bot startup.",
+                          "result has been persisted since bot startup." + _why,
             })
         detail = json.loads(raw)
         inner = detail.get("details") or {}

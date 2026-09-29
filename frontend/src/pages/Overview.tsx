@@ -20,6 +20,40 @@ interface BotStatus {
   stop_reason: string
   uptime_seconds: number
   mode: string
+  // REAL paper-worker state (see backend/paper/scan_state.py). `running` is
+  // only the requested FLAG; runtime_state says what is actually happening.
+  runtime_state?: string | null
+  runtime_label?: string | null
+  runtime_summary?: string | null
+  runtime?: PaperRuntime | null
+}
+
+interface PaperRuntime {
+  state?: string
+  label?: string
+  summary?: string
+  severity?: 'ok' | 'info' | 'error'
+  worker_alive?: boolean
+  heartbeat_age_seconds?: number | null
+  scan_seq?: number | null
+  scan_age_seconds?: number | null
+  last_scan?: {
+    recorded_at_ist?: string | null
+    reason?: string
+    data_status?: string | null
+    candle_count?: number | null
+    candle_age_seconds?: number | null
+    expiry?: string | null
+    option_chain_count?: number | null
+    error?: string | null
+  } | null
+}
+
+const RUNTIME_TONE: Record<string, { text: string; bg: string; dot: string }> = {
+  ok:    { text: 'text-emerald-400', bg: 'bg-emerald-950/40 border-emerald-800/50', dot: 'bg-emerald-400' },
+  info:  { text: 'text-blue-300',    bg: 'bg-blue-950/30 border-blue-800/40',       dot: 'bg-blue-400' },
+  warn:  { text: 'text-amber-300',   bg: 'bg-amber-950/30 border-amber-800/40',     dot: 'bg-amber-400' },
+  error: { text: 'text-red-400',     bg: 'bg-red-950/40 border-red-800/50',         dot: 'bg-red-500' },
 }
 
 const ERROR_THRESHOLD = 3
@@ -104,6 +138,19 @@ export default function Overview() {
   const sys = data?.system
   const isRunning = botStatus?.running ?? false
   const isKilled  = botStatus?.kill_switch_active ?? false
+  // Real runtime (worker heartbeat + persisted scan), never the flag alone.
+  const rt: PaperRuntime | null =
+    botStatus?.runtime ?? ((data as unknown as { runtime?: PaperRuntime | null } | null)?.runtime ?? null)
+  const rtState = rt?.state ?? null
+  const rtActive = !!rtState && rtState.startsWith('RUNNING')
+  const rtNeedsRepair = rtState === 'STARTED_WORKER_NOT_RESPONDING'
+  const rtTone = RUNTIME_TONE[
+    rtState === 'RUNNING_DATA_ERROR' ? 'warn' : (rt?.severity ?? 'info')
+  ] ?? RUNTIME_TONE.info
+  const feed = (data as unknown as { paper_data_feed?: {
+    status?: string | null; candle_count?: number | null; candle_age_seconds?: number | null
+    error?: string | null
+  } | null } | null)?.paper_data_feed ?? null
   const health = data?.health
   const scannerHealth = data?.scanner?.health
 
@@ -241,19 +288,21 @@ export default function Overview() {
         {/* BOT CONTROLS */}
         <div className="flex items-center gap-2 flex-wrap justify-end">
           {/* Bot status indicator */}
-          <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium ${
+          <div
+            title={rt?.summary ?? ''}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium ${
             isKilled  ? 'bg-red-950/40 border-red-800/50 text-red-400' :
-            isRunning ? 'bg-emerald-950/40 border-emerald-800/50 text-emerald-400' :
+            isRunning ? `${rtTone.bg} ${rtTone.text}` :
                         'bg-slate-800/40 border-slate-700/50 text-slate-400'
           }`}>
             <div className={`w-1.5 h-1.5 rounded-full ${
-              isKilled ? 'bg-red-500' : isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'
+              isKilled ? 'bg-red-500' : isRunning ? `${rtTone.dot} ${rtActive ? 'animate-pulse' : ''}` : 'bg-slate-500'
             }`} />
-            {isKilled ? 'KILLED' : isRunning ? 'RUNNING' : 'STOPPED'}
+            {isKilled ? 'KILLED' : isRunning ? (rt?.label ?? 'RUNNING') : 'STOPPED'}
           </div>
 
-          {/* Start button */}
-          {!isRunning && !isKilled && (
+          {/* Start button (also repairs "flag running but worker dead") */}
+          {(!isRunning || rtNeedsRepair) && !isKilled && (
             <button
               onClick={() => botAction('start')}
               disabled={actionLoading !== null}
@@ -316,7 +365,7 @@ export default function Overview() {
       {/* Connection status bar */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         {[
-          { label: 'Bot Engine',    ok: isRunning && !isKilled,  val: isKilled ? 'KILLED' : isRunning ? 'Running' : 'Stopped' },
+          { label: 'Bot Engine',    ok: isRunning && !isKilled && (!rtState || rtActive),  val: isKilled ? 'KILLED' : isRunning ? (rt?.label ?? 'Running') : 'Stopped' },
           { label: 'Live Updates',  ok: isWsConnected, val: isWsConnected ? 'Connected' : 'Polling Mode' },
           { label: 'Market',        ok: isMarketOpen, val: isMarketOpen ? 'Open' : 'Closed' },
           { label: 'Risk Status',   ok: risk?.status === 'ACTIVE', val: risk?.status ?? 'Active' },
@@ -336,10 +385,21 @@ export default function Overview() {
         {[
           {
             label: 'Market Data Feed',
-            ok: marketDataOk,
-            val: marketDataStatus === 'LIVE' ? 'Live' : marketDataStatus === 'STALE' ? 'Stale' : sys?.websocket_status ?? 'unknown',
-            color: marketDataStatus === 'LIVE' ? 'text-emerald-400' : marketDataStatus === 'STALE' ? 'text-amber-400' : 'text-red-400',
-            dotColor: marketDataStatus === 'LIVE' ? 'bg-emerald-400' : marketDataStatus === 'STALE' ? 'bg-amber-400' : 'bg-red-400',
+            ok: feed ? feed.status === 'OK' : marketDataOk,
+            val: feed
+              ? (feed.status === 'OK' ? `Data OK${feed.candle_count ? ` · ${feed.candle_count} bars` : ''}`
+                : feed.status === 'NOT_CHECKED_MARKET_CLOSED' ? 'Market closed'
+                : feed.status === 'STALE_OR_INSUFFICIENT' ? 'Stale / insufficient'
+                : feed.status === 'NO_MARKET_DATA_SOURCE' ? 'No token / source'
+                : feed.status === 'ERROR' ? 'Data error'
+                : feed.status === 'NO_SCAN_RECORDED' ? 'No scan yet' : (feed.status ?? 'unknown'))
+              : (marketDataStatus === 'LIVE' ? 'Live' : marketDataStatus === 'STALE' ? 'Stale' : sys?.websocket_status ?? 'unknown'),
+            color: feed
+              ? (feed.status === 'OK' ? 'text-emerald-400' : feed.status === 'NOT_CHECKED_MARKET_CLOSED' || feed.status === 'NO_SCAN_RECORDED' ? 'text-slate-400' : 'text-red-400')
+              : (marketDataStatus === 'LIVE' ? 'text-emerald-400' : marketDataStatus === 'STALE' ? 'text-amber-400' : 'text-red-400'),
+            dotColor: feed
+              ? (feed.status === 'OK' ? 'bg-emerald-400' : feed.status === 'NOT_CHECKED_MARKET_CLOSED' || feed.status === 'NO_SCAN_RECORDED' ? 'bg-slate-500' : 'bg-red-400')
+              : (marketDataStatus === 'LIVE' ? 'bg-emerald-400' : marketDataStatus === 'STALE' ? 'bg-amber-400' : 'bg-red-400'),
           },
           {
             label: 'API Health',
@@ -357,10 +417,14 @@ export default function Overview() {
           },
           {
             label: 'Scanner',
-            ok: scannerOk,
-            val: scannerLabel,
-            color: scannerOk ? 'text-emerald-400' : scannerStatus === 'DEGRADED' ? 'text-amber-400' : scannerStatus === 'STARTING' ? 'text-blue-400' : 'text-red-400',
-            dotColor: scannerOk ? 'bg-emerald-400' : scannerStatus === 'DEGRADED' ? 'bg-amber-400' : scannerStatus === 'STARTING' ? 'bg-blue-400' : 'bg-red-400',
+            ok: rt ? rtActive && rt.severity !== 'error' : scannerOk,
+            val: rt
+              ? `${rt.label ?? rtState}${rt.scan_age_seconds != null ? ` (${Math.round(rt.scan_age_seconds)}s ago)` : ''}`
+              : scannerLabel,
+            color: rt ? (RUNTIME_TONE[rtState === 'RUNNING_DATA_ERROR' ? 'warn' : (rt.severity ?? 'info')] ?? RUNTIME_TONE.info).text
+              : (scannerOk ? 'text-emerald-400' : scannerStatus === 'DEGRADED' ? 'text-amber-400' : scannerStatus === 'STARTING' ? 'text-blue-400' : 'text-red-400'),
+            dotColor: rt ? (RUNTIME_TONE[rtState === 'RUNNING_DATA_ERROR' ? 'warn' : (rt.severity ?? 'info')] ?? RUNTIME_TONE.info).dot
+              : (scannerOk ? 'bg-emerald-400' : scannerStatus === 'DEGRADED' ? 'bg-amber-400' : scannerStatus === 'STARTING' ? 'bg-blue-400' : 'bg-red-400'),
           },
         ].map(item => (
           <div key={item.label} className="bg-[#141b2d] border border-[#1e2d45] rounded-lg px-3 py-2 flex items-center gap-2">
@@ -372,6 +436,16 @@ export default function Overview() {
           </div>
         ))}
       </div>
+
+      {/* Honest one-line explanation of what the paper scanner is really doing */}
+      {rt?.summary && isRunning && !isKilled && (
+        <div className={`rounded-lg border px-3 py-2 text-xs break-words ${rtTone.bg} ${rtTone.text}`}>
+          <span className="font-semibold">{rt.label}: </span>{rt.summary}
+          {rt.scan_seq != null && (
+            <span className="text-slate-500"> · scan #{rt.scan_seq}{rt.last_scan?.recorded_at_ist ? ` at ${rt.last_scan.recorded_at_ist}` : ''}</span>
+          )}
+        </div>
+      )}
 
       {/* Scanner health details — only shown when there's real heartbeat data */}
       {scannerHealth && (scannerHealth.scan_count ?? 0) > 0 && (
@@ -455,7 +529,7 @@ export default function Overview() {
           <div className="text-center py-10 text-slate-500">
             <Activity size={28} className="mx-auto mb-2 opacity-30" />
             <p className="text-sm">No active trades</p>
-            <p className="text-xs mt-1 text-slate-600">{isRunning ? 'Bot is watching market for signals' : 'Start the bot to begin trading'}</p>
+            <p className="text-xs mt-1 text-slate-600">{isRunning ? (rt?.summary ?? 'Bot is watching market for signals') : 'Start the bot to begin trading'}</p>
           </div>
         ) : (
           <div className="overflow-x-auto">

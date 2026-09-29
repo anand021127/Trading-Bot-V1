@@ -174,7 +174,7 @@ function AIDecisionPanel() {
   const lat = status.latency || {}
 
   return (
-    <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-4 space-y-3">
+    <div className="bg-[#141b2d] border border-[#1e2d45] rounded-xl p-3 sm:p-4 space-y-3 min-w-0">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h2 className="text-sm font-semibold text-white flex items-center gap-2">
@@ -189,8 +189,8 @@ function AIDecisionPanel() {
             V8-D signal → AI decision → hard risk → sizing → execution pipeline. {status.approval_semantics}.
           </p>
         </div>
-        <div className="text-right text-[11px] text-slate-400">
-          <div className="font-mono">{status.provider} · {status.model}</div>
+        <div className="sm:text-right text-[11px] text-slate-400 min-w-0 max-w-full">
+          <div className="font-mono wrap-anywhere">{status.provider} · {status.model}</div>
           <div className="text-slate-600">temp {status.temperature} · timeout {status.timeout_seconds}s</div>
         </div>
       </div>
@@ -208,7 +208,7 @@ function AIDecisionPanel() {
           {stageBadge(why?.breakdown?.stage)}
         </div>
         {why?.available && why.breakdown ? (
-          <div className="mt-2 space-y-1 text-[11px] text-slate-300">
+          <div className="mt-2 space-y-1 text-[11px] text-slate-300 wrap-anywhere">
             <div>V8-D: <span className={why.breakdown.v8_d === 'PASS' ? 'text-emerald-300' : 'text-slate-400'}>{why.breakdown.v8_d || '—'}</span>
               {why.breakdown.v8_d_rejection_reasons && why.breakdown.v8_d_rejection_reasons.length > 0 && (
                 <span className="text-slate-500"> — {why.breakdown.v8_d_rejection_reasons.slice(0, 2).join('; ')}</span>
@@ -263,12 +263,12 @@ function AIDecisionPanel() {
           <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-1">Recent AI decisions</div>
           <div className="space-y-1">
             {status.recent_decisions.slice(0, 5).map(d => (
-              <div key={d.decision_id} className="flex items-center justify-between gap-2 text-[11px] bg-[#0f1628] border border-[#1e2d45] rounded px-2 py-1">
+              <div key={d.decision_id} className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] bg-[#0f1628] border border-[#1e2d45] rounded px-2 py-1">
                 <span className="font-mono text-slate-500">{d.created_at.slice(11, 19)}</span>
                 <span className="text-slate-300">{d.symbol}</span>
                 {decisionChip(d.decision)}
                 <span className="text-slate-500" title="AI confidence in its own analysis — NOT a probability of profit">AI conf {d.confidence}%</span>
-                <span className="text-slate-500 truncate max-w-[30%]">{(d.reason_codes || []).slice(0, 2).join(', ') || '—'}</span>
+                <span className="text-slate-500 wrap-anywhere min-w-0">{(d.reason_codes || []).slice(0, 2).join(', ') || '—'}</span>
                 <span className="text-slate-600">{d.latency_ms != null ? `${Math.round(d.latency_ms)}ms` : ''}</span>
               </div>
             ))}
@@ -322,23 +322,23 @@ function CtxCard({ title, badge, children, defaultOpen = false }: {
   title: string; badge?: string | null; children: React.ReactNode; defaultOpen?: boolean
 }) {
   return (
-    <details className="bg-[#141b2d] border border-[#1e2d45] rounded-xl" open={defaultOpen}>
-      <summary className="cursor-pointer select-none px-4 py-2.5 flex items-center justify-between gap-2 text-xs font-semibold text-white">
+    <details className="bg-[#141b2d] border border-[#1e2d45] rounded-xl min-w-0" open={defaultOpen}>
+      <summary className="cursor-pointer select-none px-3 sm:px-4 py-3 lg:py-2.5 min-h-[44px] lg:min-h-0 flex items-center justify-between gap-2 text-xs font-semibold text-white">
         <span>{title}</span>
         {badge != null && badge !== '' && (
-          <span className="text-[10px] font-normal text-slate-400 truncate max-w-[60%]">{badge}</span>
+          <span className="text-[10px] font-normal text-slate-400 truncate max-w-[55%] sm:max-w-[60%] text-right">{badge}</span>
         )}
       </summary>
-      <div className="px-4 pb-3 text-[11px] text-slate-300 space-y-1">{children}</div>
+      <div className="px-3 sm:px-4 pb-3 text-[11px] text-slate-300 space-y-1 wrap-anywhere">{children}</div>
     </details>
   )
 }
 
 function KV({ k, v }: { k: string; v: React.ReactNode }) {
   return (
-    <div className="flex justify-between gap-3">
-      <span className="text-slate-500">{k}</span>
-      <span className="text-right truncate">{v}</span>
+    <div className="flex justify-between gap-3 min-w-0">
+      <span className="text-slate-500 shrink-0">{k}</span>
+      <span className="text-right min-w-0 wrap-anywhere">{v}</span>
     </div>
   )
 }
@@ -394,8 +394,12 @@ function BotContextCards() {
         {ctx.generated_at && <span>updated {new Date(ctx.generated_at).toLocaleTimeString()}</span>}
       </div>
 
-      <CtxCard title="Bot Status" defaultOpen badge={bot.running ? 'RUNNING' : 'STOPPED'}>
-        <KV k="Running" v={String(bot.running ?? '—')} />
+      <CtxCard title="Bot Status" defaultOpen
+        badge={bot.kill_switch_active ? 'KILLED' : bot.running ? (bot.runtime_label ?? 'RUNNING') : 'STOPPED'}>
+        <KV k="Start requested" v={String(bot.running ?? '—')} />
+        {bot.runtime_label && <KV k="Actual state" v={bot.runtime_label} />}
+        <KV k="Worker process" v={bot.worker_alive == null ? '—' : bot.worker_alive ? `alive${bot.heartbeat_age_seconds != null ? ` · heartbeat ${Math.round(bot.heartbeat_age_seconds)}s ago` : ''}` : 'NOT RUNNING'} />
+        {bot.runtime_summary && bot.running && <div className="text-slate-400">{bot.runtime_summary}</div>}
         <KV k="Mode" v={(bot.mode ?? '—').toUpperCase()} />
         <KV k="Strategy" v={bot.strategy ?? '—'} />
         <KV k="Broker" v={bot.broker ?? '—'} />
@@ -428,11 +432,17 @@ function BotContextCards() {
       </CtxCard>
 
       <CtxCard title="Scanner"
-        badge={scan?.available ? (scan?.scanner_status ?? scan?.worker_last_scan_reason ?? 'running') : 'no data'}>
+        badge={scan?.available ? (scan?.state_label ?? scan?.scanner_status ?? scan?.worker_last_scan_reason ?? 'running') : 'no data'}>
         {scan?.available
           ? <>
-              {scan?.last_scan_seconds_ago != null && <KV k="Last scan" v={`${Math.round(scan.last_scan_seconds_ago)}s ago`} />}
-              {scan?.worker_last_scan_reason && <KV k="Worker last scan" v={scan.worker_last_scan_reason} />}
+              {scan?.summary && <div className="text-slate-200">{scan.summary}</div>}
+              {scan?.scan_seq != null && <KV k="Scan #" v={`${scan.scan_seq}${scan?.last_scan_ist ? ` · ${scan.last_scan_ist}` : ''}`} />}
+              {scan?.last_scan_seconds_ago != null && <KV k="Last scan" v={`${Math.round(scan.last_scan_seconds_ago)}s ago (every ~${Math.round(scan?.scan_interval_seconds ?? 0) || '?'}s)`} />}
+              {scan?.worker_last_scan_reason && <KV k="Result" v={scan.worker_last_scan_reason} />}
+              {scan?.data_status && <KV k="Market data" v={String(scan.data_status).replace(/_/g, ' ').toLowerCase()} />}
+              {scan?.candle_count != null && <KV k="Candles" v={`${scan.candle_count}${scan?.candle_age_seconds != null ? ` · last ${Math.round(scan.candle_age_seconds)}s old` : ''}`} />}
+              {scan?.expiry && <KV k="Expiry / chain" v={`${scan.expiry} · ${scan?.option_chain_count ?? '—'} contracts`} />}
+              {scan?.error && <div className="text-red-300">error: {scan.error}</div>}
               {scan?.source_detail && <div className="text-slate-500">{scan.source_detail}</div>}
             </>
           : <div className="text-slate-500">{scan?.reason || 'No scanner state available.'}</div>}
@@ -759,7 +769,7 @@ export default function Copilot() {
     if (m.role === 'user') {
       return (
         <div key={m.id} className="flex justify-end">
-          <div className="max-w-[85%] bg-blue-600/20 border border-blue-600/40 rounded-xl px-3.5 py-2.5 text-sm text-blue-100 whitespace-pre-wrap">
+          <div className="max-w-[92%] sm:max-w-[85%] bg-blue-600/20 border border-blue-600/40 rounded-xl px-3.5 py-2.5 text-sm text-blue-100 whitespace-pre-wrap wrap-anywhere">
             {m.text}
           </div>
         </div>
@@ -771,7 +781,7 @@ export default function Copilot() {
     const typed = m.errorCode ? errorCodeToMessage(m.errorCode, m.errorMessage) : null
     return (
       <div key={m.id} className="flex justify-start">
-        <div className={`max-w-[85%] rounded-xl px-3.5 py-2.5 text-sm border ${
+        <div className={`max-w-[92%] sm:max-w-[85%] min-w-0 wrap-anywhere rounded-xl px-3.5 py-2.5 text-sm border ${
           failed ? 'bg-red-950/30 border-red-800/50 text-red-200'
           : cancelled ? 'bg-slate-900/50 border-slate-700 text-slate-300'
           : 'bg-[#141b2d] border-[#1e2d45] text-slate-200'
@@ -814,9 +824,9 @@ export default function Copilot() {
   }
 
   return (
-    <div className="space-y-4 h-full flex flex-col">
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="space-y-4 flex flex-col min-w-0 max-w-full lg:h-full">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 flex-1 basis-56">
           <h1 className="text-lg font-bold text-white flex items-center gap-2"><Bot size={18} className="text-cyan-400" /> Copilot AI</h1>
           <p className="text-xs text-slate-500 mt-0.5">
             Grounded in live bot state, trades, and backtests. Observation &amp; explanation only — it never places orders or changes settings.
@@ -837,16 +847,16 @@ export default function Copilot() {
 
       <BotContextCards />
 
-      <div className="flex-1 min-h-0 bg-[#141b2d] border border-[#1e2d45] rounded-xl flex flex-col">
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div className="flex-1 min-h-[20rem] lg:min-h-0 min-w-0 bg-[#141b2d] border border-[#1e2d45] rounded-xl flex flex-col">
+        <div className="flex-1 overflow-y-auto max-h-[60dvh] lg:max-h-none p-3 sm:p-4 space-y-3 min-w-0">
           {messages.length === 0 && (
-            <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 gap-3 py-10">
+            <div className="lg:h-full flex flex-col items-center justify-center text-center text-slate-500 gap-3 py-6 lg:py-10">
               <Sparkles size={22} className="text-cyan-500/60" />
-              <p className="text-sm max-w-md">Ask about the bot's status, today's paper trades, the latest rejection, or the latest backtest — answers are grounded in real project data.</p>
-              <div className="flex flex-wrap justify-center gap-2 mt-1">
+              <p className="text-sm max-w-md px-2">Ask about the bot's status, today's paper trades, the latest rejection, or the latest backtest — answers are grounded in real project data.</p>
+              <div className="flex flex-wrap justify-center gap-2 mt-1 w-full">
                 {QUICK_PROMPTS.map(p => (
                   <button key={p} onClick={() => void send(p)} disabled={generating}
-                    className="text-[11px] px-2.5 py-1.5 rounded-lg border border-[#243044] bg-[#0f1628] text-slate-400 hover:text-slate-200 hover:border-[#2a3a56] disabled:opacity-50">
+                    className="text-xs lg:text-[11px] px-3 py-2 lg:px-2.5 lg:py-1.5 min-h-[40px] lg:min-h-0 max-w-full text-left rounded-lg border border-[#243044] bg-[#0f1628] text-slate-400 hover:text-slate-200 hover:border-[#2a3a56] disabled:opacity-50">
                     {p}
                   </button>
                 ))}
@@ -857,7 +867,7 @@ export default function Copilot() {
           <div ref={bottomRef} />
         </div>
 
-        <div className="border-t border-[#1e2d45] p-3 flex items-end gap-2">
+        <div className="border-t border-[#1e2d45] p-2 sm:p-3 flex flex-wrap sm:flex-nowrap items-end gap-2">
           <textarea
             value={input}
             onChange={e => setInput(e.target.value)}
@@ -869,21 +879,21 @@ export default function Copilot() {
             }}
             placeholder={generating ? 'Waiting for the current answer…' : 'Ask about the bot, trades, rejections, backtests…'}
             rows={1}
-            className="flex-1 resize-none bg-[#0f1628] border border-[#1e2d45] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-600/50 max-h-32"
+            className="flex-1 basis-full sm:basis-auto min-w-0 resize-none bg-[#0f1628] border border-[#1e2d45] rounded-lg px-3 py-2 text-base sm:text-sm text-slate-200 focus:outline-none focus:border-blue-600/50 max-h-32"
           />
           {generating ? (
             <button onClick={cancel} disabled={cancelling}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-red-700/50 bg-red-950/30 text-red-300 text-sm font-medium hover:bg-red-950/60 disabled:opacity-50">
+              className="flex flex-1 sm:flex-none justify-center items-center gap-1.5 px-3 py-2 min-h-[44px] sm:min-h-0 rounded-lg border border-red-700/50 bg-red-950/30 text-red-300 text-sm font-medium hover:bg-red-950/60 disabled:opacity-50">
               <Square size={14} /> Stop
             </button>
           ) : (
             <button onClick={() => void send(input)} disabled={!input.trim()}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium">
+              className="flex flex-1 sm:flex-none justify-center items-center gap-1.5 px-3 py-2 min-h-[44px] sm:min-h-0 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium">
               <Send size={14} /> Send
             </button>
           )}
           <button onClick={clear} title="Clear conversation"
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[#1e2d45] text-slate-400 text-sm hover:bg-[#1a2235]">
+            className="flex justify-center items-center gap-1.5 px-3 py-2 min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 rounded-lg border border-[#1e2d45] text-slate-400 text-sm hover:bg-[#1a2235]">
             <Trash2 size={14} />
           </button>
         </div>

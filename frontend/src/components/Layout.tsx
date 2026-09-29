@@ -116,9 +116,9 @@ export default function Layout() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#0a0e1a] text-slate-200">
+    <div className="flex h-[100dvh] w-full max-w-[100vw] overflow-hidden bg-[#0a0e1a] text-slate-200">
       {/* Desktop sidebar */}
-      <aside className="hidden md:flex flex-col w-56 bg-[#0d1424] border-r border-[#1e2d45] flex-shrink-0">
+      <aside className="hidden lg:flex flex-col w-56 bg-[#0d1424] border-r border-[#1e2d45] flex-shrink-0">
         <div className="px-4 py-5 border-b border-[#1e2d45]">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-600 to-cyan-600 flex items-center justify-center text-white font-bold text-sm flex-shrink-0 shadow-sm shadow-blue-500/20">
@@ -173,9 +173,9 @@ export default function Layout() {
 
       {/* Mobile drawer overlay */}
       {mobileOpen && (
-        <div className="fixed inset-0 z-50 flex md:hidden">
+        <div className="fixed inset-0 z-50 flex lg:hidden">
           <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setMobileOpen(false)} />
-          <aside className="relative w-64 bg-[#0d1424] border-r border-[#1e2d45] flex flex-col z-10">
+          <aside className="relative w-64 max-w-[85vw] bg-[#0d1424] border-r border-[#1e2d45] flex flex-col z-10">
             <div className="px-4 py-4 border-b border-[#1e2d45] flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="w-6 h-6 rounded bg-blue-600 flex items-center justify-center text-white text-xs font-bold">
@@ -228,7 +228,7 @@ export default function Layout() {
       )}
 
       {/* Main content area */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
         {/* PWA Update Banner */}
         {isUpdateAvailable && (
           <div className="bg-gradient-to-r from-blue-600 to-cyan-600 px-4 py-2 text-white flex items-center justify-between text-xs sm:text-sm z-30 shadow-md flex-shrink-0">
@@ -246,10 +246,10 @@ export default function Layout() {
         )}
 
         {/* Topbar */}
-        <header className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2.5 bg-[#0d1424] border-b border-[#1e2d45] flex-shrink-0">
+        <header className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2.5 min-w-0 bg-[#0d1424] border-b border-[#1e2d45] flex-shrink-0">
           <button
             onClick={() => setMobileOpen(true)}
-            className="md:hidden text-slate-400 hover:text-white p-1 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg hover:bg-slate-800"
+            className="lg:hidden text-slate-400 hover:text-white p-1 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg hover:bg-slate-800"
             aria-label="Open Navigation Drawer"
           >
             <Menu size={20} />
@@ -285,19 +285,19 @@ export default function Layout() {
         </header>
 
         {/* Scrollable Main Content (adds bottom padding on mobile for bottom bar) */}
-        <main className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 pb-20 md:pb-6">
+        <main className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-3 sm:p-4 lg:p-6 pb-24 lg:pb-6">
           <Outlet />
         </main>
 
         {/* Mobile Bottom Navigation Bar (iOS / Android touch-friendly) */}
-        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0d1424]/95 backdrop-blur-md border-t border-[#1e2d45] px-2 py-1 flex items-center justify-around">
+        <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 pb-[env(safe-area-inset-bottom)] bg-[#0d1424]/95 backdrop-blur-md border-t border-[#1e2d45] px-2 py-1 flex items-center justify-around">
           {bottomBarItems.map(({ to, icon: Icon, label }) => {
             const isActive = to === '/' ? location.pathname === '/' : location.pathname.startsWith(to)
             return (
               <NavLink
                 key={to}
                 to={to}
-                className={`flex flex-col items-center justify-center py-1.5 px-3 min-w-[56px] min-h-[48px] rounded-lg transition-colors ${
+                className={`flex flex-col items-center justify-center py-1.5 px-2 sm:px-3 min-w-[52px] min-h-[48px] rounded-lg transition-colors ${
                   isActive ? 'text-blue-400 font-semibold' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >

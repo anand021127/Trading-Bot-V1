@@ -43,8 +43,11 @@ def cmd_status() -> dict:
     age = w.get("heartbeat_age_seconds")
     hb_fresh = age is not None and age < 20
     effectively_running = bool(st.get("running")) and worker_alive and hb_fresh
+    runtime = w.get("runtime") or {}
     return {
         "success": True,
+        "runtime_state": runtime.get("state"),
+        "runtime_summary": runtime.get("summary"),
         "running": effectively_running,
         "is_running": effectively_running,
         "bot_state_running": bool(st.get("running")),

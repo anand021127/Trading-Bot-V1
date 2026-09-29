@@ -250,7 +250,47 @@ class PaperMarketScanner:
         kill_switch_active: bool = False,
         now: Optional[datetime] = None,
     ) -> ScanResult:
+        """One scan cycle. Delegates to ``_scan_once_impl`` (the unchanged
+        market → data → V8-D → AI → risk → paper-execution logic) and ALWAYS
+        attaches per-scan diagnostics (session, candle count/freshness,
+        expiry, option-chain size, decision, rejection, error) to
+        ``ScanResult.details`` so the persisted record can explain exactly
+        where the pipeline stopped. Diagnostics never carry secrets."""
         now = now or datetime.now(timezone.utc)
+        diag: Dict[str, Any] = {
+            "underlying": self.underlying,
+            "strategy": str(getattr(self.strategy, "name", "") or
+                            getattr(self.strategy, "strategy_name", "") or "V8_D_PULLBACK_ATM"),
+            "interval": self.interval,
+            "max_candle_age_seconds": self.max_candle_age_seconds,
+            "min_bars": self.min_bars,
+            "scan_time_ist": now.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        }
+        try:
+            from backend.market.calendar import exchange_calendar
+            _st, _note = exchange_calendar.session_status(now.astimezone(IST))
+            diag["session_status"] = _st
+            diag["session_note"] = _note
+        except Exception:
+            diag["session_status"] = "UNKNOWN"
+        result = self._scan_once_impl(
+            runtime, trades_today=trades_today,
+            kill_switch_active=kill_switch_active, now=now, diag=diag,
+        )
+        merged = dict(diag)
+        merged.update(result.details or {})
+        result.details = merged
+        return result
+
+    def _scan_once_impl(
+        self,
+        runtime: Any,
+        *,
+        trades_today: int = 0,
+        kill_switch_active: bool = False,
+        now: datetime,
+        diag: Dict[str, Any],
+    ) -> ScanResult:
         # Exchange-calendar gate: never scan on weekends / official NSE/BSE
         # holidays (Muhurat special sessions are honored by the calendar).
         if not _is_trading_session(now):
@@ -303,8 +343,22 @@ class PaperMarketScanner:
             candles = self.data.get_current_candles(self.underlying, self.interval, limit=120)
         except Exception as exc:
             logger.warning("Candle fetch failed: %s", type(exc).__name__)
-            return ScanResult(False, False, f"candle_fetch_error:{type(exc).__name__}")
+            from backend.paper.scan_state import describe_exception
+            diag["error"] = describe_exception(exc)
+            # scanned=True: the scan EXECUTED and reached the market-data
+            # stage; the data call failed. (scanned=False is reserved for
+            # "did not run" — market closed / not attempted.)
+            return ScanResult(True, False, f"candle_fetch_error:{type(exc).__name__}")
 
+        diag["candle_count"] = len(candles or [])
+        try:
+            _last = (candles or [])[-1] if candles else None
+            _lts = _parse_ts((_last or {}).get("timestamp") or (_last or {}).get("time"))
+            if _lts is not None:
+                diag["last_candle_ts"] = _lts.astimezone(IST).isoformat()
+                diag["candle_age_seconds"] = round((now - _lts.astimezone(timezone.utc)).total_seconds(), 1)
+        except Exception:
+            pass
         ok, reason = candles_are_fresh(
             candles,
             max_age_seconds=self.max_candle_age_seconds,
@@ -317,14 +371,20 @@ class PaperMarketScanner:
         try:
             expiry = self.data.get_nearest_expiry(self.underlying)
         except Exception as exc:
+            from backend.paper.scan_state import describe_exception
+            diag["error"] = describe_exception(exc)
             return ScanResult(True, False, f"expiry_fetch_error:{type(exc).__name__}")
         if not expiry:
             return ScanResult(True, False, "no_upcoming_expiry")
+        diag["expiry"] = str(expiry)
 
         try:
             chain, chain_spot = self.data.get_option_chain_with_spot(self.underlying, expiry)
         except Exception as exc:
+            from backend.paper.scan_state import describe_exception
+            diag["error"] = describe_exception(exc)
             return ScanResult(True, False, f"chain_fetch_error:{type(exc).__name__}")
+        diag["option_chain_count"] = len(chain or [])
         if not chain:
             return ScanResult(True, False, "empty_option_chain")
 
@@ -333,6 +393,7 @@ class PaperMarketScanner:
             spot = float(candles[-1].get("close") or 0)
         if spot <= 0:
             return ScanResult(True, False, "no_valid_spot")
+        diag["spot"] = round(spot, 2)
 
         last_ts = _parse_ts(candles[-1].get("timestamp"))
         quote_age = (now - last_ts.astimezone(timezone.utc)).total_seconds() if last_ts else 0.0
@@ -353,9 +414,22 @@ class PaperMarketScanner:
             )
         except Exception as exc:
             logger.exception("V8-D evaluate failed")
+            from backend.paper.scan_state import describe_exception
+            diag["error"] = describe_exception(exc)
             return ScanResult(True, False, f"strategy_error:{type(exc).__name__}")
 
         decision = getattr(decision_log, "decision", None) or "NONE"
+        diag["decision"] = str(decision)
+        diag["v8d_evaluated"] = True
+        try:
+            _c = ((getattr(sig, "indicators", None) or {}).get("selected_contract") or {})
+            if _c:
+                diag["selected_contract"] = {
+                    k: _c.get(k) for k in ("instrument_key", "strike", "option_type",
+                                            "lot_size", "ltp", "expiry") if k in _c
+                }
+        except Exception:
+            pass
         if getattr(sig, "signal", None) != "BUY":
             return ScanResult(
                 True,
@@ -508,6 +582,8 @@ class PaperMarketScanner:
             result = runtime.submit_entry(payload)
         except Exception as exc:
             logger.exception("Paper submit failed")
+            from backend.paper.scan_state import describe_exception
+            diag["error"] = describe_exception(exc)
             return ScanResult(True, False, f"submit_error:{type(exc).__name__}", signal="BUY")
 
         accepted = bool(getattr(result, "accepted", False))

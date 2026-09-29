@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from backend.database.db_manager import DatabaseManager
+from backend.paper.scan_state import compute_runtime_state
 from backend.paper.worker_lock import WorkerLock, pid_is_alive
 from backend.strategy.trading_engine import BotState
 
@@ -71,6 +72,13 @@ def worker_status() -> Dict[str, Any]:
         "bot_state": BotState.status(),
         "database_path": db.db_path,
     }
+    try:
+        # REAL operational state (worker alive + heartbeat + persisted scan
+        # record) — never just the BotState flag.
+        result["runtime"] = compute_runtime_state(db, pid_alive=_pid_alive)
+    except Exception as exc:  # noqa: BLE001
+        result["runtime"] = {"state": "UNKNOWN", "label": "Unknown",
+                             "summary": f"runtime state unavailable: {type(exc).__name__}"}
     # Close the short-lived handle: this process is transient (one bridge
     # invocation), and leaked open SQLite files block temp-dir cleanup on
     # Windows (PermissionError WinError 32) in e2e tests.
@@ -82,6 +90,17 @@ def start_worker(wait_seconds: float = 8.0) -> Dict[str, Any]:
     """Spawn paper_worker.py if not already running; wait for healthy heartbeat."""
     st = worker_status()
     if st["worker_alive"] and st.get("heartbeat_age_seconds") is not None and st["heartbeat_age_seconds"] < 15:
+        # The worker is up but may be IDLE (after Stop it stays alive and only
+        # waits for the BotState flag). Start must actually arm it — previously
+        # this branch returned success without setting the flag, so pressing
+        # Start after Stop reported success while nothing resumed.
+        try:
+            db0 = _db()
+            BotState._db = db0
+            BotState.start()
+            db0.close()
+        except Exception:
+            pass
         return {
             "success": True,
             "message": "Paper worker already running",
@@ -94,7 +113,11 @@ def start_worker(wait_seconds: float = 8.0) -> Dict[str, Any]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     env.setdefault("TRADING_MODE", "paper")
-    env.setdefault("DATABASE_PATH", db.db_path)
+    # ABSOLUTE path: the worker is spawned with cwd=<repo root>, while the
+    # caller (API / bridge) may run from another cwd. A relative
+    # "data/trading_bot.db" would then resolve to two different files and the
+    # worker would never see BotState/scan state written by the API.
+    env["DATABASE_PATH"] = str(Path(db.db_path).resolve())
 
     # Preflight env (same rules as runtime) so UI gets a clear error before spawn
     strategy = env.get("TRADING_STRATEGY", "").strip()
@@ -255,3 +278,59 @@ def full_health() -> Dict[str, Any]:
             "product": os.environ.get("UPSTOX_ORDER_PRODUCT", ""),
         },
     }
+
+
+# ── API-side helpers (FastAPI /api/bot/start + watchdog) ─────────────────────
+def autospawn_enabled() -> bool:
+    """Whether the API may spawn the paper worker process itself.
+
+    Default ON in real deployments; OFF under the offline unit-test flag
+    (tests must never fork workers unless they opt in with
+    PAPER_WORKER_AUTOSPAWN=1). Set PAPER_WORKER_AUTOSPAWN=0 when the worker is
+    supervised externally (e.g. its own systemd unit)."""
+    v = os.environ.get("PAPER_WORKER_AUTOSPAWN", "").strip().lower()
+    if v in {"0", "false", "no", "off"}:
+        return False
+    if v in {"1", "true", "yes", "on"}:
+        return True
+    return os.environ.get("TRADING_BOT_OFFLINE_TESTS", "").strip() != "1"
+
+
+def ensure_worker_running(wait_seconds: float = 10.0) -> Dict[str, Any]:
+    """Make sure a paper worker process exists (spawn if needed) and BotState
+    is set. Paper-only: refuses any non-paper mode. Idempotent."""
+    if os.environ.get("TRADING_MODE", "paper").strip().lower() != "paper":
+        return {"success": False, "message": "TRADING_MODE must be paper"}
+    return start_worker(wait_seconds=wait_seconds)
+
+
+_WATCHDOG: Dict[str, Any] = {"attempts": 0, "last_attempt": 0.0}
+WATCHDOG_MIN_GAP_SECONDS = 60.0
+WATCHDOG_MAX_ATTEMPTS = 5
+
+
+def watchdog_check(now_mono: Optional[float] = None) -> Dict[str, Any]:
+    """If the bot is flagged RUNNING but the paper worker is dead/hung, respawn
+    it (bounded: 1 attempt / 60s, max 5 consecutive). Returns what it did.
+    Never runs when the kill switch is active or the bot is stopped."""
+    now_mono = time.monotonic() if now_mono is None else now_mono
+    st = worker_status()
+    bot = st.get("bot_state") or {}
+    if not bot.get("running") or bot.get("kill_switch_active"):
+        _WATCHDOG["attempts"] = 0
+        return {"action": "none", "reason": "bot not running"}
+    age = st.get("heartbeat_age_seconds")
+    healthy = bool(st.get("worker_alive")) and age is not None and age < 30
+    if healthy:
+        _WATCHDOG["attempts"] = 0
+        return {"action": "none", "reason": "worker healthy"}
+    if _WATCHDOG["attempts"] >= WATCHDOG_MAX_ATTEMPTS:
+        return {"action": "gave_up", "reason": f"{WATCHDOG_MAX_ATTEMPTS} respawn attempts failed",
+                "last_error": st.get("last_error")}
+    if now_mono - float(_WATCHDOG["last_attempt"]) < WATCHDOG_MIN_GAP_SECONDS:
+        return {"action": "backoff", "reason": "waiting before next respawn attempt"}
+    _WATCHDOG["last_attempt"] = now_mono
+    _WATCHDOG["attempts"] += 1
+    res = ensure_worker_running()
+    return {"action": "respawn", "attempt": _WATCHDOG["attempts"],
+            "success": bool(res.get("success")), "message": res.get("message")}

@@ -10,6 +10,16 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _ist_today() -> date:
+    """Trading-day 'today' in IST — never the server's local date. A host
+    running in another timezone would otherwise request the wrong day's
+    candles / pick the wrong 'nearest expiry' around midnight IST."""
+    return datetime.now(_IST).date()
 
 try:
     import requests
@@ -392,8 +402,8 @@ class UpstoxClient:
         included (today's intraday candles are always fetched)."""
         historical = self.get_historical_candles(
             symbol, interval,
-            from_date=(date.today() - timedelta(days=context_days)).strftime("%Y-%m-%d"),
-            to_date=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"),
+            from_date=(_ist_today() - timedelta(days=context_days)).strftime("%Y-%m-%d"),
+            to_date=(_ist_today() - timedelta(days=1)).strftime("%Y-%m-%d"),
             limit=limit,
         )
         intraday = self.get_intraday_candles(symbol, interval)
@@ -431,10 +441,10 @@ class UpstoxClient:
         unit, unit_interval = V3_INTERVAL_MAP.get(interval.lower(), ("days", 1))
 
         if not to_date:
-            to_date = date.today().strftime("%Y-%m-%d")
+            to_date = _ist_today().strftime("%Y-%m-%d")
         if not from_date:
             days_back = 30 if unit == "minutes" else 365
-            from_date = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+            from_date = (_ist_today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
         to_dt = date.fromisoformat(to_date)
         from_dt = date.fromisoformat(from_date)
@@ -536,7 +546,7 @@ class UpstoxClient:
         except UpstoxAPIError as e:
             logger.warning("Could not fetch expiries for %s: %s", underlying_symbol, e)
             return None
-        today = date.today().isoformat()
+        today = _ist_today().isoformat()
         upcoming = [e for e in expiries if e >= today]
         return upcoming[0] if upcoming else None
 
@@ -629,8 +639,8 @@ class UpstoxClient:
                 if not candles or len(candles) < atr_period + 1:
                     # try a short historical window via instrument key
                     from datetime import date, timedelta
-                    to_d = date.today().isoformat()
-                    from_d = (date.today() - timedelta(days=5)).isoformat()
+                    to_d = _ist_today().isoformat()
+                    from_d = (_ist_today() - timedelta(days=5)).isoformat()
                     candles = self.get_historical_candles(
                         ik, interval, from_date=from_d, to_date=to_d, limit=0,
                     ) or candles

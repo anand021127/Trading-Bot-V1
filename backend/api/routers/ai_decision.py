@@ -185,6 +185,7 @@ def get_why_not_traded() -> Dict[str, Any]:
         out["stage"] = chain.get("stage")
         out["gates"] = chain.get("gates") or {}
         out["human_summary"] = chain.get("human_summary")
+        out["diagnostics"] = chain.get("diagnostics") or {}
         if chain.get("recorded_at"):
             out["recorded_at"] = chain["recorded_at"]
         if chain.get("age_seconds") is not None:
@@ -198,7 +199,14 @@ def get_why_not_traded() -> Dict[str, Any]:
             details = {}
         out["breakdown"] = {
             "stage": chain.get("stage"),
-            "v8_d": "PASS" if chain.get("signal") == "BUY" else "REJECTED",
+            # V8-D is only "REJECTED" when it was actually evaluated; a data or
+            # scanner failure means it was NOT evaluated (different problem).
+            "v8_d": ("PASS" if chain.get("signal") == "BUY"
+                     else "NOT_EVALUATED" if (chain.get("stage") in (
+                         "STALE_DATA", "DATA_UNAVAILABLE", "SCANNER_ERROR", "MARKET_CLOSED")
+                         or (chain.get("gates", {}).get("v8d_signal", {}).get("status")
+                             == "NOT_EVALUATED"))
+                     else "REJECTED"),
             "v8_d_rejection_reasons": chain.get("v8d_rejection_reasons") or [],
             "ai_decision": details.get("ai_decision"),
             "ai_confidence": details.get("ai_confidence"),

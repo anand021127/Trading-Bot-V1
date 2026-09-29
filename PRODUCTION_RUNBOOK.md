@@ -200,3 +200,17 @@ option position is force-closed no later than its ACTUAL contract expiry
 `BACKTEST_END` never overrides expiry. If a future backtest CSV shows these
 counters non-zero, treat the underlying data/coverage problem as a blocker —
 do not trade on it.
+
+
+## Scanner runtime states (PHASE: scanner QA)
+`GET /api/bot/status` → `runtime_state`. Meaning and action:
+
+| State | Meaning | Action |
+|---|---|---|
+| STOPPED | Flag off / kill switch | Start |
+| STARTING | Worker spawning, first scan pending | wait ≤ ~1 min |
+| RUNNING_SCANNING / RUNNING_NO_SIGNAL | Scans executing; V8-D evaluated | none (NO_SIGNAL is a valid outcome) |
+| RUNNING_WAITING_FOR_MARKET | Loop executing; market/entry window closed | none |
+| RUNNING_DATA_ERROR | Scan ran but Upstox data/token unusable | fix token (Settings) — no restart needed, scanner re-arms ≤30 s |
+| RUNNING_SCANNER_ERROR | Scan iteration raising / loop stalled | read `paper_worker_last_error`, `data/paper_worker.log` |
+| STARTED_WORKER_NOT_RESPONDING | Flag says running, no live worker | Press Start again (repairs) — watchdog also respawns |

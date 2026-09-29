@@ -45,7 +45,6 @@ def pid_is_alive(pid: int) -> bool:
             return False
     try:
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -53,6 +52,20 @@ def pid_is_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+    # os.kill(pid, 0) also succeeds for a ZOMBIE (exited but not yet reaped by
+    # its parent). A worker spawned by a short-lived bridge/API call is
+    # re-parented to init, which in minimal containers may never reap it — the
+    # dashboard would then report a DEAD worker as alive. Treat state 'Z'/'X'
+    # (Linux /proc) as not alive.
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as fh:
+            raw = fh.read().decode("utf-8", "replace")
+        state = raw.rsplit(")", 1)[1].strip().split(" ", 1)[0]
+        if state in ("Z", "X"):
+            return False
+    except Exception:
+        pass  # no /proc (macOS/BSD) or unreadable: fall back to the kill probe
+    return True
 
 
 class WorkerLock:

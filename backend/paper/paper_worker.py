@@ -14,9 +14,10 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -36,6 +37,10 @@ if str(_ROOT) not in sys.path:
 from backend.config.runtime_config import get_effective_settings
 from backend.database.db_manager import DatabaseManager
 from backend.paper.paper_runtime import PaperStartupError, PaperTradingRuntime
+from backend.paper.scan_state import (
+    MARKET_SCAN_KEY, SCAN_INFLIGHT_KEY, SCAN_SEQ_KEY,
+    build_scan_record, describe_exception, persist_scan_record, scan_interval_seconds,
+)
 from backend.paper.worker_lock import WorkerLock, WorkerLockError
 from backend.strategy.trading_engine import BotState
 
@@ -67,6 +72,21 @@ class PaperWorker:
         self.runtime: Optional[PaperTradingRuntime] = None
         self._stop = False
         self._loop = 0
+        # ── scan scheduling / diagnostics (see backend/paper/scan_state.py) ──
+        self.scanner = None
+        self._suppress_market_scan = False
+        self._scan_interval = scan_interval_seconds()
+        self._next_scan_mono = 0.0
+        self._last_scanner_init_mono = 0.0
+        try:
+            self._scan_seq = int(self.db.get_setting(SCAN_SEQ_KEY, "0") or 0)
+        except (TypeError, ValueError):
+            self._scan_seq = 0
+        # liveness pump shared state
+        self._last_tick_mono = time.monotonic()
+        self._scan_inflight_since: Optional[float] = None
+        self._hb_stop = threading.Event()
+        self._hb_thread: Optional[threading.Thread] = None
 
     def _write_hb(self, status: str, error: str = "") -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -99,10 +119,9 @@ class PaperWorker:
             self.lock.release()
             raise
 
-        self.scanner = None
-        self._suppress_market_scan = False
         self._init_market_scanner()
         self._write_hb("running")
+        self._start_heartbeat_pump()
         logger.info(
             "Paper worker started pid=%s strategy=%s product=%s db=%s",
             os.getpid(),
@@ -128,6 +147,7 @@ class PaperWorker:
     def _tick(self) -> None:
         assert self.runtime is not None
         self._loop += 1
+        self._last_tick_mono = time.monotonic()
         if not self._trading_enabled():
             self._write_hb("idle_waiting_for_start")
             return
@@ -193,36 +213,146 @@ class PaperWorker:
         if os.environ.get("PAPER_ALLOW_TEST_SIGNAL", "").strip() in {"1", "true", "yes"}:
             self._maybe_process_test_signal()
 
-        # Market-driven V8-D scan (real Upstox data when scanner is armed)
-        if self.scanner is not None and not self._suppress_market_scan:
-            try:
-                from backend.strategy.trading_engine import BotState
-                st = BotState.status()
-                scan = self.scanner.scan_once(
-                    self.runtime,
-                    trades_today=int(self.db.get_setting("paper_trades_today", "0") or 0),
-                    kill_switch_active=bool(st.get("kill_switch_active")),
-                )
-                self.db.save_setting("paper_worker_last_scan", scan.reason)
-                self.db.save_setting(
-                    "paper_worker_last_scan_detail",
-                    __import__("json").dumps({
-                        "scanned": scan.scanned,
-                        "traded": scan.traded,
-                        "reason": scan.reason,
-                        "signal": scan.signal,
-                        "details": scan.details,
-                    }, default=str)[:2000],
-                )
-                if scan.traded:
-                    n = int(self.db.get_setting("paper_trades_today", "0") or 0) + 1
-                    self.db.save_setting("paper_trades_today", str(n))
-                    logger.info("Paper trade taken via market scan: %s", scan.details)
-            except Exception as exc:
-                logger.exception("Market scan tick failed")
-                self.db.save_setting("paper_worker_last_scan", f"scan_error:{type(exc).__name__}")
+        # Market-driven V8-D scan (real Upstox data when scanner is armed).
+        # EVERY due iteration persists a scan record — including market
+        # closed, data errors, "scanner not armed" and exceptions — so the
+        # dashboard/Copilot can prove the loop is executing.
+        self._maybe_scan()
 
         self._write_hb("running")
+
+    # ── scan iteration ──────────────────────────────────────────────────────
+    def _persist(self, *, scanned: bool, traded: bool, reason: str, signal: Any = None,
+                 details: Optional[Dict[str, Any]] = None, started: float,
+                 error: Optional[str] = None) -> None:
+        self._scan_seq += 1
+        now = datetime.now(timezone.utc)
+        rec = build_scan_record(
+            seq=self._scan_seq, scanned=scanned, traded=traded, reason=reason,
+            signal=signal, details=details,
+            strategy=os.environ.get("TRADING_STRATEGY", "V8_D_PULLBACK_ATM"),
+            underlying=(getattr(self.scanner, "underlying", None)
+                        or os.environ.get("PAPER_UNDERLYING", "NIFTY50")),
+            duration_ms=(time.monotonic() - started) * 1000.0,
+            next_scan_at=now + timedelta(seconds=self._scan_interval),
+            error=error, now=now,
+        )
+        persist_scan_record(self.db, rec)
+
+    def _maybe_scan(self) -> None:
+        assert self.runtime is not None
+        if self._suppress_market_scan:
+            return
+        mono = time.monotonic()
+        if mono < self._next_scan_mono:
+            return
+        self._next_scan_mono = mono + self._scan_interval
+        started = mono
+
+        # Scanner not armed (no token at startup / init failure): retry the
+        # arming periodically — a token can appear AFTER the worker started
+        # (OAuth completed later, daily token rotation) — and record the
+        # state every iteration instead of staying silent forever.
+        if self.scanner is None:
+            if mono - self._last_scanner_init_mono >= 30.0:
+                self._last_scanner_init_mono = mono
+                self._init_market_scanner()
+            if self.scanner is None:
+                why = self.db.get_setting(MARKET_SCAN_KEY, "") or "disabled_no_token"
+                self._persist(
+                    scanned=False, traded=False, reason=f"scanner_disabled:{why}",
+                    details={"data_status": "NO_MARKET_DATA_SOURCE",
+                             "note": "No Upstox token / market-data source — V8-D cannot be evaluated"},
+                    started=started,
+                    error=f"market scanner not armed ({why})",
+                )
+                return
+
+        try:
+            st = BotState.status()
+            # Authoritative, day-scoped counter (rolls at the IST/paper day
+            # boundary). The previous persisted `paper_trades_today` setting
+            # was a LIFETIME counter that never reset, so after
+            # MAX_TRADES_PER_DAY cumulative trades every scan on every future
+            # day would be rejected with "Daily trade limit reached".
+            try:
+                self.runtime._roll_day_if_needed()
+            except Exception:
+                pass
+            trades_today = int(getattr(self.runtime, "trades_today", 0) or 0)
+            self._scan_inflight_since = time.monotonic()
+            self.db.save_setting(SCAN_INFLIGHT_KEY, datetime.now(timezone.utc).isoformat())
+            try:
+                scan = self.scanner.scan_once(
+                    self.runtime,
+                    trades_today=trades_today,
+                    kill_switch_active=bool(st.get("kill_switch_active")),
+                )
+            finally:
+                self._scan_inflight_since = None
+                try:
+                    self.db.save_setting(SCAN_INFLIGHT_KEY, "")
+                except Exception:
+                    pass
+            self._persist(
+                scanned=scan.scanned, traded=scan.traded, reason=scan.reason,
+                signal=scan.signal, details=scan.details, started=started,
+                error=(scan.details or {}).get("error"),
+            )
+            try:
+                self.db.save_setting("paper_trades_today",
+                                     str(int(getattr(self.runtime, "trades_today", 0) or 0)))
+            except Exception:
+                pass
+            if scan.traded:
+                logger.info("Paper trade taken via market scan: %s", scan.details)
+        except Exception as exc:
+            # NEVER swallow silently: log with traceback, persist a full scan
+            # record carrying the (redacted) error, and expose it as
+            # paper_worker_last_error so the UI shows RUNNING_SCANNER_ERROR.
+            logger.exception("Market scan tick failed")
+            msg = describe_exception(exc)
+            self._persist(scanned=False, traded=False,
+                          reason=f"scan_error:{type(exc).__name__}",
+                          details={"error": msg}, started=started, error=msg)
+            try:
+                self.db.save_setting(ERR_KEY, msg[:500])
+            except Exception:
+                pass
+
+    # ── liveness pump ───────────────────────────────────────────────────────
+    def _start_heartbeat_pump(self) -> None:
+        """Write the heartbeat from a separate thread (own SQLite handle).
+
+        The main loop can legitimately block for tens of seconds inside a scan
+        (instrument-master refresh / candle backfill / slow Upstox). Without
+        this, the heartbeat went stale during long scans and the API reported
+        the worker as dead. The pump refuses to write when the main loop has
+        genuinely stopped making progress (no tick for 60s, or a scan in
+        flight for >180s), so a hung loop is still reported as not responding.
+        """
+        def _pump() -> None:
+            hb_db = None
+            try:
+                hb_db = DatabaseManager(db_path=self.db_path)
+                while not self._hb_stop.wait(5.0):
+                    now = time.monotonic()
+                    inflight = self._scan_inflight_since
+                    limit = 180.0 if inflight is not None else 60.0
+                    if now - self._last_tick_mono > limit:
+                        continue  # main loop stalled — let the heartbeat go stale
+                    hb_db.save_setting(HB_KEY, datetime.now(timezone.utc).isoformat())
+            except Exception:
+                logger.exception("heartbeat pump stopped")
+            finally:
+                try:
+                    if hb_db is not None:
+                        hb_db.close()
+                except Exception:
+                    pass
+
+        self._hb_thread = threading.Thread(target=_pump, name="paper-worker-heartbeat", daemon=True)
+        self._hb_thread.start()
 
     def _maybe_process_test_signal(self) -> None:
         """If a pending test signal is stored in settings, submit once through the pipeline."""
@@ -342,7 +472,17 @@ class PaperWorker:
 
         """Attach Upstox-backed scanner when a token is available; else leave offline."""
         from backend.paper.market_scan_loop import PaperMarketScanner, UpstoxMarketDataSource
-        token = os.environ.get("UPSTOX_ACCESS_TOKEN", "").strip()
+        # Prefer the AUTHORITATIVE resolver (re-read on every request, so a
+        # daily-rotated token is picked up without restarting the worker).
+        # Pinning an explicit token into the client froze the FIRST token for
+        # the life of the process → every call 401'd after the next rotation.
+        resolver_token = ""
+        try:
+            from backend.broker.token_resolver import resolve_upstox_token
+            resolver_token = (resolve_upstox_token() or "").strip()
+        except Exception:
+            resolver_token = ""
+        token = resolver_token or os.environ.get("UPSTOX_ACCESS_TOKEN", "").strip()
         if not token:
             try:
                 token = self.db.load_token(require_valid=False) or ""
@@ -354,7 +494,7 @@ class PaperWorker:
             return
         try:
             from backend.broker.upstox_client import UpstoxClient
-            client = UpstoxClient(access_token=token)
+            client = UpstoxClient() if resolver_token else UpstoxClient(access_token=token)
             data = UpstoxMarketDataSource(client)
             # PHASE 5.1: AI trading decision engine — shares the worker's DB
             # (durable ai_decisions table + latency telemetry). Disabled by
@@ -402,6 +542,7 @@ class PaperWorker:
                     self._write_hb("tick_error", str(exc))
                 time.sleep(max(0.5, interval))
         finally:
+            self._hb_stop.set()
             self._write_hb("stopped")
             self.lock.release()
             try:

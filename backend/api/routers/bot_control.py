@@ -1,6 +1,7 @@
 """Bot control endpoints — start, stop, kill switch, mode/AI control, and status."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from types import SimpleNamespace
@@ -93,6 +94,17 @@ def _paper_runtime_from_app() -> Optional[Any]:
         return SimpleNamespace(_synthetic_db_stub=True, db=DatabaseManager(
             db_path=os.environ.get("DATABASE_PATH", "data/trading_bot.db")))
     except Exception:
+        return None
+
+
+def paper_runtime_state() -> Optional[Dict[str, Any]]:
+    """REAL operational state of the paper scanner (worker process alive +
+    fresh heartbeat + persisted scan record), or None outside paper mode /
+    when the state DB is unreadable. See backend/paper/scan_state.py."""
+    try:
+        from backend.paper.scan_state import compute_runtime_state
+        return compute_runtime_state(BotState._get_db())
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -240,6 +252,7 @@ async def operations_dashboard() -> Dict[str, Any]:
         "live_readiness": live_verdict,
         "runtime_config": runtime_config,
         "bot_running": BotState.is_running(),
+        "paper_runtime_state": paper_runtime_state(),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -358,8 +371,17 @@ async def bot_status() -> Dict[str, Any]:
         pass
 
     paper_rt = _paper_runtime_from_app()
+    runtime_state = paper_runtime_state() if (settings.mode or "").lower() == "paper" else None
     return {
         **state,
+        # Flag says what was REQUESTED; runtime_state says what is actually
+        # HAPPENING (worker alive, scans executing). Never show RUNNING from
+        # the flag alone.
+        "runtime_state": (runtime_state or {}).get("state"),
+        "runtime_label": (runtime_state or {}).get("label"),
+        "runtime_summary": (runtime_state or {}).get("summary"),
+        "runtime": runtime_state,
+        "effective_running": bool(runtime_state and str(runtime_state.get("state", "")).startswith("RUNNING")),
         "mode": settings.mode,
         "risk": risk_status,
         "health": health_snapshot,
@@ -380,7 +402,13 @@ async def start_bot() -> Dict[str, Any]:
     """
     mode = (_settings_now().mode or "").lower()
     if BotState.is_running():
-        return {"success": False, "message": "Bot is already running"}
+        # The flag can be stuck "running" after a crash/restart while NO worker
+        # exists (the exact "RUNNING but nothing scans" state). Only refuse when
+        # the runtime is genuinely up; otherwise fall through and repair.
+        _rs = paper_runtime_state() if mode == "paper" else None
+        if not (_rs and _rs.get("state") == "STARTED_WORKER_NOT_RESPONDING"):
+            return {"success": False, "message": "Bot is already running",
+                    "runtime_state": (_rs or {}).get("state")}
     if BotState.status()["kill_switch_active"]:
         return {"success": False, "message": "Kill switch is active. Reset it first via /bot/reset-kill"}
 
@@ -401,12 +429,50 @@ async def start_bot() -> Dict[str, Any]:
         # Do NOT call TradingEngine.start()/run_forever in paper mode.
         BotState.start()
         logger.info("Paper START — PaperTradingRuntime only (TradingEngine loop not started)")
-        return {
+        resp: Dict[str, Any] = {
             "success": True,
             "message": "Paper bot started (PaperTradingRuntime)",
             "mode": "paper",
             "executor": "PaperTradingRuntime",
         }
+        # ROOT-CAUSE FIX: this endpoint used to ONLY set the BotState flag.
+        # The V8-D market scan runs in the separate paper worker process
+        # (backend/paper/paper_worker.py) — the API never spawned it, so the
+        # dashboard showed RUNNING while no scan iteration ever executed.
+        # Start now guarantees a live worker, or reports failure honestly.
+        from backend.paper import worker_manager as _wm
+        if _wm.autospawn_enabled():
+            try:
+                wait = float(os.environ.get("PAPER_WORKER_START_WAIT", "10"))
+            except ValueError:
+                wait = 10.0
+            spawn = await asyncio.to_thread(_wm.ensure_worker_running, wait)
+            if not spawn.get("success"):
+                BotState.stop("Paper worker failed to start")
+                return {
+                    "success": False,
+                    "message": "Paper worker failed to start — bot is NOT running. "
+                               f"{spawn.get('message') or ''}".strip(),
+                    "mode": "paper",
+                    "executor": "PaperTradingRuntime",
+                    "worker_pid": spawn.get("worker_pid"),
+                    "log_path": spawn.get("log_path"),
+                    "last_error": spawn.get("last_error"),
+                }
+            resp["message"] = spawn.get("message") or resp["message"]
+            resp["worker_pid"] = spawn.get("worker_pid") or spawn.get("spawned_pid")
+            resp["already_running"] = bool(spawn.get("already_running"))
+            resp["log_path"] = spawn.get("log_path")
+        else:
+            resp["worker_autospawn"] = False
+            resp["note"] = ("Worker autospawn is disabled (PAPER_WORKER_AUTOSPAWN=0): an external "
+                            "paper worker process must be running for scans to execute. "
+                            "Check /api/bot/status → runtime_state.")
+        rs = paper_runtime_state()
+        if rs:
+            resp["runtime_state"] = rs.get("state")
+            resp["runtime_summary"] = rs.get("summary")
+        return resp
 
     if mode == "live":
         return {

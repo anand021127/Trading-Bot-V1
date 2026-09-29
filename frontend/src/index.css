@@ -12,7 +12,10 @@ html, body, #root {
   padding: 0;
 }
 
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
 body {
+  overflow-x: hidden;
   background-color: #0a0e1a;
   color: #e2e8f0;
   font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
@@ -39,3 +42,11 @@ input[type="date"], input[type="time"] {
 
 /* Table */
 table { border-collapse: collapse; width: 100%; }
+
+/* Long tokens (instrument keys, reasons, error text) must wrap, never widen the page */
+.wrap-anywhere { overflow-wrap: anywhere; word-break: break-word; }
+
+/* Touch: comfortable 44px targets on coarse pointers only (desktop look unchanged) */
+@media (pointer: coarse) {
+  .touch-target { min-height: 44px; }
+}

@@ -194,6 +194,31 @@ async def get_overview(request: Request) -> Dict[str, Any]:
     except Exception:
         pass
 
+    # REAL paper-scanner state. The `scanner` block above reflects the API
+    # process's own LiveScanner/WebSocket components; in paper mode the V8-D
+    # scan runs in the separate paper worker, so THAT is what "Scanner" and
+    # "Market data" must report (worker alive + heartbeat + persisted scan).
+    paper_runtime: Optional[Dict[str, Any]] = None
+    paper_data_feed: Optional[Dict[str, Any]] = None
+    if (settings.mode or "").lower() == "paper":
+        try:
+            from backend.paper.scan_state import compute_runtime_state
+            paper_runtime = compute_runtime_state(db_manager)
+            _ls = (paper_runtime or {}).get("last_scan") or {}
+            paper_data_feed = {
+                "source": "Upstox REST candles/option chain (paper worker)",
+                "status": _ls.get("data_status") if _ls else "NO_SCAN_RECORDED",
+                "candle_count": _ls.get("candle_count"),
+                "last_candle_ts": _ls.get("last_candle_ts"),
+                "candle_age_seconds": _ls.get("candle_age_seconds"),
+                "expiry": _ls.get("expiry"),
+                "option_chain_count": _ls.get("option_chain_count"),
+                "error": _ls.get("error"),
+                "scan_age_seconds": (paper_runtime or {}).get("scan_age_seconds"),
+            }
+        except Exception:
+            paper_runtime = None
+
     # Health monitor — bot uptime, process health, component statuses
     health_data: Dict[str, Any] = {}
     try:
@@ -231,7 +256,10 @@ async def get_overview(request: Request) -> Dict[str, Any]:
             "currently_analyzing": currently_analyzing,
             "last_signal": last_signal,
             "health": scanner_health,
+            "paper_worker": paper_runtime,
         },
+        "runtime": paper_runtime,
+        "paper_data_feed": paper_data_feed,
         "system": {
             "last_candle_seconds_ago": broker_ws.get("last_tick_age_seconds"),
             "websocket_connected": broker_ws.get("is_connected", False),
