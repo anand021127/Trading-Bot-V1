@@ -37,11 +37,14 @@ export const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+/** Minimal axios-error-like shape used for narrowing (no `any`). */
+interface HttpErrorLike { response?: { status?: number; data?: unknown } }
+
 export function isAuthError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false
-  const anyErr = err as any
-  const status = anyErr.response?.status
-  const detail = JSON.stringify(anyErr.response?.data || '')
+  const httpErr = err as HttpErrorLike
+  const status = httpErr.response?.status
+  const detail = JSON.stringify(httpErr.response?.data || '')
   return (
     status === 401 ||
     detail.includes('UDAPI100050') ||
@@ -53,8 +56,7 @@ export function isAuthError(err: unknown): boolean {
 
 export function isNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false
-  const anyErr = err as any
-  return anyErr.response?.status === 404
+  return (err as HttpErrorLike).response?.status === 404
 }
 
 api.interceptors.response.use(

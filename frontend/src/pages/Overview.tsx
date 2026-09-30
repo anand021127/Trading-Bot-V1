@@ -68,7 +68,6 @@ export default function Overview() {
   const navigate = useNavigate()
 
   const {
-    status: connectionStatus,
     isMarketOpen,
     isAuthExpired,
     isWsConnected,
@@ -89,7 +88,7 @@ export default function Overview() {
       setError(null)
       consecutiveErrors.current = 0
       reportApiSuccess()
-    } catch (e: any) {
+    } catch (e: unknown) {
       reportApiFailure(e)
       consecutiveErrors.current += 1
       if (isAuthError(e)) {

@@ -5,7 +5,7 @@ import { usePolling } from '../hooks/usePolling'
 import StatusBadge from '../components/StatusBadge'
 import {
   formatCurrency, formatDate, formatTime, formatDuration,
-  formatR, formatStrike, formatContractLabel, formatQty,
+  formatR, formatContractLabel, formatQty,
   pnlColor, pnlBg,
 } from '../utils/formatters'
 import type { Trade } from '../types'

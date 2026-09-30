@@ -54,10 +54,12 @@ jobs:
       - name: Typecheck (tsc --noEmit)
         working-directory: frontend
         run: npx tsc --noEmit
+      - name: Component tests (vitest — Copilot async contract, layout, a11y)
+        working-directory: frontend
+        run: npm test
       - name: Lint (eslint)
         working-directory: frontend
         run: npm run lint -- --max-warnings=0
-        continue-on-error: true   # advisory until existing findings are cleaned; NOT skipped
       - name: Production build (vite)
         working-directory: frontend
         run: npm run build
@@ -77,33 +79,15 @@ jobs:
       - name: Merge-conflict markers
         run: |
           ! grep -rnE '^(<<<<<<< |>>>>>>> |=======$)' --include='*.py' --include='*.ts' --include='*.tsx' --include='*.json' --include='*.md' backend frontend tests api scripts 2>/dev/null
-      - name: Secret scan — no tracked .env/token/db/log artifacts
+      - name: Secret scan — tracked file names + credential-looking content
+        # Single tested implementation: scripts/repo_hygiene_check.py
+        # (backend/tests/test_repo_hygiene.py). Allows ONLY `.env.example`;
+        # rejects .env, .env.local/.production/.development/.staging, *.env,
+        # token/credential JSON, SQLite/DB artifacts, logs, PEM/private keys.
+        run: python3 scripts/repo_hygiene_check.py --tracked
+      - name: Packaging check — release archive excludes secrets
+        # Builds the archive exactly as a release would (tracked files only)
+        # and scans its members: .env.example must be allowed, real secrets not.
         run: |
-          leak=$(git ls-files | grep -iE '(^|/)\.env$|\.env\.|upstox_token.*\.json|\.sqlite3?$|\.log$|\.pem$|id_rsa' || true)
-          if [ -n "$leak" ]; then echo "TRACKED SECRET-LIKE FILES:"; echo "$leak"; exit 1; fi
-      - name: Secret scan — no credential-looking literals in source
-        run: |
-          leak=$(grep -rEIL "(UPSTOX_ACCESS_TOKEN|UPSTOX_CLIENT_SECRET|OPENAI_API_KEY|COPILOT_AI_API_KEY)[[:space:]]*=[[:space:]]*[\"'][A-Za-z0-9_-]{20,}[\"']" \
-            --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
-            --exclude="*.zip" --exclude="package-lock.json" . || true)
-          # .env.example documents placeholder names only; allowlist it.
-          leak=$(printf '%s' "$leak" | grep -v '^.env.example$' || true)
-          if [ -n "$leak" ]; then echo "POSSIBLE HARDCODED SECRETS:"; echo "$leak"; exit 1; fi
-      - name: JWT / bearer token shape scan
-        run: |
-          leak=$(grep -rIl "eyJhbGciOiJIUzI1NiJ9\.eyJ" \
-            --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist --exclude="*.zip" . || true)
-          if [ -n "$leak" ]; then echo "POSSIBLE JWT TOKENS COMMITTED:"; echo "$leak"; exit 1; fi
-      - name: Packaging check — deliverable excludes secrets
-        run: |
-          python3 - <<'PY'
-          import zipfile, io, os, sys
-          # Simulate the packaging rule: build a zip from tracked files the way
-          # the release script does, then assert no forbidden entries would ship.
-          forbidden = ('.env', 'upstox_token', '.db', '.log', '.pem')
-          bad = [f for f in os.listdir('.') if any(p in f.lower() for p in forbidden)]
-          if bad:
-              print("Forbidden files present in repo root:", bad)
-              sys.exit(1)
-          print("Packaging rule OK: no forbidden artifacts in tree root")
-          PY
+          git archive --format=zip HEAD -o "$RUNNER_TEMP/release.zip"
+          python3 scripts/repo_hygiene_check.py --zip "$RUNNER_TEMP/release.zip"

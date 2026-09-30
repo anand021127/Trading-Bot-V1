@@ -169,43 +169,134 @@ class TestChatSubmitFlow(unittest.TestCase):
         return patch("backend.api.routers.copilot.load_copilot_settings",
                      return_value=_settings())
 
-    def test_submit_returns_job_id_immediately(self):
-        with self._patch_settings(), patch(
-            "backend.api.routers.copilot._build_tools",
-            return_value=_stub_tools(None),
-        ), patch("backend.api.routers.copilot._resolve_context",
-                 return_value={"bot_health": {"available": True}}), patch(
-            "backend.copilot.llm_adapter.get_llm_adapter",
-        ) as adapter_mock:
-            instance = MagicMock()
-            instance.explain.return_value = "Grounded answer from the provider."
-            adapter_mock.return_value = instance
+    # Terminal + in-flight states of the async chat-job contract.
+    _IN_FLIGHT = ("queued", "thinking", "cancelling")
+    _TERMINAL = ("completed", "failed", "cancelled")
 
+    def _wait_terminal(self, job_id, timeout=10.0):
+        """Poll the status endpoint until a terminal state (never sleeps in
+        production code — the test polls)."""
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            last = self.client.get(f"/api/copilot/chat/status/{job_id}").json()
+            if last["status"] in self._TERMINAL:
+                return last
+            time.sleep(0.02)
+        self.fail(f"job {job_id} never reached a terminal state; last={last}")
+
+    def _ctx(self, adapter):
+        """All patches active for the WHOLE test body (POST *and* polling).
+        The worker thread resolves the adapter lazily, so polling outside
+        the patch block races with patch teardown."""
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(self._patch_settings())
+        stack.enter_context(patch("backend.api.routers.copilot._build_tools",
+                                  return_value=_stub_tools(None)))
+        stack.enter_context(patch("backend.api.routers.copilot._resolve_context",
+                                  return_value={"bot_health": {"available": True}}))
+        stack.enter_context(patch("backend.copilot.llm_adapter.get_llm_adapter",
+                                  return_value=adapter))
+        return stack
+
+    def _assert_submit_envelope(self, r, elapsed, final_answer):
+        """The POST contract, valid for ANY scheduling of the worker thread."""
+        self.assertEqual(r.status_code, 202, r.text)
+        body = r.json()
+        self.assertTrue(body["job_id"])
+        # A fast provider may already be 'completed' when the envelope is
+        # built; a slow one is queued/thinking. Both are legitimate.
+        self.assertIn(body["status"], self._IN_FLIGHT + ("completed",))
+        # The POST NEVER carries the answer, even when already completed.
+        self.assertNotIn("answer", body)
+        self.assertNotIn(final_answer, r.text)
+        self.assertLess(elapsed, 5.0, "submit must not wait for the provider")
+        return body
+
+    def test_submit_returns_job_id_immediately(self):
+        """Instant provider (CASE B): POST may already say 'completed', but
+        the answer is only available from the status endpoint."""
+        instance = MagicMock()
+        instance.explain.return_value = "Grounded answer from the provider."
+        with self._ctx(instance):
             t0 = time.monotonic()
             r = self.client.post("/api/copilot/chat/submit",
                                  json={"question": "How is the bot?", "session_id": "sess-test"})
             elapsed = time.monotonic() - t0
-        self.assertEqual(r.status_code, 202, r.text)
-        body = r.json()
-        self.assertTrue(body["job_id"])
-        # Job may already be 'thinking' by the time we assert — the
-        # contract is only that submit returned immediately with a job id
-        # (never the final answer inside the POST response).
-        self.assertIn(body["status"], ("queued", "thinking"))
-        self.assertNotIn("answer", body)
-        self.assertLess(elapsed, 5.0, "submit must not wait for the provider")
-
-        job_id = body["job_id"]
-        deadline = time.monotonic() + 10
-        final = None
-        while time.monotonic() < deadline:
-            s = self.client.get(f"/api/copilot/chat/status/{job_id}").json()
-            if s["status"] == "completed":
-                final = s
-                break
-            time.sleep(0.05)
-        self.assertIsNotNone(final, "job never completed")
+            body = self._assert_submit_envelope(r, elapsed, "Grounded answer from the provider.")
+            final = self._wait_terminal(body["job_id"])
+        self.assertEqual(final["status"], "completed")
         self.assertEqual(final["answer"], "Grounded answer from the provider.")
+
+    def test_slow_provider_submit_does_not_wait_and_then_completes(self):
+        """CASE A: provider blocks — POST must still return 202 at once with
+        an in-flight status (deterministic: the provider cannot finish until
+        released), and the job completes after release."""
+        release = threading.Event()
+
+        class _Slow:
+            def explain(self, *a, **k):
+                release.wait(timeout=10)
+                return "Slow but grounded answer."
+
+        with self._ctx(_Slow()):
+            t0 = time.monotonic()
+            r = self.client.post("/api/copilot/chat/submit",
+                                 json={"question": "slow?", "session_id": "sess-slow"})
+            elapsed = time.monotonic() - t0
+            body = self._assert_submit_envelope(r, elapsed, "Slow but grounded answer.")
+            self.assertIn(body["status"], ("queued", "thinking"))     # cannot be done yet
+            mid = self.client.get(f"/api/copilot/chat/status/{body['job_id']}").json()
+            self.assertIn(mid["status"], ("queued", "thinking"))
+            self.assertNotIn("answer", mid)
+            release.set()
+            final = self._wait_terminal(body["job_id"])
+        self.assertEqual(final["status"], "completed")
+        self.assertEqual(final["answer"], "Slow but grounded answer.")
+
+    def test_provider_failure_returns_typed_error_via_status(self):
+        """CASE C: failure is typed and only visible via status."""
+        instance = MagicMock()
+        instance.explain.side_effect = AIProviderUnavailableError("connection refused")
+        with self._ctx(instance):
+            r = self.client.post("/api/copilot/chat/submit",
+                                 json={"question": "x", "session_id": "sess-fail"})
+            self.assertEqual(r.status_code, 202)
+            self.assertNotIn("answer", r.json())
+            final = self._wait_terminal(r.json()["job_id"])
+        self.assertEqual(final["status"], "failed")
+        self.assertEqual(final["error_code"], "PROVIDER_UNAVAILABLE")
+        self.assertNotIn("answer", final)
+
+    def test_cancellation_is_reflected_in_status(self):
+        """CASE D: cancel while the provider is blocked -> 'cancelling' then
+        terminal 'cancelled'; the late answer is discarded."""
+        release = threading.Event()
+        entered = threading.Event()
+
+        class _Blocking:
+            def explain(self, *a, **k):
+                entered.set()
+                release.wait(timeout=10)
+                return "late answer that must be discarded"
+
+        with self._ctx(_Blocking()):
+            r = self.client.post("/api/copilot/chat/submit",
+                                 json={"question": "cancel me", "session_id": "sess-cancel-d"})
+            job_id = r.json()["job_id"]
+            self.assertTrue(entered.wait(timeout=5), "worker never entered the provider")
+            c = self.client.post(f"/api/copilot/chat/status/{job_id}/cancel")
+            self.assertEqual(c.status_code, 200)
+            self.assertIn(c.json()["status"], ("cancelling", "cancelled"))
+            release.set()
+            final = self._wait_terminal(job_id)
+        self.assertEqual(final["status"], "cancelled")
+        self.assertEqual(final["error_code"], "REQUEST_CANCELLED")
+        self.assertNotIn("answer", final)
+
+    def test_status_of_unknown_job_is_404(self):
+        self.assertEqual(self.client.get("/api/copilot/chat/status/nope").status_code, 404)
 
     def test_submit_without_provider_is_honest_not_canned(self):
         with patch("backend.api.routers.copilot.load_copilot_settings",
@@ -248,8 +339,11 @@ class TestChatSubmitFlow(unittest.TestCase):
     def test_cancel_running_job(self):
         release = threading.Event()
 
+        entered = threading.Event()
+
         class _BlockingAdapter:
             def explain(self, *a, **k):
+                entered.set()
                 release.wait(timeout=10)
                 return "late"
 
@@ -264,7 +358,7 @@ class TestChatSubmitFlow(unittest.TestCase):
             r = self.client.post("/api/copilot/chat/submit",
                                  json={"question": "long question", "session_id": "sess-cancel"})
             job_id = r.json()["job_id"]
-            time.sleep(0.2)  # let the worker enter explain()
+            self.assertTrue(entered.wait(timeout=5), "worker never entered explain()")
             c = self.client.post(f"/api/copilot/chat/status/{job_id}/cancel")
             release.set()
 

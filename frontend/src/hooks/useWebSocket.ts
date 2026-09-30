@@ -12,8 +12,6 @@ function buildWsUrl(): string {
   return `${proto}://${window.location.host}/api/ws`
 }
 
-const WS_URL = buildWsUrl()
-
 export interface WsPricePayload {
   ltp: number
   change_pct: number

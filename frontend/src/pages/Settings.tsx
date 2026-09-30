@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { Save, RefreshCw, ExternalLink, CheckCircle, XCircle, AlertTriangle, Wifi, WifiOff, Copy, Check, ShieldCheck } from 'lucide-react'
 import {
   fetchSettings,
@@ -240,7 +240,8 @@ export default function Settings() {
       } else {
         toast.error(`Verification failed: ${res.data?.error || 'Unknown error'}`)
       }
-    } catch (e: any) {
+    } catch (caught: unknown) {
+      const e = caught as { response?: { data?: { error?: string } }; message?: string }
       const msg = e.response?.data?.error || e.message || 'Failed to save token'
       toast.error(`Verification failed: ${msg}`)
     } finally {

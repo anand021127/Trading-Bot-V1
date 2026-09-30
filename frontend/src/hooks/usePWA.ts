@@ -23,14 +23,14 @@ export function usePWA() {
     // Check if running as standalone PWA
     const isStandalone =
       window.matchMedia('(display-mode: standalone)').matches ||
-      (window.navigator as any).standalone === true ||
+      (window.navigator as Navigator & { standalone?: boolean }).standalone === true ||
       document.referrer.includes('android-app://');
 
     setIsInstalled(isStandalone);
 
     // Detect iOS
     const ua = window.navigator.userAgent.toLowerCase();
-    const isIosDevice = /iphone|ipad|ipod/.test(ua) && !(window as any).MSStream;
+    const isIosDevice = /iphone|ipad|ipod/.test(ua) && !(window as Window & { MSStream?: unknown }).MSStream;
     setIsIOS(isIosDevice && !isStandalone);
 
     // Listen for beforeinstallprompt (Android / Chrome / Edge)

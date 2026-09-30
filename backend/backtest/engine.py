@@ -1271,6 +1271,39 @@ class BacktestEngine:
                             ))
                         continue
 
+                    # ── SAME-BAR DAILY-COUNT PARITY (V8-D max_daily_trades) ──
+                    # Phase 2 evaluated every candidate against a SNAPSHOT of
+                    # trades_opened_today taken before any position on this bar
+                    # opened. Paper/live fill signals sequentially — each fill
+                    # increments trades_today before the next evaluation — so
+                    # the strategy's own cap (e.g. 3/day) binds mid-bar there.
+                    # Without this, N symbols signalling on one bar all saw
+                    # "trades_today < cap" and the backtest opened N trades
+                    # (proven: 6 trades on one bar with a cap of 3). When the
+                    # counter moved since this candidate was evaluated, ask the
+                    # STRATEGY AGAIN with the up-to-date count. The cap lives
+                    # only in the strategy (no constant duplicated here), so
+                    # the rejection text/behaviour is identical to paper/live.
+                    if bar_context.get("trades_today") != trades_opened_today:
+                        bar_context["trades_today"] = trades_opened_today
+                        _win = symbol_bars_seen[sym][max(0, len(symbol_bars_seen[sym]) - self.max_window_bars):]
+                        _re_signals = self.strategy_engine.evaluate(
+                            sym, _win, context=bar_context, strategy_names=strategy_names,
+                        )
+                        _re_best = MultiStrategyEngine.best_signal(_re_signals)
+                        if _re_best is None:
+                            for _sig in _re_signals:
+                                for _reason in (_sig.rejected_reasons or []):
+                                    rejected_total += 1
+                                    reason_counts[_reason] = reason_counts.get(_reason, 0) + 1
+                                    if len(rejected_sample) < self.rejected_sample_size:
+                                        rejected_sample.append(RejectedSignal(
+                                            symbol=sym, timestamp=ts,
+                                            strategy=_sig.strategy_name, reasons=[_reason],
+                                        ))
+                            continue
+                        best = _re_best
+
                     # ── PHASE 10: optional AI decision-filter layer ──
                     # disabled -> zero behavior change. shadow -> AI runs and
                     # is logged but never blocks. filter -> AI can reject,

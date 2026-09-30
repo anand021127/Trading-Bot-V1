@@ -53,6 +53,12 @@ function buildWsUrl(): string {
   return `${proto}://${window.location.host}/api/ws`
 }
 
+/** Minimal axios-error-like shape used for narrowing (no `any`). */
+interface ApiErrorLike {
+  code?: string
+  response?: { status?: number; data?: { status?: string } }
+}
+
 export function ConnectionProvider({ children }: { children: React.ReactNode }) {
   const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true))
   const [isMarketOpen, setIsMarketOpen] = useState(checkIsMarketOpen)
@@ -67,25 +73,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const retryRef = useRef<ReturnType<typeof setTimeout>>()
   const pingIntervalRef = useRef<ReturnType<typeof setInterval>>()
   const consecutiveFailuresRef = useRef(0)
-
-  // Listen for browser online / offline
-  useEffect(() => {
-    const onOnline = () => {
-      setIsOnline(true)
-      connectWs()
-    }
-    const onOffline = () => {
-      setIsOnline(false)
-      setIsWsConnected(false)
-    }
-
-    window.addEventListener('online', onOnline)
-    window.addEventListener('offline', onOffline)
-    return () => {
-      window.removeEventListener('online', onOnline)
-      window.removeEventListener('offline', onOffline)
-    }
-  }, [])
 
   // Market hours ticker
   useEffect(() => {
@@ -171,6 +158,25 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     }
   }, [connectWs])
 
+  // Listen for browser online / offline
+  useEffect(() => {
+    const onOnline = () => {
+      setIsOnline(true)
+      connectWs()
+    }
+    const onOffline = () => {
+      setIsOnline(false)
+      setIsWsConnected(false)
+    }
+
+    window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
+    return () => {
+      window.removeEventListener('online', onOnline)
+      window.removeEventListener('offline', onOffline)
+    }
+  }, [connectWs])
+
   // Periodic health check ping
   useEffect(() => {
     const healthInterval = setInterval(async () => {
@@ -181,7 +187,8 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
           consecutiveFailuresRef.current = 0
           setLastHeartbeat(new Date())
         }
-      } catch (err: any) {
+      } catch (caught: unknown) {
+        const err = caught as ApiErrorLike
         if (err?.response?.status === 401) {
           setIsAuthExpired(true)
         } else if (err?.code === 'ECONNABORTED' || !err?.response) {
@@ -202,7 +209,8 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     setLastHeartbeat(new Date())
   }, [])
 
-  const reportApiFailure = useCallback((err: any) => {
+  const reportApiFailure = useCallback((caught: unknown) => {
+    const err = caught as ApiErrorLike
     if (err?.response?.status === 401 || err?.response?.data?.status === 'AUTH_EXPIRED') {
       setIsAuthExpired(true)
       return
@@ -258,6 +266,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   )
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- context hook intentionally co-located with its provider
 export function useConnection() {
   const context = useContext(ConnectionContext)
   if (!context) {

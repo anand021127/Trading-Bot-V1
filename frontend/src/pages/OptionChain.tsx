@@ -1,7 +1,7 @@
 import { useCallback, useState, useMemo } from 'react'
 import {
   RefreshCw, TrendingUp, TrendingDown, Moon, AlertTriangle,
-  KeyRound, ShieldCheck, Activity, BarChart2, Layers
+  KeyRound, BarChart2, Layers
 } from 'lucide-react'
 import { usePolling } from '../hooks/usePolling'
 import { useConnection } from '../context/ConnectionContext'
@@ -99,7 +99,7 @@ export default function OptionChain() {
   const [error, setError] = useState<string | null>(null)
   const [flashMap, setFlashMap] = useState<Record<string, 'up' | 'down'>>({})
 
-  const { status, isMarketOpen, isAuthExpired, prices: wsPrices, reportApiSuccess, reportApiFailure } = useConnection()
+  const { isMarketOpen, isAuthExpired, prices: wsPrices, reportApiSuccess, reportApiFailure } = useConnection()
   const navigate = useNavigate()
 
   // Load index quotes for all underlyings
@@ -136,8 +136,9 @@ export default function OptionChain() {
       setChainData(response.data)
       setError(null)
       reportApiSuccess()
-    } catch (err: any) {
-      reportApiFailure(err)
+    } catch (caught: unknown) {
+      const err = caught as { response?: { status?: number; data?: { status?: string } } }
+      reportApiFailure(caught)
       if (err?.response?.status === 401 || err?.response?.data?.status === 'AUTH_EXPIRED') {
         setError('Upstox Access Token is expired or invalid.')
       } else {
@@ -165,7 +166,7 @@ export default function OptionChain() {
   }, [wsPrices, indexQuotes, chainData, underlying])
 
   // Extract strikes & contracts
-  const contracts = chainData?.contracts ?? []
+  const contracts = useMemo(() => chainData?.contracts ?? [], [chainData])
   const callsByStrike = useMemo(() => {
     const map = new Map<number, OptionContract>()
     contracts.filter(c => c.option_type === 'CE').forEach(c => map.set(c.strike, c))

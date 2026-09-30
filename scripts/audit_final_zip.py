@@ -16,6 +16,10 @@ import sys
 import zipfile
 from pathlib import Path
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+import repo_hygiene_check as _hygiene  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 ZIP_PATH = ROOT / "Trading-Bot-V1-FINAL-PRODUCTION.zip"
 
@@ -76,7 +80,14 @@ def main() -> int:
 
         # 3. no secrets / logs / DBs / prior ZIPs / analysis outputs
         for name in names:
+            # Env/DB/log/key/token-JSON rules come from the shared classifier
+            # (allows ONLY `.env.example`; rejects .env, .env.local, ...).
+            why = _hygiene.classify(name, archive=True)
+            if why:
+                failures.append(f"FORBIDDEN member ({why}): {name}")
             for pat in FORBIDDEN_MEMBER_PATTERNS:
+                if pat == ".env":
+                    continue  # handled precisely above
                 if pat in Path(name).name and not name.endswith(".example"):
                     failures.append(f"FORBIDDEN member pattern '{pat}': {name}")
             for pre in FORBIDDEN_DIR_PREFIXES:

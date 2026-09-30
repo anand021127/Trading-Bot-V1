@@ -96,11 +96,15 @@ class TestHappyPathReachesExecution:
         assert t["exit_reason"] in ("INTRADAY_SQUARE_OFF",)
 
     def test_daily_limit_is_per_day_and_portfolio_wide(self):
-        """The strategy-visible counter is PORTFOLIO-WIDE and per-DAY: with two
-        symbols both signalling, the 3rd same-day trade is allowed and the 4th
-        sees trades_today=3 (V8-D itself then rejects: 'Daily trade limit
-        reached: 3/3'), and a day-2 signal sees 0 again. This is the direct
-        regression for the 277→14 collapse (which froze at 3/symbol LIFETIME)."""
+        """The strategy-visible counter is PORTFOLIO-WIDE and per-DAY, and the
+        strategy's cap binds MID-BAR exactly as it does in paper/live (which fill
+        sequentially): with two symbols both signalling, wave 1 opens 2, wave 2
+        opens ONE more (3/3) and the second candidate — re-asked with the running
+        count 3 — is refused by V8-D itself ('Daily trade limit reached: 3/3'),
+        wave 3 is refused outright, and day 2 sees 0 again. This is the direct
+        regression for the 277→14 collapse (which froze at 3/symbol LIFETIME) AND
+        for the same-bar snapshot defect (the old expectation of 4 trades on a
+        cap-3 day was that defect, not the spec)."""
         A = "NIFTY50"
         B = "BANKNIFTY"
         A_KEY = "NSE_FO|45482|10-03-2026"
@@ -119,12 +123,14 @@ class TestHappyPathReachesExecution:
             "2026-03-10T09:30:00+05:30", "2026-03-10T10:00:00+05:30",
             "2026-03-10T15:15:00+05:30",
         ]
-        seen = {}
+        seen = {}      # last counter each (symbol, ts) was evaluated with
+        hist = {}      # EVERY counter value the strategy was asked with, per bar
 
         def fake_eval(symbol, window, context=None, strategy_names=None):
             ts = window[-1]["timestamp"]
             tt = (context or {}).get("trades_today")
             seen[(symbol, ts)] = tt
+            hist.setdefault(ts, []).append(tt)
             if ts in ("2026-03-09T10:00:00+05:30", "2026-03-09T10:10:00+05:30",
                       "2026-03-09T11:00:00+05:30", "2026-03-10T10:00:00+05:30"):
                 if (tt or 0) >= 3:
@@ -173,17 +179,24 @@ class TestHappyPathReachesExecution:
             options_data_loader=loader,
             require_real_options=True,
         )
-        # strategy saw the portfolio-wide counter increment within the day…
-        # (both candidates at a bar evaluate BEFORE that bar's Phase-3 opens)
-        assert seen[(B, "2026-03-09T10:00:00+05:30")] == 0
-        assert seen[(A, "2026-03-09T10:00:00+05:30")] == 0
-        assert seen[(B, "2026-03-09T10:10:00+05:30")] == 2  # 2 opened at wave 1
-        assert seen[(A, "2026-03-09T10:10:00+05:30")] == 2
-        assert seen[(B, "2026-03-09T11:00:00+05:30")] == 4  # ≥3 → strategy refused
+        # Strategy saw the portfolio-wide counter increment within the day. Per
+        # bar we record every value it was asked with: the initial pass sees the
+        # counter as it stood when the bar began; a candidate evaluated AFTER an
+        # earlier candidate opened on the same bar is re-asked with the running
+        # count (same as sequential paper/live fills).
+        d1 = "2026-03-09"
+        assert sorted(hist[d1 + "T10:00:00+05:30"]) == [0, 0, 1]          # wave 1: 2 opened
+        assert sorted(hist[d1 + "T10:10:00+05:30"]) == [2, 2, 3]          # wave 2: 3rd opens, 2nd re-asked at 3
+        assert sorted(hist[d1 + "T11:00:00+05:30"]) == [3, 3]             # wave 3: ≥3 → strategy refuses both
         # …and reset at the new session date (closed day-1 count does NOT leak)
-        assert seen[(B, "2026-03-10T10:00:00+05:30")] == 0
-        assert seen[(A, "2026-03-10T10:00:00+05:30")] == 0
-        assert res.trades_taken == 6  # 2+2 on day 1 (wave 3 blocked), 1+1 on day 2
+        assert sorted(hist["2026-03-10T10:00:00+05:30"]) == [0, 0, 1]
+        # Day 1: 2 + 1 (cap 3 reached; NEVER 4), day 2: 1+1 → 5 in total.
+        assert res.trades_taken == 5
+        per_day = {}
+        for t in res.trade_log:
+            per_day[str(t["entry_time"])[:10]] = per_day.get(str(t["entry_time"])[:10], 0) + 1
+        assert per_day == {"2026-03-09": 3, "2026-03-10": 2}
+        assert max(per_day.values()) <= 3
         assert any("Daily trade limit reached: 3/3" in r
                    for r in res.rejection_reason_counts)
 

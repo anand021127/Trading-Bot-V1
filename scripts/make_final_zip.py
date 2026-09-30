@@ -18,6 +18,10 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+import repo_hygiene_check as _hygiene  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "Trading-Bot-V1-FINAL-PRODUCTION.zip"
 
@@ -54,6 +58,11 @@ SELF_SCAN_SKIP = {
 
 def excluded(path: Path) -> bool:
     rel = path.relative_to(ROOT)
+    # Shared, tested rule (scripts/repo_hygiene_check.py): only `.env.example`
+    # is a permitted env file; `.env`, `.env.local`, `.env.production`, ... and
+    # DB/log/key/token-JSON artifacts never ship.
+    if _hygiene.classify(rel.as_posix()):
+        return True
     for p in rel.parts:
         if p in EXCLUDE_DIRS:
             return True

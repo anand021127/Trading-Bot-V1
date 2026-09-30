@@ -611,7 +611,11 @@ def _ai_trading_decision(db: Any) -> Dict[str, Any]:
         body["latest"] = {
             "available": latest.get("available"),
             "decision": latest.get("decision"),
+            "symbol": latest.get("symbol"),
+            # AI's confidence in its own analysis — NOT a probability of profit.
+            "confidence": latest.get("confidence"),
             "reason_codes": latest.get("reason_codes"),
+            "latency_ms": latest.get("latency_ms"),
             "created_at": latest.get("created_at"),
             "age_seconds": latest.get("age_seconds"),
         } if latest.get("available") else {
