@@ -231,7 +231,13 @@ def _scanner(app_state: Any, db: Any) -> Dict[str, Any]:
                 "candle_age_seconds": last.get("candle_age_seconds"),
                 "expiry": last.get("expiry"),
                 "option_chain_count": last.get("option_chain_count"),
-                "error": last.get("error") or rs.get("last_error"),
+                # worker-level error only while the runtime is actually unhealthy;
+                # a healthy RUNNING_*/STOPPED state never shows a stale error.
+                "error": last.get("error") or (
+                    rs.get("last_error")
+                    if str(rs.get("state", "")) in ("STARTED_WORKER_NOT_RESPONDING",
+                                                     "RUNNING_SCANNER_ERROR", "RUNNING_DATA_ERROR")
+                    else None),
             }
             # Honest empty state: nothing has ever run (no worker, no record,
             # bot stopped) -> not "available"; the reason says why.
@@ -627,6 +633,19 @@ def _ai_trading_decision(db: Any) -> Dict[str, Any]:
     return _section("DATABASE", body)
 
 
+# ── DECISION PIPELINE (scanner → V8-D → AI → risk → execution) ───────────
+def _pipeline(db: Any) -> Dict[str, Any]:
+    """The same honest pipeline view the dashboard shows (derived from the
+    persisted scan record + worker heartbeat — never from a flag)."""
+    try:
+        from backend.paper.scan_state import compute_runtime_state
+        rs = compute_runtime_state(db)
+        return _section("SCANNER", dict(rs.get("pipeline") or {}))
+    except Exception as exc:
+        return _section("SCANNER", {"available": False,
+                                    "reason": f"pipeline state unavailable: {type(exc).__name__}"})
+
+
 # ── COPILOT (self-description, §12/§31) ──────────────────────────────────
 def _copilot_self() -> Dict[str, Any]:
     body: Dict[str, Any] = {
@@ -796,6 +815,8 @@ def build_full_context(app_state: Any = None, *, include_errors: bool = True) ->
         "reconciliation": _reconciliation(db) if db is not None else
                           _section("DATABASE", {"available": False, "reason": "database unavailable"}),
         "broker": _broker(),
+        "pipeline": _pipeline(db) if db is not None else
+                    _section("SCANNER", {"available": False, "reason": "database unavailable"}),
         "ai": _ai_trading_decision(db) if db is not None else
               _section("DATABASE", {"available": False, "reason": "database unavailable"}),
         "copilot": _copilot_self(),

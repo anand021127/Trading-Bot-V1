@@ -108,8 +108,14 @@ class PaperWorker:
         signal.signal(signal.SIGINT, self._handle_signal)
         try:
             self.lock.acquire()
-        except WorkerLockError as exc:
-            self._write_hb("lock_failed", str(exc))
+        except WorkerLockError:
+            # A SECOND worker that loses the lock race must change NOTHING in
+            # the shared state: it used to write its own pid, status
+            # "lock_failed" and the error text into the very rows the healthy
+            # worker owns — then exit. Result: a stale "Paper worker already
+            # running (pid=…)" error pinned on a perfectly healthy worker, and
+            # a pid that briefly pointed at a dead process. The loser just
+            # exits (main() logs it and returns code 2).
             raise
 
         try:
@@ -120,6 +126,12 @@ class PaperWorker:
             raise
 
         self._init_market_scanner()
+        try:
+            # A previous run's error must not linger on a worker that just
+            # started cleanly (it is re-set by the next real failure).
+            self.db.save_setting(ERR_KEY, "")
+        except Exception:
+            pass
         self._write_hb("running")
         self._start_heartbeat_pump()
         logger.info(
@@ -299,6 +311,14 @@ class PaperWorker:
                 signal=scan.signal, details=scan.details, started=started,
                 error=(scan.details or {}).get("error"),
             )
+            if not (scan.details or {}).get("error"):
+                # An iteration completed without error → any earlier worker
+                # error is resolved; stop showing it as a current problem.
+                try:
+                    if self.db.get_setting(ERR_KEY, ""):
+                        self.db.save_setting(ERR_KEY, "")
+                except Exception:
+                    pass
             try:
                 self.db.save_setting("paper_trades_today",
                                      str(int(getattr(self.runtime, "trades_today", 0) or 0)))

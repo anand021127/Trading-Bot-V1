@@ -25,6 +25,8 @@ const CTX = {
   backtest: { available: true, config: { start_date: '2025-09-28', end_date: '2026-09-29' },
     summary: { trades: 171, net_pnl: -45397.89, win_rate_pct: 26.9, profit_factor: 0.6, max_drawdown_pct: 50.77 } },
   ai: { available: true, enabled: true, provider: 'ollama', model: 'llama3', latest: { available: true, decision: 'WAIT', confidence: 61, reason_codes: ['LOW_VOL'], latency_ms: 812 } },
+  pipeline: { scanner: 'RUNNING', market: 'LIVE', strategy: 'V8_D_PULLBACK_ATM', latest_signal: 'NO SIGNAL',
+    ai_decision: 'NOT EVALUATED', ai_reason: 'Not consulted: no V8-D BUY signal.', risk_check: 'NOT EVALUATED', execution: 'NO TRADE' },
   configuration_mismatches: [] as { message: string }[],
 }
 
@@ -292,6 +294,9 @@ describe('Live Context', () => {
     expect(within(aside).getByTestId('ctx-scanner')).toHaveTextContent('Running — no signal')
     expect(within(aside).getByTestId('ctx-ai')).toHaveTextContent('61%')
     expect(within(aside).queryByTestId('ctx-problems')).not.toBeInTheDocument()   // errors only when present
+    // the decision pipeline (scanner → signal → AI → risk → execution) is shown compactly at the top
+    expect(within(aside).getByTestId('decision-pipeline')).toHaveTextContent('NO SIGNAL')
+    expect(within(aside).getByTestId('pipe-ai-decision')).toHaveTextContent('NOT EVALUATED')
   })
 
   it('surfaces mismatches/errors prominently ONLY when present', async () => {

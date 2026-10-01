@@ -83,6 +83,14 @@ def _plan_which_symbol(tools: CopilotTools, q: str, candles_by_symbol: Dict[str,
     return {"_intent": INTENT_GENERAL, "_which_symbol": state.last_symbol if state else None}
 
 
+def _plan_ai_architecture(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[Dict]],
+                          state: Optional[ConversationState] = None) -> Dict[str, Any]:
+    """"Is there another AI making trading decisions?" — answered
+    DETERMINISTICALLY from live state (see backend/copilot/ai_architecture.py);
+    the model is never asked to infer the bot's AI architecture."""
+    return {"_intent": INTENT_GENERAL, "_ai_architecture": True}
+
+
 # Each entry: (keywords that must ALL appear, tool-call plan builder)
 def _plan_market_status(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[Dict]],
                          state: Optional[ConversationState] = None) -> Dict[str, Any]:
@@ -147,7 +155,12 @@ def _plan_health(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[
              "recent_errors": tools.get_recent_errors(limit=10)}
 
 
+from backend.copilot.ai_architecture import AI_ARCHITECTURE_KEYWORDS as _AI_ARCH_KW  # noqa: E402
+
 _INTENTS = [
+    # AI-architecture questions first: "what is the AI trading decision layer"
+    # must not be swallowed by the EDUCATION ("what is") bucket.
+    (list(_AI_ARCH_KW), _plan_ai_architecture),
     # "Which market/symbol are you analyzing" -- checked before GENERAL's
     # broader greeting bucket so it doesn't get swallowed by "what can
     # you do"-style matches.
@@ -185,7 +198,7 @@ def _classify_intent(question: str) -> str:
     q = question.lower()
     for keywords, plan_fn in _INTENTS:
         if any(kw in q for kw in keywords):
-            if plan_fn in (_plan_general, _plan_which_symbol):
+            if plan_fn in (_plan_general, _plan_which_symbol, _plan_ai_architecture):
                 return INTENT_GENERAL
             if plan_fn is _plan_education:
                 return INTENT_EDUCATION

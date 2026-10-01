@@ -242,6 +242,7 @@ def build_scan_record(
         "spot": det.get("spot"),
         "selected_contract": det.get("selected_contract"),
         "decision": det.get("decision"),
+        "ai": det.get("ai"),
         "rejection": rejection,
         "risk_decision": dec["risk_decision"],
         "execution_decision": dec["execution_decision"],
@@ -370,6 +371,174 @@ def summarize_record(rec: Dict[str, Any]) -> str:
             f"({reason or 'no reason recorded'}).")
 
 
+# ── decision pipeline view (what the operator sees) ─────────────────────────
+_SCANNER_LABEL = {
+    STOPPED: "STOPPED", STARTING: "STARTING", WORKER_NOT_RESPONDING: "NOT RESPONDING",
+    RUNNING_SCANNING: "RUNNING", RUNNING_WAITING_FOR_MARKET: "RUNNING",
+    RUNNING_NO_SIGNAL: "RUNNING", RUNNING_DATA_ERROR: "RUNNING — DATA ERROR",
+    RUNNING_SCANNER_ERROR: "RUNNING — SCANNER ERROR",
+}
+
+
+def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """ONE honest, UI-ready view of the decision pipeline for the latest scan:
+
+        Scanner · Market · Strategy · Latest Signal · AI Decision · AI Reason ·
+        Risk Check · Execution
+
+    Every value is derived from the persisted scan record — never from a flag —
+    and every 'did not happen' case says so explicitly (NOT EVALUATED, DISABLED,
+    MARKET CLOSED …) instead of implying an evaluation that never ran."""
+    scanner = _SCANNER_LABEL.get(state, state)
+    base: Dict[str, Any] = {
+        "scanner": scanner,
+        "market": "UNKNOWN",
+        "strategy": os.environ.get("TRADING_STRATEGY", "V8_D_PULLBACK_ATM"),
+        "latest_signal": "NO SCAN YET",
+        "signal_detail": None,
+        "ai_decision": "NOT EVALUATED",
+        "ai_reason": None,
+        "ai_confidence": None,
+        "ai_latency_ms": None,
+        "ai_enabled": bool((ai_fallback or {}).get("enabled")) if ai_fallback else None,
+        "risk_check": "NOT EVALUATED",
+        "risk_detail": None,
+        "execution": "NO TRADE",
+        "execution_detail": None,
+        "scan_seq": None,
+        "scan_time_ist": None,
+        "summary": "No scan has been recorded yet.",
+    }
+    if not rec:
+        if ai_fallback:
+            base["ai_decision"] = "DISABLED" if not ai_fallback.get("enabled") else "NOT EVALUATED"
+            base["ai_reason"] = ai_fallback.get("reason")
+        return base
+
+    reason = str(rec.get("reason") or "")
+    cat = rec.get("category") or classify_reason(reason, rec.get("signal"), rec.get("traded"))
+    ai = rec.get("ai") or {}
+    det = rec.get("details") or {}
+    sess = str(rec.get("session_status") or det.get("session_status") or "").upper()
+    traded = bool(rec.get("traded"))
+    is_buy = traded or rec.get("signal") == "BUY"
+    contract = rec.get("selected_contract") or det.get("selected_contract") or {}
+    otype = str((contract or {}).get("option_type") or "").upper()
+
+    base["scan_seq"] = rec.get("seq")
+    base["scan_time_ist"] = rec.get("recorded_at_ist")
+    base["strategy"] = rec.get("strategy") or base["strategy"]
+
+    # Market
+    if cat == "MARKET_CLOSED" or (sess and sess != "OPEN"):
+        base["market"] = "MARKET CLOSED"
+    elif reason.startswith("entry_window_closed"):
+        base["market"] = "LIVE — ENTRY WINDOW CLOSED"
+    else:
+        base["market"] = "LIVE"
+
+    # Latest signal
+    if is_buy:
+        base["latest_signal"] = f"BUY {otype}".strip()
+        base["signal_detail"] = "V8-D produced a BUY signal."
+    elif cat == "NO_SIGNAL":
+        base["latest_signal"] = "NO SIGNAL"
+        rej = [str(x) for x in (rec.get("rejection") or det.get("rejection") or [])]
+        base["signal_detail"] = "; ".join(rej[:3]) if rej else "V8-D evaluated: pullback/reversal criteria not met."
+    elif cat == "MARKET_CLOSED":
+        base["latest_signal"] = "NOT EVALUATED — MARKET CLOSED"
+        base["signal_detail"] = reason
+    elif cat == "DATA_ERROR":
+        base["latest_signal"] = "NOT EVALUATED — DATA PROBLEM"
+        base["signal_detail"] = rec.get("error") or reason
+    else:
+        base["latest_signal"] = "NOT EVALUATED — SCANNER ERROR"
+        base["signal_detail"] = rec.get("error") or reason
+
+    # AI decision
+    ai_status = str(ai.get("status") or "")
+    if ai_status == "APPROVED":
+        base["ai_decision"] = "APPROVED"
+    elif ai_status == "REJECTED":
+        base["ai_decision"] = "REJECTED"
+    elif ai_status == "WAIT":
+        base["ai_decision"] = "WAIT (NO TRADE)"
+    elif ai_status == "UNAVAILABLE":
+        base["ai_decision"] = "UNAVAILABLE — FAILED SAFE (NO TRADE)"
+    elif ai_status == "DISABLED":
+        base["ai_decision"] = "DISABLED"
+    else:
+        base["ai_decision"] = "NOT EVALUATED"
+    base["ai_enabled"] = ai.get("enabled") if "enabled" in ai else base["ai_enabled"]
+    base["ai_confidence"] = ai.get("confidence") if ai_status in ("APPROVED", "REJECTED", "WAIT", "UNAVAILABLE") else None
+    base["ai_latency_ms"] = ai.get("latency_ms") if ai_status in ("APPROVED", "REJECTED", "WAIT", "UNAVAILABLE") else None
+    if ai_status in ("APPROVED", "REJECTED", "WAIT", "UNAVAILABLE"):
+        codes = ", ".join(ai.get("reason_codes") or [])
+        base["ai_reason"] = " — ".join(x for x in (codes, ai.get("reason")) if x) or None
+    elif ai_status == "DISABLED":
+        base["ai_reason"] = ai.get("reason")
+    else:
+        if not is_buy:
+            why = ("market closed" if cat == "MARKET_CLOSED" else
+                   "no usable market data" if cat == "DATA_ERROR" else
+                   "scanner error" if cat == "SCANNER_ERROR" else "no V8-D BUY signal")
+            base["ai_reason"] = f"Not consulted: {why}."
+        else:
+            base["ai_reason"] = ai.get("reason") or "AI was not consulted for this signal."
+
+    # Risk check — only meaningful once the AI gate (if any) let the BUY through
+    rdec = str(rec.get("risk_decision") or "")
+    blocked_by_ai = ai_status in ("REJECTED", "WAIT", "UNAVAILABLE")
+    if not is_buy:
+        base["risk_check"] = "NOT EVALUATED"
+        base["risk_detail"] = "No signal reached the risk gate."
+    elif blocked_by_ai:
+        base["risk_check"] = "NOT EVALUATED"
+        base["risk_detail"] = "Stopped earlier by the AI gate."
+    elif rdec == "PASSED":
+        base["risk_check"] = "PASS"
+    elif rdec.startswith("REJECTED"):
+        base["risk_check"] = "REJECTED"
+        base["risk_detail"] = rdec.split(":", 1)[-1]
+    else:
+        base["risk_check"] = "NOT EVALUATED"
+        base["risk_detail"] = reason or None
+
+    # Execution
+    edec = str(rec.get("execution_decision") or "")
+    if traded:
+        base["execution"] = "FILLED (PAPER)"
+    elif edec.startswith("REJECTED"):
+        base["execution"] = "REJECTED"
+        base["execution_detail"] = edec.split(":", 1)[-1]
+    elif edec.startswith("ERROR"):
+        base["execution"] = "ERROR"
+        base["execution_detail"] = edec.split(":", 1)[-1]
+    else:
+        base["execution"] = "NO TRADE"
+        base["execution_detail"] = None
+
+    # One-sentence explanation
+    when = _ist_clock(_parse_iso(rec.get("recorded_at")))
+    if cat in ("MARKET_CLOSED", "DATA_ERROR", "SCANNER_ERROR") and not is_buy:
+        base["summary"] = summarize_record(rec)
+    elif not is_buy:
+        base["summary"] = summarize_record(rec) + (
+            f" AI: {base['ai_decision'].lower()}." if ai_status == "DISABLED" else "")
+    elif traded:
+        base["summary"] = (f"Scanner ran at {when} IST. V8-D produced {base['latest_signal']}; "
+                           f"AI {base['ai_decision']}; risk PASS; paper order FILLED.")
+    elif blocked_by_ai:
+        base["summary"] = (f"Scanner ran at {when} IST. V8-D produced {base['latest_signal']} but the AI "
+                           f"gate stopped it: {base['ai_decision']}"
+                           f"{' (' + base['ai_reason'] + ')' if base['ai_reason'] else ''}. No trade.")
+    else:
+        base["summary"] = (f"Scanner ran at {when} IST. V8-D produced {base['latest_signal']}; AI "
+                           f"{base['ai_decision']}; risk {base['risk_check']}; execution {base['execution']}"
+                           f"{' (' + (base['execution_detail'] or base['risk_detail'] or reason) + ')' if (base['execution_detail'] or base['risk_detail'] or reason) else ''}.")
+    return base
+
+
 # ── runtime state ───────────────────────────────────────────────────────────
 def _default_pid_alive(pid: int) -> bool:
     from backend.paper.worker_lock import pid_is_alive
@@ -432,6 +601,18 @@ def compute_runtime_state(
     scan_stale_after = max(45.0, 6.0 * interval)
     market_scan_setting = _get(MARKET_SCAN_KEY) or None
 
+    # AI layer hint for states where no scan record exists yet (env + operator toggle)
+    ai_hint: Dict[str, Any] = {}
+    try:
+        _ov = _get("ai_decision_enabled_override", "")
+        _env_on = os.environ.get("AI_DECISION_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+        _on = True if _ov == "1" else False if _ov == "0" else _env_on
+        ai_hint = {"enabled": _on, "reason": (
+            "AI Trading Decision engine is enabled — waiting for a V8-D BUY to evaluate." if _on else
+            "AI Trading Decision engine is disabled — V8-D + risk controls only.")}
+    except Exception:
+        ai_hint = {}
+
     base: Dict[str, Any] = {
         "bot_running": running_flag,
         "kill_switch_active": killed,
@@ -454,6 +635,7 @@ def compute_runtime_state(
 
     def out(state: str, summary: str) -> Dict[str, Any]:
         d = dict(base)
+        d["pipeline"] = build_pipeline(rec if rec_current else None, state, ai_fallback=ai_hint)
         d.update({"state": state, "label": _STATE_LABEL[state],
                   "severity": _STATE_SEVERITY[state], "summary": summary,
                   "scanning": state in (RUNNING_SCANNING, RUNNING_NO_SIGNAL,
@@ -517,7 +699,7 @@ def compute_runtime_state(
 
 
 __all__ = [
-    "ALL_STATES", "build_scan_record", "classify_reason", "compute_runtime_state",
+    "ALL_STATES", "build_pipeline", "build_scan_record", "classify_reason", "compute_runtime_state",
     "describe_exception", "persist_scan_record", "read_scan_history", "read_scan_record",
     "redact", "scan_interval_seconds", "summarize_record", "to_ist_str",
 ]

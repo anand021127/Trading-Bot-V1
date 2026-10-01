@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Protocol, Tuple
@@ -266,6 +267,10 @@ class PaperMarketScanner:
             "min_bars": self.min_bars,
             "scan_time_ist": now.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         }
+        # Every scan records the AI layer's state — even when no BUY exists or
+        # the layer is off — so the UI never has to guess ("AI NOT EVALUATED",
+        # "AI DISABLED") and never implies an evaluation that did not happen.
+        diag["ai"] = self._ai_baseline(runtime)
         try:
             from backend.market.calendar import exchange_calendar
             _st, _note = exchange_calendar.session_status(now.astimezone(IST))
@@ -281,6 +286,60 @@ class PaperMarketScanner:
         merged.update(result.details or {})
         result.details = merged
         return result
+
+    # ── AI layer state helpers (observability only — no behaviour change) ────
+    def _ai_enabled(self, runtime: Any) -> bool:
+        """Is the AI Trading Decision layer ON right now? The operator toggle
+        (DB override) wins over the env default and is re-read every scan."""
+        if self.ai_engine is None:
+            return False
+        try:
+            override = str(runtime.db.get_setting("ai_decision_enabled_override", "") or "")
+        except Exception:
+            override = ""
+        if override == "1":
+            return True
+        if override == "0":
+            return False
+        return bool(getattr(self.ai_engine, "enabled", False))
+
+    def _ai_baseline(self, runtime: Any) -> Dict[str, Any]:
+        if self.ai_engine is None:
+            return {"enabled": False, "status": "DISABLED",
+                    "reason": "AI Trading Decision engine is not attached to the scanner "
+                              "(disabled or failed to initialise) — V8-D + risk controls only."}
+        if not self._ai_enabled(runtime):
+            return {"enabled": False, "status": "DISABLED",
+                    "reason": "AI Trading Decision engine is disabled (AI_DECISION_ENABLED or the "
+                              "operator toggle) — V8-D + risk controls only; no AI decision was consulted."}
+        return {"enabled": True, "status": "NOT_EVALUATED",
+                "reason": "No V8-D BUY signal reached the AI gate this scan."}
+
+    @staticmethod
+    def _ai_result_state(ai_decision: Any, latency_ms: float) -> Dict[str, Any]:
+        """Map a structured AITradingDecision to the UI-facing AI state."""
+        from backend.ai_decision.contract import APPROVE, FAILURE_REASONS, WAIT
+        codes = [str(c) for c in (getattr(ai_decision, "reason_codes", None) or [])]
+        decision = str(getattr(ai_decision, "decision", "") or "")
+        failed = bool(set(codes) & set(FAILURE_REASONS))
+        if decision == APPROVE and not failed:
+            status = "APPROVED"
+        elif failed:
+            status = "UNAVAILABLE"      # provider/timeout/invalid/persistence: failed SAFE → no trade
+        elif decision == WAIT:
+            status = "WAIT"
+        else:
+            status = "REJECTED"
+        reasoning = str(getattr(ai_decision, "reasoning", "") or "")[:240]
+        return {
+            "enabled": True, "status": status, "decision": decision,
+            "confidence": getattr(ai_decision, "confidence", None),
+            "reason_codes": codes,
+            "reason": reasoning or (", ".join(codes) if codes else ""),
+            "model": f"{getattr(ai_decision, 'model_provider', '')}/{getattr(ai_decision, 'model_name', '')}",
+            "decision_id": getattr(ai_decision, "decision_id", None),
+            "latency_ms": round(latency_ms, 1),
+        }
 
     def _scan_once_impl(
         self,
@@ -482,24 +541,30 @@ class PaperMarketScanner:
         # PHASE 5.3 §8: the operator toggle (control API → DB override)
         # wins over the env-configured default and is re-read EVERY scan,
         # so the UI switch takes effect within one tick without a restart.
-        ai_on = False
-        if self.ai_engine is not None:
-            try:
-                override = str(runtime.db.get_setting("ai_decision_enabled_override", "") or "")
-            except Exception:
-                override = ""
-            if override == "1":
-                ai_on = True
-            elif override == "0":
-                ai_on = False
-            else:
-                ai_on = bool(getattr(self.ai_engine, "enabled", False))
+        ai_on = self._ai_enabled(runtime)
         if self.ai_engine is not None and ai_on:
             contract = (getattr(sig, "indicators", None) or {}).get("selected_contract") or {}
             try:
                 kill_level = runtime.kill.level()
             except Exception:
                 kill_level = "UNKNOWN"
+
+            # Entries are blocked (kill switch incl. the persistent one the
+            # pipeline enforces): consulting the model would only burn an
+            # inference and persist an AI decision for a trade that can never
+            # happen. Stop here with the SAME reason the runtime would give.
+            _blocked = False
+            try:
+                _blocked = bool(runtime.kill.blocks_entries())
+            except Exception:
+                _blocked = bool(kill_switch_active) or kill_level not in ("OFF", "UNKNOWN")
+            if _blocked or bool(kill_switch_active):
+                diag["ai"].update(status="NOT_EVALUATED",
+                                  reason=f"Kill switch active ({kill_level}) — AI was not consulted; no trade.")
+                return ScanResult(
+                    True, False, f"rejected:kill_switch={kill_level}", signal="BUY",
+                    details={"rejection": list(getattr(sig, "rejected_reasons", None) or [])},
+                )
 
             # PHASE 5.2 §5: REAL reconciliation state — read from the
             # runtime's own last reconcile() verdict (persisted by the
@@ -515,6 +580,8 @@ class PaperMarketScanner:
             # Reconciliation failure → do NOT call the AI at all. The final
             # decision is a typed NO-TRADE with RECONCILIATION_NOT_READY.
             if rec_ok is False:
+                diag["ai"].update(status="NOT_EVALUATED",
+                                  reason="Reconciliation not ready — AI was not consulted; no trade.")
                 return ScanResult(
                     True, False, "AI_NO_TRADE:RECONCILIATION_NOT_READY", signal="BUY",
                     details={
@@ -548,6 +615,7 @@ class PaperMarketScanner:
                 budget = float(os.environ.get("AI_DECISION_BUDGET_SECONDS", "10"))
             except (TypeError, ValueError):
                 budget = 10.0
+            _ai_t0 = time.monotonic()
             ai_decision = self.ai_engine.decide_with_budget(
                 max_wait_seconds=budget,
                 signal_id=sig_id,
@@ -562,9 +630,14 @@ class PaperMarketScanner:
                 session=session,
                 pipeline_strategy=self.ai_decision_pipeline_strategy,
             )
+            diag["ai"] = self._ai_result_state(ai_decision, (time.monotonic() - _ai_t0) * 1000.0)
             ai_reason = apply_ai_decision_gate(
                 payload, ai_decision, pipeline_strategy=self.ai_decision_pipeline_strategy,
             )
+            if ai_reason is not None and diag["ai"]["status"] == "APPROVED":
+                # approved by the model but blocked by the deterministic gate
+                # (e.g. strategy-identity mismatch) → that is NOT an approval.
+                diag["ai"].update(status="REJECTED", reason=str(ai_reason))
             if ai_reason is not None:
                 return ScanResult(
                     True, False, ai_reason, signal="BUY",

@@ -1,3 +1,5 @@
+import type { PipelineView } from '../../types/pipeline'
+
 /** Shape of GET /api/copilot/context (the ONE authoritative backend context).
  *  Every field is optional: sections degrade to an honest "unavailable" state. */
 
@@ -159,6 +161,7 @@ export interface CopilotContext {
   recent_trades?: { available?: boolean; reason?: string; count?: number; trades?: CtxTrade[] }
   risk?: CtxRisk
   ai?: CtxAi
+  pipeline?: PipelineView & { available?: boolean; reason?: string }
   backtest?: CtxBacktest
   configuration_mismatches?: CtxMismatch[]
   errors?: { available?: boolean; note?: string; recent?: unknown[] }

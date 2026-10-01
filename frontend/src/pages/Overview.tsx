@@ -8,6 +8,8 @@ import { useConnection } from '../context/ConnectionContext'
 import { usePolling } from '../hooks/usePolling'
 import { useNavigate } from 'react-router-dom'
 import MetricCard from '../components/MetricCard'
+import DecisionPipeline from '../components/DecisionPipeline'
+import type { PipelineView } from '../types/pipeline'
 import { formatCurrency, formatPercent, formatR, formatTime, formatDuration, pnlColor } from '../utils/formatters'
 import type { OverviewData, Position } from '../types'
 import api, { isAuthError } from '../api/client'
@@ -29,6 +31,7 @@ interface BotStatus {
 }
 
 interface PaperRuntime {
+  pipeline?: PipelineView | null
   state?: string
   label?: string
   summary?: string
@@ -445,6 +448,9 @@ export default function Overview() {
           )}
         </div>
       )}
+
+      {/* The whole decision chain for the latest scan — scanner · market · signal · AI · risk · execution */}
+      <DecisionPipeline pipeline={rt?.pipeline ?? null} />
 
       {/* Scanner health details — only shown when there's real heartbeat data */}
       {scannerHealth && (scannerHealth.scan_count ?? 0) > 0 && (

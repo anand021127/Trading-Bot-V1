@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { AlertTriangle, RefreshCw } from 'lucide-react'
 import type { CopilotContext, CtxLoad } from './contextTypes'
+import DecisionPipeline from '../DecisionPipeline'
 
 /**
  * Compact "Live Context" — renders the ONE authoritative backend context
@@ -127,6 +128,10 @@ export default function LiveContext({ ctx, load, onRefresh }: {
           {problems.slice(0, 5).map((p, i) => <div key={i} className="[overflow-wrap:anywhere]">• {p}</div>)}
           {errNote && <div className="text-amber-300/70">{errNote}</div>}
         </div>
+      )}
+
+      {ctx.pipeline && ctx.pipeline.available !== false && ctx.pipeline.scanner && (
+        <DecisionPipeline pipeline={ctx.pipeline} compact />
       )}
 
       <Section id="runtime" title="Runtime" defaultOpen badge={runtimeLabel}

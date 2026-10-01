@@ -214,3 +214,18 @@ do not trade on it.
 | RUNNING_DATA_ERROR | Scan ran but Upstox data/token unusable | fix token (Settings) — no restart needed, scanner re-arms ≤30 s |
 | RUNNING_SCANNER_ERROR | Scan iteration raising / loop stalled | read `paper_worker_last_error`, `data/paper_worker.log` |
 | STARTED_WORKER_NOT_RESPONDING | Flag says running, no live worker | Press Start again (repairs) — watchdog also respawns |
+
+
+## Reading the Decision Pipeline (Overview + Copilot → Live context)
+`GET /api/bot/status` → `runtime.pipeline` (also in `/api/overview`):
+
+| Field | Values |
+|---|---|
+| scanner | RUNNING · STOPPED · STARTING · NOT RESPONDING · RUNNING — DATA/SCANNER ERROR |
+| market | LIVE · MARKET CLOSED · LIVE — ENTRY WINDOW CLOSED |
+| latest_signal | BUY CE/PE · NO SIGNAL (+ actual reason) · NOT EVALUATED — MARKET CLOSED/DATA PROBLEM/SCANNER ERROR |
+| ai_decision | APPROVED · REJECTED · WAIT (NO TRADE) · UNAVAILABLE — FAILED SAFE · DISABLED · NOT EVALUATED |
+| risk_check | PASS · REJECTED · NOT EVALUATED (AI stopped it earlier / no signal) |
+| execution | FILLED (PAPER) · REJECTED · ERROR · NO TRADE |
+
+`AI DISABLED` means `AI_DECISION_ENABLED=false` (or the Operations toggle is off): trades run on V8-D + risk controls only.
