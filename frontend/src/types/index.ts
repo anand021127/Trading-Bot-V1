@@ -440,6 +440,13 @@ export interface ScannerEntry {
   rejected_reasons: string[]
   strategy_breakdown: ScannerStrategyBreakdown[]
   error: string | null
+  // Real V8-D indicator values (same computation the paper worker records). Null when unavailable.
+  ema20?: number | null
+  ema50?: number | null
+  ema_separation_pct?: number | null
+  candle_count?: number | null
+  v8d_failed?: string[]
+  indicator_note?: string
 }
 
 export interface ScannerStatus {

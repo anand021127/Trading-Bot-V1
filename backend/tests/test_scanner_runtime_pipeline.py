@@ -414,7 +414,7 @@ def test_copilot_uses_actual_latest_scan_state(worker):
     assert chain["diagnostics"]["option_chain_count"] == 2
     assert "evaluated successfully" in chain["human_summary"]
     assert chain["gates"]["data"]["status"] == "OK"
-    assert chain["gates"]["v8d_signal"]["status"] == "REJECTED"
+    assert chain["gates"]["v8d_signal"]["status"] == "NO_SIGNAL"      # NO_SIGNAL is never called a rejected signal
     scanner = full_context._scanner(None, db)
     assert scanner["available"] is True
     assert scanner["scan_seq"] == rec["seq"]

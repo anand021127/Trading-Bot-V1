@@ -120,6 +120,9 @@ class RuleBasedFallbackAdapter(LLMAdapter):
         if context.get("_ai_architecture"):
             from backend.copilot.ai_architecture import format_ai_architecture
             return format_ai_architecture(context)
+        if context.get("_why_no_trade"):
+            from backend.copilot.why_no_trade import format_why_no_trade
+            return format_why_no_trade(context)
         if intent == "GENERAL":
             return self._format_general(context.get("_question", question))
         if intent == "EDUCATION":
@@ -409,6 +412,11 @@ class LocalOpenAICompatibleAdapter(LLMAdapter):
             # Deterministic, live-state answer — never model inference.
             from backend.copilot.ai_architecture import format_ai_architecture
             return format_ai_architecture(context)
+        if context.get("_why_no_trade"):
+            # Deterministic, from persisted scan state — the model is never consulted,
+            # so a Copilot timeout cannot hide (or be confused with) the V8-D reason.
+            from backend.copilot.why_no_trade import format_why_no_trade
+            return format_why_no_trade(context)
 
         intent = context.get("_intent")
         history_messages = [{"role": t.role, "content": t.text} for t in (history or [])]

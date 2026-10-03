@@ -369,17 +369,21 @@ def _flat_candles(n: int):
 
 class TestExpiryDaySquareOff:
     def test_position_tracks_expiry_date_from_signal(self) -> None:
+        # Relative to today: a hard-coded calendar date silently becomes an EXPIRED
+        # contract (which the engine rightly refuses) the day after it passes.
+        from datetime import date, timedelta
+        future_expiry = (date.today() + timedelta(days=7)).isoformat()
         engine = _isolated_engine()
         sig = StrategySignal(strategy_name="OPTION_PREMIUM", symbol="NIFTY50", signal=SignalType.BUY,
                               confidence=90.0, entry_price=100.0, stop_loss=95.0, target=110.0)
         sig.indicators = {"selected_contract": {"option_type": "CE", "strike": 22000,
                              "instrument_key": "NSE_FO|999", "lot_size": 75,
                              "freeze_quantity": 1800},
-                           "expiry_date": "2026-10-02",
+                           "expiry_date": future_expiry,
                            "spot_price": 22000.0}
         engine.execute_multi_signal(sig)
         assert "NIFTY50" in engine._open_positions
-        assert engine._open_positions["NIFTY50"]["expiry_date"] == "2026-10-02"
+        assert engine._open_positions["NIFTY50"]["expiry_date"] == future_expiry
 
     def test_monitor_closes_option_position_on_its_own_expiry_day(self) -> None:
         import asyncio

@@ -58,4 +58,14 @@ describe('typed errors stay distinct', () => {
     expect(new Set(labels).size).toBe(codes.length)
     expect(errorCodeToMessage('SOMETHING_ELSE').label).toBe('Request failed')
   })
+
+  it('labels are Copilot-specific and never read as the trading AI', () => {
+    for (const c of ['PROVIDER_NOT_CONFIGURED', 'PROVIDER_UNAVAILABLE', 'PROVIDER_TIMEOUT', 'PROVIDER_AUTH_FAILED',
+      'PROVIDER_RATE_LIMITED', 'MODEL_UNAVAILABLE']) {
+      const m = errorCodeToMessage(c)
+      expect(m.label.startsWith('Copilot')).toBe(true)
+      expect(m.text).toMatch(/AI Trading Decision gate is separate/)
+    }
+    expect(errorCodeToMessage('PROVIDER_TIMEOUT').label).toBe('Copilot AI provider timed out')
+  })
 })

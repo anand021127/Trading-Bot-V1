@@ -1,0 +1,170 @@
+{
+  "ai_confidence": null,
+  "ai_decision": "NOT EVALUATED",
+  "ai_enabled": true,
+  "ai_latency_ms": null,
+  "ai_reason": "Not consulted: no V8-D BUY signal.",
+  "execution": "NOT ATTEMPTED",
+  "execution_detail": null,
+  "final": "NO TRADE",
+  "latest_signal": "NO SIGNAL",
+  "market": "LIVE",
+  "outcome": "NO_SIGNAL",
+  "primary_symbol": "NIFTY50",
+  "risk_check": "NOT EVALUATED",
+  "risk_detail": "No signal reached the risk gate.",
+  "scan_seq": 1,
+  "scan_time_ist": "2026-10-01 10:30:00 IST",
+  "scanner": "RUNNING",
+  "signal_detail": "PE side failed: trend: EMA20 21624.69 < EMA50 21645.90; close 21609.10 < EMA50; separation -0.098% (needs < -0.15%)",
+  "strategy": "V8_D_PULLBACK_ATM",
+  "summary": "Scanner ran at 10:30:00 IST. V8-D evaluated successfully. No signal because PE side failed: trend: EMA20 21624.69 < EMA50 21645.90; close 21609.10 < EMA50; separation -0.098% (needs < -0.15%).",
+  "symbols": [
+    {
+      "ai_status": "NOT_EVALUATED",
+      "binding": "trend",
+      "candle_complete": true,
+      "candle_count": 120,
+      "category": "NO_SIGNAL",
+      "close": 21609.1,
+      "closest_side": "PE",
+      "ema20": 21624.690413,
+      "ema50": 21645.902949,
+      "error": null,
+      "expiry": "2027-01-07",
+      "failed": [
+        "trend"
+      ],
+      "last_candle_ts": "2024-01-02T13:00:00+05:30",
+      "option_chain_count": 2,
+      "outcome": "NO_SIGNAL",
+      "reason": "no_trade:NO_SIGNAL",
+      "recorded_at": "2026-10-01T05:00:00+00:00",
+      "recorded_at_ist": "2026-10-01 10:30:00 IST",
+      "rsi": 43.0394,
+      "sep_pct": -0.09799792621254023,
+      "seq": 1,
+      "signal": null,
+      "symbol": "NIFTY50",
+      "traded": false,
+      "v8d_label": "NO_SIGNAL"
+    }
+  ],
+  "v8d": {
+    "atr14_underlying": 18.280296,
+    "atr_note": "informational: not an entry condition (V8-D stop sizing uses the option's ATR)",
+    "binding_condition": "trend",
+    "candle_count": 120,
+    "ce": {
+      "all_pass": false,
+      "failed": [
+        "trend",
+        "rsi",
+        "reversal"
+      ],
+      "pullback": {
+        "detail": "low 21601.70 vs band [21300.32, 21689.56] around EMA20",
+        "pass": true
+      },
+      "reversal": {
+        "close_above_prev_high": false,
+        "detail": "green candle: no; close>prev high (21640.60): no; or close>=EMA20 with body>55% of range: no",
+        "green": false,
+        "pass": false,
+        "strong_body_above_ema20": false
+      },
+      "rsi": {
+        "detail": "RSI 43.04 (CE zone 45\u201362)",
+        "pass": false
+      },
+      "trend": {
+        "close_above_ema50": false,
+        "detail": "EMA20 21624.69 <= EMA50 21645.90; close 21609.10 <= EMA50; separation -0.098% (needs > +0.15%)",
+        "ema20_above_ema50": false,
+        "pass": false,
+        "separation_ok": false
+      }
+    },
+    "closest_side": "PE",
+    "consistent": true,
+    "decision": null,
+    "decision_label": "NO_SIGNAL",
+    "ema20": 21624.690413,
+    "ema50": 21645.902949,
+    "ema_separation_pct": -0.09799792621254023,
+    "evaluated": true,
+    "failed": [
+      "trend"
+    ],
+    "min_candles": 50,
+    "pe": {
+      "all_pass": false,
+      "failed": [
+        "trend"
+      ],
+      "pullback": {
+        "detail": "high 21628.60 vs band [21559.82, 21949.06] around EMA20",
+        "pass": true
+      },
+      "reversal": {
+        "close_below_prev_low": true,
+        "detail": "red candle: yes; close<prev low (21621.30): yes; or close<=EMA20 with body>55% of range: yes",
+        "pass": true,
+        "red": true,
+        "strong_body_below_ema20": true
+      },
+      "rsi": {
+        "detail": "RSI 43.04 (PE zone 38\u201355)",
+        "pass": true
+      },
+      "trend": {
+        "close_below_ema50": true,
+        "detail": "EMA20 21624.69 < EMA50 21645.90; close 21609.10 < EMA50; separation -0.098% (needs < -0.15%)",
+        "ema20_below_ema50": true,
+        "pass": false,
+        "separation_ok": false
+      }
+    },
+    "price": {
+      "close": 21609.1,
+      "high": 21628.6,
+      "low": 21601.7,
+      "open": 21627.35,
+      "prev_high": 21640.6,
+      "prev_low": 21621.3
+    },
+    "pullback_band": {
+      "ce": [
+        21300.320056805,
+        21689.564484239
+      ],
+      "pe": [
+        21559.816341761,
+        21949.060769195
+      ]
+    },
+    "reason": "PE side failed: trend: EMA20 21624.69 < EMA50 21645.90; close 21609.10 < EMA50; separation -0.098% (needs < -0.15%)",
+    "rsi": 43.0394,
+    "strategy_decision": "NO_SIGNAL",
+    "thresholds": {
+      "ce_pullback_band": [
+        0.985,
+        1.003
+      ],
+      "ce_rsi_zone": [
+        45.0,
+        62.0
+      ],
+      "ema_separation_min_pct": 0.15,
+      "pe_pullback_band": [
+        0.997,
+        1.015
+      ],
+      "pe_rsi_zone": [
+        38.0,
+        55.0
+      ],
+      "reversal_body_strength": 0.55
+    }
+  }
+}

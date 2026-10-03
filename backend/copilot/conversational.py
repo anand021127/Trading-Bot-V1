@@ -91,6 +91,14 @@ def _plan_ai_architecture(tools: CopilotTools, q: str, candles_by_symbol: Dict[s
     return {"_intent": INTENT_GENERAL, "_ai_architecture": True}
 
 
+def _plan_why_no_trade(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[Dict]],
+                       state: Optional[ConversationState] = None) -> Dict[str, Any]:
+    """"Why didn't the bot trade?" — answered DETERMINISTICALLY from the persisted
+    scan state (backend/copilot/why_no_trade.py). A Copilot model timeout must never
+    hide the V8-D reason or be mistaken for the AI Trading Decision gate."""
+    return {"_intent": INTENT_GENERAL, "_why_no_trade": True}
+
+
 # Each entry: (keywords that must ALL appear, tool-call plan builder)
 def _plan_market_status(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[Dict]],
                          state: Optional[ConversationState] = None) -> Dict[str, Any]:
@@ -156,11 +164,13 @@ def _plan_health(tools: CopilotTools, q: str, candles_by_symbol: Dict[str, List[
 
 
 from backend.copilot.ai_architecture import AI_ARCHITECTURE_KEYWORDS as _AI_ARCH_KW  # noqa: E402
+from backend.copilot.why_no_trade import WHY_NO_TRADE_KEYWORDS as _WHY_KW  # noqa: E402
 
 _INTENTS = [
     # AI-architecture questions first: "what is the AI trading decision layer"
     # must not be swallowed by the EDUCATION ("what is") bucket.
     (list(_AI_ARCH_KW), _plan_ai_architecture),
+    (list(_WHY_KW), _plan_why_no_trade),
     # "Which market/symbol are you analyzing" -- checked before GENERAL's
     # broader greeting bucket so it doesn't get swallowed by "what can
     # you do"-style matches.
@@ -198,7 +208,7 @@ def _classify_intent(question: str) -> str:
     q = question.lower()
     for keywords, plan_fn in _INTENTS:
         if any(kw in q for kw in keywords):
-            if plan_fn in (_plan_general, _plan_which_symbol, _plan_ai_architecture):
+            if plan_fn in (_plan_general, _plan_which_symbol, _plan_ai_architecture, _plan_why_no_trade):
                 return INTENT_GENERAL
             if plan_fn is _plan_education:
                 return INTENT_EDUCATION

@@ -86,6 +86,11 @@ def _is_trading_session(now: Optional[datetime]) -> bool:
         )
 
 
+from backend.strategy.candle_utils import (  # noqa: E402  (single shared implementation)
+    candle_is_complete, completed_candles, interval_seconds,
+)
+
+
 def candles_are_fresh(
     candles: List[Dict[str, Any]],
     *,
@@ -427,6 +432,25 @@ class PaperMarketScanner:
         if not ok:
             return ScanResult(True, False, reason, details={"bars": len(candles or [])})
 
+        # ── completed-candle evaluation (backtest parity) ───────────────────
+        # The backtest evaluates V8-D on COMPLETED bars. The live series ends with
+        # the bar that is still forming (low/close/reversal still moving), on which
+        # the strategy's "reversal candle" test is meaningless and can flicker.
+        # Decide from the timestamp (not from API behaviour): drop the last bar
+        # unless it has closed. PAPER_EVAL_FORMING_CANDLE=1 restores the old feed.
+        eval_candles, _feed = completed_candles(candles, self.interval, now)
+        diag.update(_feed)
+
+        # ── V8-D condition-level explanation (read-only; same indicators/thresholds) ──
+        v8d_diag: Dict[str, Any] = {}
+        try:
+            from backend.strategy.v8d_diagnostics import explain_pullback
+            v8d_diag = explain_pullback(eval_candles, self.strategy)
+            diag["v8d"] = v8d_diag
+        except Exception as exc:  # diagnostics must never break a scan
+            logger.warning("V8-D diagnostics failed: %s", type(exc).__name__)
+            diag["v8d_diag_error"] = type(exc).__name__
+
         try:
             expiry = self.data.get_nearest_expiry(self.underlying)
         except Exception as exc:
@@ -443,6 +467,7 @@ class PaperMarketScanner:
             from backend.paper.scan_state import describe_exception
             diag["error"] = describe_exception(exc)
             return ScanResult(True, False, f"chain_fetch_error:{type(exc).__name__}")
+        chain_t0 = time.monotonic()      # when the option quotes we will price from were obtained
         diag["option_chain_count"] = len(chain or [])
         if not chain:
             return ScanResult(True, False, "empty_option_chain")
@@ -453,14 +478,24 @@ class PaperMarketScanner:
         if spot <= 0:
             return ScanResult(True, False, "no_valid_spot")
         diag["spot"] = round(spot, 2)
+        try:
+            from backend.strategy.v8d_diagnostics import explain_chain
+            diag["chain"] = explain_chain(chain, spot, self.underlying, self.strategy)
+        except Exception as exc:
+            diag["chain_diag_error"] = type(exc).__name__
 
+        # Age of the UNDERLYING candle (fed to the AI as data context). It is NOT the
+        # option quote age: it is always 0-300 s on a 5-minute bar, so passing it to the
+        # contract validator (reject if > 30 s) rejected ~90% of genuine BUYs — and would
+        # have rejected 100% once only COMPLETED candles (>= 300 s old) are evaluated.
         last_ts = _parse_ts(candles[-1].get("timestamp"))
         quote_age = (now - last_ts.astimezone(timezone.utc)).total_seconds() if last_ts else 0.0
+        diag["underlying_candle_age_seconds"] = round(quote_age, 1)
 
         try:
             sig, decision_log = self.strategy.evaluate_v8d_signal(
                 underlying_symbol=self.underlying,
-                underlying_candles=candles,
+                underlying_candles=eval_candles,
                 spot_price=spot,
                 option_chain=chain,
                 account_equity=current_equity,
@@ -479,6 +514,14 @@ class PaperMarketScanner:
 
         decision = getattr(decision_log, "decision", None) or "NONE"
         diag["decision"] = str(decision)
+        if v8d_diag:
+            # The explanation must agree with the strategy's own verdict. If it ever
+            # does not, say so loudly instead of silently showing a wrong reason.
+            v8d_diag["strategy_decision"] = str(decision)
+            v8d_diag["consistent"] = bool((str(decision) == "NO_SIGNAL") == (v8d_diag.get("decision") is None))
+            if not v8d_diag["consistent"]:
+                logger.warning("V8-D diagnostics disagree with the strategy (%s vs %s)",
+                               v8d_diag.get("decision_label"), decision)
         diag["v8d_evaluated"] = True
         try:
             _c = ((getattr(sig, "indicators", None) or {}).get("selected_contract") or {})
@@ -501,7 +544,10 @@ class PaperMarketScanner:
                 },
             )
 
-        payload = signal_to_paper_payload(sig, expiry=expiry, quote_age_seconds=quote_age)
+        # OPTION quote age = time since the option-chain snapshot we price from was fetched
+        # (refreshed again right before submission, so a slow AI call can never let a stale
+        # quote through: >30 s is still rejected by the contract validator).
+        payload = signal_to_paper_payload(sig, expiry=expiry, quote_age_seconds=time.monotonic() - chain_t0)
         if not payload:
             return ScanResult(True, False, "signal_payload_incomplete", signal="BUY")
 
@@ -619,11 +665,11 @@ class PaperMarketScanner:
             ai_decision = self.ai_engine.decide_with_budget(
                 max_wait_seconds=budget,
                 signal_id=sig_id,
-                setup_id=build_setup_id(signal=sig, contract=contract, expiry=expiry, candles=candles),
+                setup_id=build_setup_id(signal=sig, contract=contract, expiry=expiry, candles=eval_candles),
                 signal=sig,
                 contract=contract,
                 expiry=expiry,
-                candles=candles,
+                candles=eval_candles,
                 candles_fresh=ok,
                 candle_age_seconds=quote_age,
                 risk=risk_ctx,
@@ -652,6 +698,9 @@ class PaperMarketScanner:
                 )
 
         try:
+            # refresh: how old is the option quote NOW (after the AI gate / replay)?
+            payload["quote_age_seconds"] = float(time.monotonic() - chain_t0)
+            diag["quote_age_seconds"] = round(payload["quote_age_seconds"], 3)
             result = runtime.submit_entry(payload)
         except Exception as exc:
             logger.exception("Paper submit failed")

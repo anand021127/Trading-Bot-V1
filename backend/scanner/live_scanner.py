@@ -49,6 +49,13 @@ class ScannerEntry:
     strike: Optional[float] = None
     expiry: str = ""
     option_type: str = ""
+    # Real V8-D indicator values/diagnostics (same computation the paper worker records)
+    ema20: Optional[float] = None
+    ema50: Optional[float] = None
+    ema_separation_pct: Optional[float] = None
+    candle_count: Optional[int] = None
+    v8d_failed: List[str] = field(default_factory=list)
+    indicator_note: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -75,6 +82,12 @@ class ScannerEntry:
             "strike": self.strike,
             "expiry": self.expiry,
             "option_type": self.option_type,
+            "ema20": self.ema20,
+            "ema50": self.ema50,
+            "ema_separation_pct": self.ema_separation_pct,
+            "candle_count": self.candle_count,
+            "v8d_failed": self.v8d_failed,
+            "indicator_note": self.indicator_note,
         }
 
 
@@ -204,6 +217,7 @@ class LiveScanner:
                 entry.atr = ind.get("atr")
                 if not entry.expiry:
                     entry.expiry = str(ind.get("expiry") or "")
+                self._apply_v8d_indicators(entry, ind)
 
             # Paper execution: only when bot is started AND signal is BUY
             entry.execution_status = "SIGNAL_ONLY"
@@ -223,69 +237,46 @@ class LiveScanner:
         return entry
 
 
+    @staticmethod
+    def _apply_v8d_indicators(entry: ScannerEntry, ind: Dict[str, Any]) -> None:
+        """Fill EMA / RSI / Volume from the REAL V8-D diagnostics attached by the
+        evaluator (backend/strategy/v8d_diagnostics.py — the same indicators and
+        thresholds the strategy uses). Nothing is invented: when diagnostics are
+        unavailable the statuses stay N/A and ``indicator_note`` says why."""
+        d = ind.get("v8d_diagnostics") if isinstance(ind, dict) else None
+        if not isinstance(d, dict) or not d.get("evaluated"):
+            entry.indicator_note = (
+                "V8-D indicators unavailable for this scan"
+                + (f" ({d.get('reason')})" if isinstance(d, dict) and d.get("reason") else
+                   " (evaluation stopped before the technical check: no/insufficient candles, no expiry or no spot)"))
+            entry.volume_status = "NOT_USED"
+            return
+        side = str(d.get("decision") or d.get("closest_side") or "CE").lower()
+        s = d.get(side) or {}
+        entry.ema20, entry.ema50 = d.get("ema20"), d.get("ema50")
+        entry.ema_separation_pct = d.get("ema_separation_pct")
+        entry.rsi_value = d.get("rsi")
+        entry.candle_count = ind.get("candle_count") or d.get("candle_count")
+        entry.v8d_failed = list(d.get("failed") or [])
+        entry.ema_status = _status((s.get("trend") or {}).get("pass"))
+        entry.rsi_status = _status((s.get("rsi") or {}).get("pass"))
+        # V8-D has no volume condition (and index candles carry volume 0): say so
+        # instead of showing an unexplained N/A.
+        entry.volume_status = "NOT_USED"
+        entry.indicator_note = (f"EMA/RSI status = V8-D {side.upper()} trend / RSI-zone condition "
+                                f"(closest side); volume is not part of V8-D")
+
     def _maybe_submit_paper_entry(self, entry: ScannerEntry, sig: Any) -> ScannerEntry:
-        """Submit BUY to canonical PaperTradingRuntime when bot is running in paper mode."""
-        try:
-            from backend.config.settings import load_settings
-            settings = load_settings()
-            if (settings.mode or "").lower() != "paper":
-                entry.execution_status = "BLOCKED"
-                entry.execution_reason = "not_paper_mode"
-                return entry
-            if (getattr(settings.strategy, "name", "") or "").strip() != "V8_D_PULLBACK_ATM":
-                entry.execution_status = "BLOCKED"
-                entry.execution_reason = "strategy_not_v8d"
-                return entry
-        except Exception as e:
-            entry.execution_status = "BLOCKED"
-            entry.execution_reason = f"settings_error:{e}"
-            return entry
+        """SIGNAL ONLY — this scanner never executes.
 
-        try:
-            from backend.api.routers import bot_control
-            if not bot_control.BotState.is_running():
-                entry.execution_status = "SIGNAL_ONLY"
-                entry.execution_reason = "bot_not_started"
-                entry.decision = (entry.decision or "") + " | EXECUTION: bot not started (signal only)"
-                return entry
-            if bot_control.BotState.status().get("kill_switch_active"):
-                entry.execution_status = "BLOCKED"
-                entry.execution_reason = "kill_switch_active"
-                return entry
-            runtime = bot_control.get_paper_runtime()
-        except Exception as e:
-            entry.execution_status = "BLOCKED"
-            entry.execution_reason = f"runtime_lookup:{e}"
-            return entry
-
-        if runtime is None:
-            entry.execution_status = "BLOCKED"
-            entry.execution_reason = "paper_runtime_not_attached"
-            return entry
-
-        try:
-            from backend.paper.market_scan_loop import signal_to_paper_payload
-            payload = signal_to_paper_payload(sig, expiry=entry.expiry or "")
-            if not payload:
-                entry.execution_status = "REJECTED"
-                entry.execution_reason = "signal_payload_incomplete"
-                entry.decision = (entry.decision or "") + " | REJECTED: payload incomplete"
-                return entry
-            result = runtime.submit_entry(payload)
-            accepted = bool(getattr(result, "accepted", False))
-            reason = getattr(result, "reason", "") or ""
-            if accepted:
-                entry.execution_status = "SUBMITTED"
-                entry.execution_reason = reason or "submitted"
-                entry.decision = (entry.decision or "") + " | EXECUTION: SUBMITTED"
-            else:
-                entry.execution_status = "REJECTED"
-                entry.execution_reason = reason or "rejected"
-                entry.decision = (entry.decision or "") + f" | REJECTED: {entry.execution_reason}"
-        except Exception as e:
-            entry.execution_status = "BLOCKED"
-            entry.execution_reason = f"submit_error:{type(e).__name__}"
-            entry.decision = (entry.decision or "") + f" | BLOCKED: {entry.execution_reason}"
+        SAFETY (single execution path): the paper worker's scan is the ONE path
+        V8-D → AI Trading Decision → risk → ExecutionPipeline → PaperBroker. This
+        API-process scanner used to call ``runtime.submit_entry`` directly, which
+        bypassed the AI gate entirely (and raced with the worker's own entries on
+        the same database). It now only reports the signal."""
+        entry.execution_status = "SIGNAL_ONLY"
+        entry.execution_reason = "display_only: execution happens only in the paper worker (AI-gated single path)"
+        entry.decision = (entry.decision or "") + " | EXECUTION: not performed here (paper worker is the only executor)"
         return entry
 
     def scan_once(self) -> List[ScannerEntry]:

@@ -116,6 +116,8 @@ def _resolve_context(question: str, tools: CopilotTools, state: Any) -> Dict[str
     merged["_intent"] = intent
     if base_ctx.get("_ai_architecture"):
         merged["_ai_architecture"] = True
+    if base_ctx.get("_why_no_trade"):
+        merged["_why_no_trade"] = True
     if base_ctx.get("_symbol"):
         merged["_symbol"] = base_ctx["_symbol"]
     return merged

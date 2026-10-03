@@ -420,7 +420,7 @@ export default function Copilot() {
 
       {provider && provider.enabled && !provider.configured && (
         <div role="note" className="shrink-0 bg-amber-950/20 border border-amber-800/40 rounded-lg px-3 py-2 text-[11px] text-amber-300">
-          No AI provider is configured. Set <code className="font-mono">COPILOT_LLM_BACKEND</code> (<code className="font-mono">local_openai_compatible</code> for Ollama, or <code className="font-mono">openai</code> with its key) and restart the backend. Until then the Copilot returns this message instead of a fabricated answer.
+          No Copilot chat model is configured. Set <code className="font-mono">COPILOT_LLM_BACKEND</code> (<code className="font-mono">local_openai_compatible</code> for Ollama, or <code className="font-mono">openai</code> with its key) and restart the backend. Until then the Copilot returns this message instead of a fabricated answer.
         </div>
       )}
 

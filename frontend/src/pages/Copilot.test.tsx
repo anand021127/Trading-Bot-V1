@@ -26,7 +26,7 @@ const CTX = {
     summary: { trades: 171, net_pnl: -45397.89, win_rate_pct: 26.9, profit_factor: 0.6, max_drawdown_pct: 50.77 } },
   ai: { available: true, enabled: true, provider: 'ollama', model: 'llama3', latest: { available: true, decision: 'WAIT', confidence: 61, reason_codes: ['LOW_VOL'], latency_ms: 812 } },
   pipeline: { scanner: 'RUNNING', market: 'LIVE', strategy: 'V8_D_PULLBACK_ATM', latest_signal: 'NO SIGNAL',
-    ai_decision: 'NOT EVALUATED', ai_reason: 'Not consulted: no V8-D BUY signal.', risk_check: 'NOT EVALUATED', execution: 'NO TRADE' },
+    ai_decision: 'NOT EVALUATED', ai_reason: 'Not consulted: no V8-D BUY signal.', risk_check: 'NOT EVALUATED', execution: 'NOT ATTEMPTED', final: 'NO TRADE', outcome: 'NO_SIGNAL' },
   configuration_mismatches: [] as { message: string }[],
 }
 
@@ -197,7 +197,7 @@ describe('async job contract', () => {
     await ask('will fail')
     const err = await screen.findByTestId('msg-error')
     expect(err).toHaveAttribute('data-error-code', 'PROVIDER_TIMEOUT')
-    expect(err).toHaveTextContent('AI provider timed out')
+    expect(err).toHaveTextContent('Copilot AI provider timed out')
     fail = false
     post.mockResolvedValue({ data: { job_id: 'bad2', status: 'completed' } })
     await userEvent.setup().click(screen.getByLabelText('Retry this question'))
@@ -211,7 +211,7 @@ describe('async job contract', () => {
     await ask('anything')
     const err = await screen.findByTestId('msg-error')
     expect(err).toHaveAttribute('data-error-code', 'PROVIDER_NOT_CONFIGURED')
-    expect(err).toHaveTextContent('AI provider not configured')
+    expect(err).toHaveTextContent('Copilot AI provider not configured')
     expect(get.mock.calls.some(c => String(c[0]).startsWith('/api/copilot/chat/status/'))).toBe(false)
   })
 

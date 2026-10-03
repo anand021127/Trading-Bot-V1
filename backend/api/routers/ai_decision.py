@@ -202,11 +202,12 @@ def get_why_not_traded() -> Dict[str, Any]:
             # V8-D is only "REJECTED" when it was actually evaluated; a data or
             # scanner failure means it was NOT evaluated (different problem).
             "v8_d": ("PASS" if chain.get("signal") == "BUY"
+                     else "NO_SIGNAL" if chain.get("stage") == "NO_SIGNAL"
                      else "NOT_EVALUATED" if (chain.get("stage") in (
                          "STALE_DATA", "DATA_UNAVAILABLE", "SCANNER_ERROR", "MARKET_CLOSED")
                          or (chain.get("gates", {}).get("v8d_signal", {}).get("status")
                              == "NOT_EVALUATED"))
-                     else "REJECTED"),
+                     else "SIGNAL_REJECTED"),
             "v8_d_rejection_reasons": chain.get("v8d_rejection_reasons") or [],
             "ai_decision": details.get("ai_decision"),
             "ai_confidence": details.get("ai_confidence"),

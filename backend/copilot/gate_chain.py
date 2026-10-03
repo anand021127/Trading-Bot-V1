@@ -99,7 +99,8 @@ def _stage_from_reason(reason: str) -> str:
             return "BROKER_REJECTED"
         return "EXECUTION_REJECTED"
     if r.startswith("no_trade:"):
-        return "SIGNAL_REJECTED"
+        # V8-D's verdict: NO_SIGNAL (setup did not exist) is NOT a rejected signal.
+        return "SIGNAL_REJECTED" if r.split(":", 1)[1].strip().upper().startswith("REJECT") else "NO_SIGNAL"
     if r.startswith(("scanner_disabled", "scanner_init_failed", "no_candles",
                      "no_upcoming_expiry", "empty_option_chain", "no_valid_spot",
                      "invalid_ohlc", "missing_candle_timestamp",
@@ -144,7 +145,9 @@ def build_gate_chain_from_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
         _gate("OK", "BUY") if signal == "BUY"
         else _gate("NOT_EVALUATED", "market data not usable — V8-D was not evaluated")
         if (stage in _data_stages or _fetch_failed or stage == "SCANNER_ERROR")
-        else _gate("REJECTED", inner.get("rejection") or reason) if detail.get("scanned")
+        else _gate("NO_SIGNAL", (inner.get("v8d") or detail.get("v8d") or {}).get("reason") or inner.get("rejection") or reason)
+        if stage == "NO_SIGNAL" and detail.get("scanned")
+        else _gate("SIGNAL_REJECTED", inner.get("rejection") or reason) if detail.get("scanned")
         else _gate("NOT_EVALUATED", "no scan")
     )
     ai_decision = inner.get("ai_decision")
@@ -211,6 +214,10 @@ def build_gate_chain_from_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
         "duration_ms": detail.get("duration_ms"),
         "next_scan_at": detail.get("next_scan_at"),
         "error": detail.get("error") or inner.get("error"),
+        "outcome": detail.get("outcome"),
+        "v8d": inner.get("v8d") or detail.get("v8d"),
+        "chain": inner.get("chain") or detail.get("chain"),
+        "symbol_scanned": detail.get("underlying"),
     }
     return {
         "available": True,
@@ -224,7 +231,7 @@ def build_gate_chain_from_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
         "v8d_rejection_reasons": list(inner.get("rejection") or []),
         "ai_decision": ai_decision,
         "gates": chain,
-        "human_summary": _human_summary(stage, reason, inner, signal, traded),
+        "human_summary": _human_summary(stage, reason, {**inner, "v8d": inner.get("v8d") or detail.get("v8d")}, signal, traded),
     }
 
 
@@ -245,10 +252,18 @@ def _human_summary(
     if stage == "SCANNER_ERROR":
         return (f"The scan iteration failed ({inner.get('error') or reason}); V8-D was not evaluated. "
                 "This is a SCANNER problem, not a strategy outcome.")
-    if stage == "SIGNAL_REJECTED" or stage == "NO_SIGNAL":
+    if stage == "NO_SIGNAL":
+        v8 = inner.get("v8d") or detail.get("v8d") or {}
+        why = v8.get("reason") if v8.get("evaluated") and v8.get("reason") else None
         reasons = inner.get("rejection") or []
-        base = "V8-D was evaluated successfully and produced no actionable BUY signal this scan"
-        return base + (f": {'; '.join(str(x) for x in reasons[:3])}" if reasons else ".")
+        return ("V8-D was evaluated successfully and found NO SIGNAL (the technical setup did not exist). "
+                + (f"{why}. " if why else (f"{'; '.join(str(x) for x in reasons[:3])}. " if reasons else ""))
+                + "The AI gate, risk checks and execution were not reached — nothing was rejected.")
+    if stage == "SIGNAL_REJECTED":
+        reasons = inner.get("rejection") or []
+        return ("V8-D found a technical setup but REJECTED the signal"
+                + (f": {'; '.join(str(x) for x in reasons[:3])}" if reasons else ".")
+                + " The AI gate, risk checks and execution were not reached.")
     if stage == "AI_REJECTED":
         return "V8-D produced a BUY, but the AI trading decision layer REJECTED it" + (
             f" ({', '.join(str(c) for c in (inner.get('ai_reason_codes') or []))})"

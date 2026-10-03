@@ -13,10 +13,13 @@ function StatusPill({ value }: { value: string }) {
   if (value === 'FAILED') {
     return <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-red-400"><XCircle size={11} /> FAILED</span>
   }
+  if (value === 'NOT_USED') {
+    return <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-slate-500" title="V8-D has no volume condition (index candles carry volume 0)"><MinusCircle size={11} /> Not used</span>
+  }
   return <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-slate-500"><MinusCircle size={11} /> N/A</span>
 }
 
-function ScannerRow({ entry }: { entry: ScannerEntry }) {
+export function ScannerRow({ entry }: { entry: ScannerEntry }) {
   const [expanded, setExpanded] = useState(false)
   const isBuy = entry.signal === 'BUY'
 
@@ -31,11 +34,13 @@ function ScannerRow({ entry }: { entry: ScannerEntry }) {
           <div className="text-xs text-slate-400 w-20 flex-shrink-0">{entry.ltp != null ? formatCurrency(entry.ltp) : '—'}</div>
           <div className="flex items-center gap-3 flex-shrink-0">
             <div className="flex flex-col items-center gap-0.5">
-              <span className="text-[9px] text-slate-600 uppercase">EMA</span>
+              <span className="text-[9px] text-slate-600 uppercase" data-testid="scanner-ema-values">
+                EMA {entry.ema20 != null && entry.ema50 != null ? `${entry.ema20.toFixed(0)}/${entry.ema50.toFixed(0)}` : '—'}
+              </span>
               <StatusPill value={entry.ema_status} />
             </div>
             <div className="flex flex-col items-center gap-0.5">
-              <span className="text-[9px] text-slate-600 uppercase">RSI {entry.rsi_value?.toFixed(0) ?? '—'}</span>
+              <span className="text-[9px] text-slate-600 uppercase">RSI {entry.rsi_value != null ? entry.rsi_value.toFixed(1) : '—'}</span>
               <StatusPill value={entry.rsi_status} />
             </div>
             <div className="flex flex-col items-center gap-0.5">
@@ -55,6 +60,14 @@ function ScannerRow({ entry }: { entry: ScannerEntry }) {
           {!entry.error && (
             <div className="text-[11px] text-slate-400 mb-2">{entry.decision}</div>
           )}
+          {entry.ema_separation_pct != null && (
+            <div className="text-[11px] text-slate-300" data-testid="scanner-v8d-detail">
+              EMA separation {entry.ema_separation_pct >= 0 ? '+' : ''}{entry.ema_separation_pct.toFixed(3)}%
+              {entry.candle_count != null ? ` · ${entry.candle_count} candles` : ''}
+              {entry.v8d_failed && entry.v8d_failed.length > 0 ? ` · failed: ${entry.v8d_failed.join(', ')}` : ''}
+            </div>
+          )}
+          {entry.indicator_note && <div className="text-[10px] text-slate-500">{entry.indicator_note}</div>}
           {entry.strategy_breakdown.map(s => (
             <div key={s.strategy_name} className="text-xs">
               <div className="flex items-center justify-between">

@@ -81,22 +81,24 @@ export function fieldsFromStatus(d: JobStatusBody): AssistantFields {
 }
 
 /** Typed backend error_code -> distinct, honest UI message. */
+const COPILOT_NOTE = ' This is the Copilot chat model only — the AI Trading Decision gate is separate (see Live context).'
+
 export function errorCodeToMessage(code?: string, fallback?: string): { label: string; text: string } {
   switch (code) {
     case 'PROVIDER_NOT_CONFIGURED':
-      return { label: 'AI provider not configured', text: fallback || 'No AI provider is configured on the backend. Set COPILOT_LLM_BACKEND (local Ollama or openai + key) and retry. No fake answer was generated.' }
+      return { label: 'Copilot AI provider not configured', text: (fallback || 'No Copilot chat model is configured on the backend. Set COPILOT_LLM_BACKEND (local Ollama or openai + key) and retry. No fake answer was generated.') + COPILOT_NOTE }
     case 'COPILOT_DISABLED':
-      return { label: 'Copilot disabled', text: fallback || 'The Copilot is disabled in backend configuration (COPILOT_ENABLED=false).' }
+      return { label: 'Copilot disabled', text: (fallback || 'The Copilot is disabled in backend configuration (COPILOT_ENABLED=false).') + COPILOT_NOTE }
     case 'PROVIDER_UNAVAILABLE':
-      return { label: 'AI provider unreachable', text: fallback || 'Could not reach the AI provider (connection refused / server down). This is NOT a frontend timeout.' }
+      return { label: 'Copilot AI provider unreachable', text: (fallback || 'Could not reach the Copilot chat model (connection refused / server down). This is NOT a frontend timeout.') + COPILOT_NOTE }
     case 'PROVIDER_TIMEOUT':
-      return { label: 'AI provider timed out', text: fallback || 'The AI provider accepted the request but did not answer in time. You can retry.' }
+      return { label: 'Copilot AI provider timed out', text: (fallback || 'The Copilot chat model accepted the request but did not answer in time. You can retry, or ask a shorter question.') + COPILOT_NOTE }
     case 'PROVIDER_AUTH_FAILED':
-      return { label: 'AI provider authentication failed', text: fallback || 'The provider rejected the configured credentials. Check the API key configuration — keys are never displayed here.' }
+      return { label: 'Copilot AI provider authentication failed', text: (fallback || 'The chat provider rejected the configured credentials. Check the API key configuration — keys are never displayed here.') + COPILOT_NOTE }
     case 'PROVIDER_RATE_LIMITED':
-      return { label: 'AI provider rate limited', text: fallback || 'The provider is rate limiting requests. Wait a moment and retry.' }
+      return { label: 'Copilot AI provider rate limited', text: (fallback || 'The chat provider is rate limiting requests. Wait a moment and retry.') + COPILOT_NOTE }
     case 'MODEL_UNAVAILABLE':
-      return { label: 'AI model unavailable', text: fallback || 'The configured model is not available on the provider (not downloaded/loaded?).' }
+      return { label: 'Copilot AI model unavailable', text: (fallback || 'The configured chat model is not available on the provider (not downloaded/loaded?).') + COPILOT_NOTE }
     case 'BACKEND_EXCEPTION':
       return { label: 'Copilot backend error', text: fallback || 'The Copilot backend hit an unexpected error. Check backend logs.' }
     case 'NETWORK':

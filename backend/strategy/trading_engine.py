@@ -821,6 +821,11 @@ class TradingEngine:
         except Exception as e:
             TradeLogger.log_error("TradingEngine.evaluate_configured_strategy", e, {"symbol": underlying_symbol})
             candles = []
+        # Same completed-candle feed as the paper worker (backtest parity): the
+        # still-forming bar is excluded (decided from its timestamp).
+        from backend.strategy.candle_utils import completed_candles
+        raw_candles = candles
+        candles, _feed = completed_candles(raw_candles, "5minute")
         if len(candles) < 30:
             sig = StrategySignal(strategy_name="V8_D_PULLBACK_ATM", symbol=underlying_symbol)
             sig.rejected_reasons = [f"Insufficient underlying candles: {len(candles)}"]
@@ -851,7 +856,7 @@ class TradingEngine:
             chain, chain_spot = [], None
         chain = chain or []
         try:
-            spot = float(chain_spot or 0) or float(candles[-1].get("close") or 0)
+            spot = float(chain_spot or 0) or float(raw_candles[-1].get("close") or 0)
         except (TypeError, ValueError):
             spot = 0.0
         if spot <= 0:
@@ -908,6 +913,18 @@ class TradingEngine:
             sig.indicators["expiry"] = expiry
             sig.indicators["spot"] = spot
             sig.indicators["chain_size"] = len(chain)
+            # Additive, read-only: the SAME condition-level explanation the paper
+            # worker records (same indicators/thresholds), so the Option Scanner
+            # shows real EMA/RSI values instead of N/A. Never affects the decision.
+            try:
+                from backend.strategy.v8d_diagnostics import explain_pullback
+                _d = explain_pullback(candles, strat)
+                _d["strategy_decision"] = getattr(decision_log, "decision", None)
+                _d.update(_feed)
+                sig.indicators["v8d_diagnostics"] = _d
+            except Exception:
+                pass
+            sig.indicators["candle_count"] = len(raw_candles)
         return sig
 
     # ─── WebSocket subscription helpers (V21-FINAL Item 3) ────────────────────

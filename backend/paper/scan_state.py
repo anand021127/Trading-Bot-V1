@@ -44,8 +44,11 @@ PID_KEY = "paper_worker_pid"
 STATUS_KEY = "paper_worker_status"
 ERR_KEY = "paper_worker_last_error"
 LOOP_KEY = "paper_worker_loop_count"
+SYMBOLS_KEY = "paper_worker_symbol_scans"        # {SYMBOL: compact record} — latest scan per underlying
+SYMBOL_LIST_KEY = "paper_worker_scan_symbols"    # JSON list of the underlyings the worker scans
+LAST_ACTIVITY_KEY = "paper_worker_last_scan_activity"  # ISO time of the NEWEST scan of ANY symbol
 
-MAX_RECORD_CHARS = 6000
+MAX_RECORD_CHARS = 9000
 HISTORY_LEN = 20
 HEARTBEAT_FRESH_SECONDS = 20.0
 START_GRACE_SECONDS = 45.0
@@ -154,9 +157,52 @@ def classify_reason(reason: str, signal: Any = None, traded: bool = False) -> st
     if r.startswith(_DATA_PREFIXES):
         return "DATA_ERROR"
     if r.startswith("no_trade:"):
+        # V8-D's own verdict is the suffix: NO_SIGNAL = the technical setup did not
+        # exist; anything else (e.g. REJECTED) = a setup existed but V8-D refused it.
+        verdict = r.split(":", 1)[1].strip().upper()
+        # NO_SIGNAL (or no verdict at all) = the setup did not exist. Only an
+        # explicit V8-D REJECTED verdict means "a setup existed and was refused".
+        return "SIGNAL" if verdict.startswith("REJECT") else "NO_SIGNAL"
+    return "SIGNAL" if r.startswith(("rejected:", "AI_NO_TRADE", "AI_STRATEGY_MISMATCH", "POSITION_ALREADY_OPEN",
+                                    "signal_payload_incomplete", "position_check_error")) else "NO_SIGNAL"
+
+
+OUTCOMES = ("NO_SIGNAL", "SIGNAL_REJECTED", "RISK_REJECTED", "AI_REJECTED", "EXECUTION_REJECTED",
+            "FILLED", "MARKET_CLOSED", "DATA_ERROR", "SCANNER_ERROR", "NO_TRADE")
+_RISK_BODY_PREFIXES = ("kill_switch", "MAX_", "INSUFFICIENT", "DAILY", "RISK")
+
+
+def derive_outcome(reason: str, signal: Any = None, traded: bool = False) -> str:
+    """THE one authority for "what stopped this scan" (pipeline, Copilot and API
+    all use it):
+
+      NO_SIGNAL           V8-D evaluated; the technical setup did not exist.
+      SIGNAL_REJECTED     V8-D found a setup but refused it (contract / sizing / payload).
+      AI_REJECTED         the AI Trading Decision gate said REJECT/WAIT or failed safe.
+      RISK_REJECTED       kill switch / position / daily-loss / equity / max-trades guard.
+      EXECUTION_REJECTED  the pipeline/broker refused or errored.
+      FILLED              paper order filled.
+      MARKET_CLOSED · DATA_ERROR · SCANNER_ERROR   the strategy was never evaluated.
+    NO_SIGNAL is never called a rejected signal."""
+    r = str(reason or "")
+    if traded:
+        return "FILLED"
+    if r.startswith("submit_error"):
+        return "EXECUTION_REJECTED"
+    cat = classify_reason(r, signal, traded)
+    if cat in ("MARKET_CLOSED", "DATA_ERROR", "SCANNER_ERROR"):
+        return cat
+    if cat == "NO_SIGNAL":
         return "NO_SIGNAL"
-    return "SIGNAL" if r.startswith(("rejected:", "AI_NO_TRADE", "POSITION_ALREADY_OPEN",
-                                    "signal_payload_incomplete")) else "NO_SIGNAL"
+    if r.startswith(("AI_NO_TRADE", "AI_STRATEGY_MISMATCH")):
+        return "AI_REJECTED"
+    if r.startswith(("POSITION_ALREADY_OPEN", "position_check_error")):
+        return "RISK_REJECTED"
+    if r.startswith("rejected:"):
+        return "RISK_REJECTED" if r.split(":", 1)[1].startswith(_RISK_BODY_PREFIXES) else "EXECUTION_REJECTED"
+    if r.startswith(("no_trade:", "signal_payload_incomplete")):
+        return "SIGNAL_REJECTED"
+    return "NO_TRADE"
 
 
 def _decisions(reason: str, signal: Any, traded: bool) -> Dict[str, str]:
@@ -172,7 +218,7 @@ def _decisions(reason: str, signal: Any, traded: bool) -> Dict[str, str]:
         return {"risk_decision": f"REJECTED:{r[:80]}", "execution_decision": "NOT_ATTEMPTED"}
     if r.startswith("rejected:"):
         body = r.split(":", 1)[1]
-        risky = body.startswith(("kill_switch", "MAX_", "INSUFFICIENT", "DAILY", "RISK"))
+        risky = body.startswith(_RISK_BODY_PREFIXES)
         return {"risk_decision": f"REJECTED:{body[:80]}" if risky else "PASSED",
                 "execution_decision": f"REJECTED:{body[:80]}"}
     if r.startswith("submit_error"):
@@ -217,6 +263,9 @@ def build_scan_record(
     additive and mirrored at top level for convenient reading."""
     now = now or _utc_now()
     det: Dict[str, Any] = dict(details or {})
+    # v8d / chain are stored ONCE at the top level of the record (not duplicated in
+    # `details`, which doubled the size and forced lossy compaction).
+    v8d_full, chain_full = det.pop("v8d", None), det.pop("chain", None)
     det["recorded_at"] = now.isoformat()
     dec = _decisions(reason, signal, traded)
     rejection = list(det.get("rejection") or [])
@@ -243,6 +292,10 @@ def build_scan_record(
         "selected_contract": det.get("selected_contract"),
         "decision": det.get("decision"),
         "ai": det.get("ai"),
+        "outcome": derive_outcome(reason, signal, traded),
+        "v8d": v8d_full,
+        "chain": chain_full,
+        "candle_complete": det.get("last_candle_complete"),
         "rejection": rejection,
         "risk_decision": dec["risk_decision"],
         "execution_decision": dec["execution_decision"],
@@ -274,13 +327,15 @@ def _bounded_json(record: Dict[str, Any]) -> str:
     slim["details"] = det
     slim["rejection"] = [str(x)[:120] for x in (slim.get("rejection") or [])[:5]]
     slim["selected_contract"] = None
+    slim["v8d"] = compact_v8d(slim.get("v8d"))
+    slim["chain"] = None
     txt = json.dumps(slim, default=str)
     if len(txt) <= MAX_RECORD_CHARS:
         return txt
     core_keys = ("seq", "scanned", "traded", "reason", "signal", "recorded_at",
                  "recorded_at_ist", "strategy", "underlying", "category",
                  "data_status", "error", "duration_ms", "next_scan_at",
-                 "risk_decision", "execution_decision")
+                 "risk_decision", "execution_decision", "outcome")
     core = {k: slim.get(k) for k in core_keys}
     core["details"] = {"recorded_at": slim.get("recorded_at"), "truncated": True,
                        "rejection": (slim.get("rejection") or [])[:3]}
@@ -288,7 +343,121 @@ def _bounded_json(record: Dict[str, Any]) -> str:
     return json.dumps(core, default=str)
 
 
-def persist_scan_record(db: Any, record: Dict[str, Any]) -> None:
+def compact_v8d(v: Any) -> Any:
+    """Keep the numbers + pass/fail flags, drop the long per-condition prose."""
+    if not isinstance(v, dict):
+        return v
+    out = {k: v.get(k) for k in ("evaluated", "decision", "decision_label", "candle_count", "ema20", "ema50",
+                                  "ema_separation_pct", "rsi", "atr14_underlying", "price", "pullback_band", "closest_side",
+                                  "binding_condition", "failed", "reason", "strategy_decision", "consistent")
+           if k in v}
+    for side in ("ce", "pe"):
+        if isinstance(v.get(side), dict):
+            out[side] = {k: (v[side][k].get("pass") if isinstance(v[side].get(k), dict) else v[side].get(k))
+                         for k in ("trend", "pullback", "rsi", "reversal", "all_pass", "failed") if k in v[side]}
+    return out
+
+
+_OUTCOME_RANK = {"FILLED": 0, "AI_REJECTED": 1, "RISK_REJECTED": 1, "EXECUTION_REJECTED": 1,
+                 "SIGNAL_REJECTED": 2, "NO_SIGNAL": 3, "MARKET_CLOSED": 4, "DATA_ERROR": 5,
+                 "SCANNER_ERROR": 6, "NO_TRADE": 7}
+
+
+def symbol_summary(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact per-underlying row for the coverage table (size-bounded)."""
+    v = record.get("v8d") or {}
+    px = v.get("price") or {}
+    return {
+        "symbol": record.get("underlying"), "seq": record.get("seq"),
+        "recorded_at": record.get("recorded_at"), "recorded_at_ist": record.get("recorded_at_ist"),
+        "outcome": record.get("outcome"), "reason": str(record.get("reason") or "")[:160],
+        "category": record.get("category"), "signal": record.get("signal"), "traded": bool(record.get("traded")),
+        "candle_count": record.get("candle_count"), "last_candle_ts": record.get("last_candle_ts"),
+        "candle_complete": record.get("candle_complete"),
+        "option_chain_count": record.get("option_chain_count"), "expiry": record.get("expiry"),
+        "v8d_label": v.get("decision_label"), "binding": v.get("binding_condition"),
+        "failed": v.get("failed"), "closest_side": v.get("closest_side"),
+        "ema20": v.get("ema20"), "ema50": v.get("ema50"), "sep_pct": v.get("ema_separation_pct"),
+        "rsi": v.get("rsi"), "close": px.get("close"),
+        "ai_status": (record.get("ai") or {}).get("status"), "error": record.get("error"),
+    }
+
+
+def persist_symbol_record(db: Any, record: Dict[str, Any]) -> None:
+    """Merge this symbol's latest compact record into the per-underlying map. Never raises."""
+    try:
+        sym = str(record.get("underlying") or "").upper()
+        if not sym:
+            return
+        try:
+            cur = json.loads(db.get_setting(SYMBOLS_KEY, "") or "{}")
+            if not isinstance(cur, dict):
+                cur = {}
+        except Exception:
+            cur = {}
+        cur[sym] = symbol_summary(record)
+        db.save_setting(SYMBOLS_KEY, json.dumps(cur, default=str))
+        db.save_setting(LAST_ACTIVITY_KEY, str(record.get("recorded_at") or ""))
+    except Exception:
+        return
+
+
+def read_symbol_records(db: Any) -> List[Dict[str, Any]]:
+    try:
+        cur = json.loads(db.get_setting(SYMBOLS_KEY, "") or "{}")
+        rows = [v for v in cur.values() if isinstance(v, dict)] if isinstance(cur, dict) else []
+    except Exception:
+        return []
+    return sorted(rows, key=lambda r: str(r.get("symbol") or ""))
+
+
+def pick_primary(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The most informative FULL record among the latest per-symbol scans:
+    a fill beats an AI/risk/execution rejection beats a V8-D-rejected setup beats
+    NO_SIGNAL beats 'market closed' beats data/scanner errors; ties → newest."""
+    best = None
+    for r in records:
+        if not r:
+            continue
+        key = (_OUTCOME_RANK.get(str(r.get("outcome") or "NO_TRADE"), 7), -_ts(r.get("recorded_at")))
+        if best is None or key < best[0]:
+            best = (key, r)
+    return best[1] if best else None
+
+
+def _ts(raw: Any) -> float:
+    d = _parse_iso(raw)
+    return d.timestamp() if d else 0.0
+
+
+PAPER_DEFAULT_UNDERLYINGS = ("NIFTY50", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+
+
+def parse_underlyings(env: Optional[Dict[str, str]] = None) -> List[str]:
+    """Which underlyings the paper scanner evaluates.
+
+      PAPER_UNDERLYINGS = NIFTY50,SENSEX | ALL     (preferred)
+      PAPER_UNDERLYING  = NIFTY50                  (legacy single symbol)
+      default           = all six supported underlyings — the same universe the
+                          backtest defaults to (VALID_OPTION_INDICES). Scanning
+                          fewer symbols than the strategy/backtest universe is
+                          opt-in, never the silent default.
+    Unknown names are ignored (never invented)."""
+    e = env if env is not None else os.environ
+    raw = (e.get("PAPER_UNDERLYINGS") or "").strip()
+    if not raw:
+        raw = (e.get("PAPER_UNDERLYING") or "").strip()
+    if not raw or raw.upper() == "ALL":
+        return list(PAPER_DEFAULT_UNDERLYINGS)
+    out: List[str] = []
+    for part in raw.replace(";", ",").split(","):
+        name = part.strip().upper()
+        if name in PAPER_DEFAULT_UNDERLYINGS and name not in out:
+            out.append(name)
+    return out or list(PAPER_DEFAULT_UNDERLYINGS)
+
+
+def persist_scan_record(db: Any, record: Dict[str, Any], history_record: Optional[Dict[str, Any]] = None) -> None:
     """Persist the record + a compact history entry. Never raises."""
     try:
         db.save_setting(SCAN_DETAIL_KEY, _bounded_json(record))
@@ -305,11 +474,12 @@ def persist_scan_record(db: Any, record: Dict[str, Any]) -> None:
                 hist = []
         except Exception:
             hist = []
+        h = history_record or record
         hist.append({
-            "seq": record.get("seq"), "at": record.get("recorded_at"),
-            "reason": str(record.get("reason") or "")[:120],
-            "category": record.get("category"), "signal": record.get("signal"),
-            "traded": bool(record.get("traded")),
+            "seq": h.get("seq"), "at": h.get("recorded_at"), "symbol": h.get("underlying"),
+            "reason": str(h.get("reason") or "")[:120],
+            "category": h.get("category"), "outcome": h.get("outcome"), "signal": h.get("signal"),
+            "traded": bool(h.get("traded")),
         })
         db.save_setting(SCAN_HISTORY_KEY, json.dumps(hist[-HISTORY_LEN:]))
     except Exception:
@@ -333,6 +503,19 @@ def read_scan_history(db: Any) -> List[Dict[str, Any]]:
         return v if isinstance(v, list) else []
     except Exception:
         return []
+
+
+def symbol_scan_interval_seconds(n_symbols: int = 1) -> float:
+    """Minimum seconds between scans of ONE underlying. With several underlyings
+    each is re-scanned at most every 20 s (V8-D only changes when a 5-minute bar
+    closes; the cycle must stay well inside the Upstox request budget)."""
+    base = scan_interval_seconds()
+    if n_symbols <= 1:
+        return base
+    try:
+        return max(base, float(os.environ.get("PAPER_SYMBOL_SCAN_INTERVAL_SEC", "20")))
+    except (TypeError, ValueError):
+        return max(base, 20.0)
 
 
 def scan_interval_seconds() -> float:
@@ -361,8 +544,13 @@ def summarize_record(rec: Dict[str, Any]) -> str:
     if cat == "SCANNER_ERROR":
         err = rec.get("error") or reason
         return f"Scanner iteration at {when} IST failed ({err}). V8-D was not evaluated."
+    if cat == "SIGNAL" and str(rec.get("outcome") or "") == "SIGNAL_REJECTED":
+        return (f"Scanner ran at {when} IST. V8-D found a setup but REJECTED the signal "
+                f"({'; '.join(rej[:3]) if rej else reason}). No trade.")
     if cat == "NO_SIGNAL":
-        why = "; ".join(rej[:3]) if rej else "pullback/reversal criteria were not met"
+        v8 = rec.get("v8d") or {}
+        why = (v8.get("reason") if v8.get("evaluated") and v8.get("reason")
+               else "; ".join(rej[:3]) if rej else "pullback/reversal criteria were not met")
         return (f"Scanner ran at {when} IST. V8-D evaluated successfully. "
                 f"No signal because {why}.")
     if reason.startswith("AI_NO_TRADE"):
@@ -380,7 +568,8 @@ _SCANNER_LABEL = {
 }
 
 
-def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Optional[Dict[str, Any]] = None,
+                   symbols: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """ONE honest, UI-ready view of the decision pipeline for the latest scan:
 
         Scanner · Market · Strategy · Latest Signal · AI Decision · AI Reason ·
@@ -403,8 +592,13 @@ def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Op
         "ai_enabled": bool((ai_fallback or {}).get("enabled")) if ai_fallback else None,
         "risk_check": "NOT EVALUATED",
         "risk_detail": None,
-        "execution": "NO TRADE",
+        "execution": "NOT ATTEMPTED",
         "execution_detail": None,
+        "outcome": None,            # NO_SIGNAL | SIGNAL_REJECTED | AI_REJECTED | RISK_REJECTED | EXECUTION_REJECTED | FILLED | MARKET_CLOSED | DATA_ERROR | SCANNER_ERROR
+        "final": "NO TRADE",        # the only two final states: NO TRADE | FILLED (PAPER)
+        "v8d": None,                # per-condition V8-D diagnostics for the primary symbol
+        "primary_symbol": None,
+        "symbols": list(symbols or []),   # latest scan of EVERY scanned underlying
         "scan_seq": None,
         "scan_time_ist": None,
         "summary": "No scan has been recorded yet.",
@@ -425,6 +619,10 @@ def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Op
     contract = rec.get("selected_contract") or det.get("selected_contract") or {}
     otype = str((contract or {}).get("option_type") or "").upper()
 
+    outcome = rec.get("outcome") or derive_outcome(reason, rec.get("signal"), rec.get("traded"))
+    base["outcome"] = outcome
+    base["v8d"] = rec.get("v8d") or det.get("v8d")
+    base["primary_symbol"] = rec.get("underlying")
     base["scan_seq"] = rec.get("seq")
     base["scan_time_ist"] = rec.get("recorded_at_ist")
     base["strategy"] = rec.get("strategy") or base["strategy"]
@@ -441,10 +639,16 @@ def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Op
     if is_buy:
         base["latest_signal"] = f"BUY {otype}".strip()
         base["signal_detail"] = "V8-D produced a BUY signal."
+    elif outcome == "SIGNAL_REJECTED":
+        base["latest_signal"] = "SIGNAL REJECTED (BY V8-D)"
+        rej = [str(x) for x in (rec.get("rejection") or det.get("rejection") or [])]
+        base["signal_detail"] = "; ".join(rej[:3]) if rej else reason
     elif cat == "NO_SIGNAL":
         base["latest_signal"] = "NO SIGNAL"
+        v8 = base["v8d"] or {}
         rej = [str(x) for x in (rec.get("rejection") or det.get("rejection") or [])]
-        base["signal_detail"] = "; ".join(rej[:3]) if rej else "V8-D evaluated: pullback/reversal criteria not met."
+        base["signal_detail"] = (v8.get("reason") if v8.get("evaluated") and v8.get("reason") else
+                                 "; ".join(rej[:3]) if rej else "V8-D evaluated: pullback/reversal criteria not met.")
     elif cat == "MARKET_CLOSED":
         base["latest_signal"] = "NOT EVALUATED — MARKET CLOSED"
         base["signal_detail"] = reason
@@ -481,7 +685,8 @@ def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Op
         if not is_buy:
             why = ("market closed" if cat == "MARKET_CLOSED" else
                    "no usable market data" if cat == "DATA_ERROR" else
-                   "scanner error" if cat == "SCANNER_ERROR" else "no V8-D BUY signal")
+                   "scanner error" if cat == "SCANNER_ERROR" else
+                   "V8-D rejected the signal first" if outcome == "SIGNAL_REJECTED" else "no V8-D BUY signal")
             base["ai_reason"] = f"Not consulted: {why}."
         else:
             base["ai_reason"] = ai.get("reason") or "AI was not consulted for this signal."
@@ -491,7 +696,8 @@ def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Op
     blocked_by_ai = ai_status in ("REJECTED", "WAIT", "UNAVAILABLE")
     if not is_buy:
         base["risk_check"] = "NOT EVALUATED"
-        base["risk_detail"] = "No signal reached the risk gate."
+        base["risk_detail"] = ("Stopped earlier by V8-D." if outcome == "SIGNAL_REJECTED"
+                               else "No signal reached the risk gate.")
     elif blocked_by_ai:
         base["risk_check"] = "NOT EVALUATED"
         base["risk_detail"] = "Stopped earlier by the AI gate."
@@ -515,8 +721,9 @@ def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Op
         base["execution"] = "ERROR"
         base["execution_detail"] = edec.split(":", 1)[-1]
     else:
-        base["execution"] = "NO TRADE"
+        base["execution"] = "NOT ATTEMPTED"     # no order was ever built — distinct from a rejected order
         base["execution_detail"] = None
+    base["final"] = "FILLED (PAPER)" if traded else "NO TRADE"
 
     # One-sentence explanation
     when = _ist_clock(_parse_iso(rec.get("recorded_at")))
@@ -598,7 +805,16 @@ def compute_runtime_state(
     inflight_dt = _parse_iso(_get(SCAN_INFLIGHT_KEY))
     inflight_age = (now - inflight_dt).total_seconds() if inflight_dt else None
     scan_in_progress = inflight_age is not None and inflight_age < 120.0
-    scan_stale_after = max(45.0, 6.0 * interval)
+    # The persisted record is the most informative one of the latest per-symbol
+    # scans; "when did the scanner last run" is the NEWEST scan of ANY symbol.
+    all_symbol_rows = read_symbol_records(db)
+    symbols_current = [r for r in all_symbol_rows
+                       if start_dt is None or (_parse_iso(r.get("recorded_at")) or start_dt) >= start_dt]
+    activity_dt = _parse_iso(_get(LAST_ACTIVITY_KEY)) or rec_dt
+    if activity_dt is not None and (rec_dt is None or activity_dt > rec_dt):
+        scan_age = (now - activity_dt).total_seconds()
+    n_symbols = max(1, len(all_symbol_rows))
+    scan_stale_after = max(45.0, 6.0 * interval, 3.0 * symbol_scan_interval_seconds(n_symbols) + 15.0 * n_symbols)
     market_scan_setting = _get(MARKET_SCAN_KEY) or None
 
     # AI layer hint for states where no scan record exists yet (env + operator toggle)
@@ -635,7 +851,8 @@ def compute_runtime_state(
 
     def out(state: str, summary: str) -> Dict[str, Any]:
         d = dict(base)
-        d["pipeline"] = build_pipeline(rec if rec_current else None, state, ai_fallback=ai_hint)
+        d["pipeline"] = build_pipeline(rec if rec_current else None, state, ai_fallback=ai_hint,
+                                       symbols=symbols_current)
         d.update({"state": state, "label": _STATE_LABEL[state],
                   "severity": _STATE_SEVERITY[state], "summary": summary,
                   "scanning": state in (RUNNING_SCANNING, RUNNING_NO_SIGNAL,
@@ -699,7 +916,7 @@ def compute_runtime_state(
 
 
 __all__ = [
-    "ALL_STATES", "build_pipeline", "build_scan_record", "classify_reason", "compute_runtime_state",
+    "ALL_STATES", "OUTCOMES", "PAPER_DEFAULT_UNDERLYINGS", "parse_underlyings", "build_pipeline", "build_scan_record", "derive_outcome", "classify_reason", "compute_runtime_state",
     "describe_exception", "persist_scan_record", "read_scan_history", "read_scan_record",
     "redact", "scan_interval_seconds", "summarize_record", "to_ist_str",
 ]

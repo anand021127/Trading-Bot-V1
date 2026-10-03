@@ -229,3 +229,13 @@ do not trade on it.
 | execution | FILLED (PAPER) · REJECTED · ERROR · NO TRADE |
 
 `AI DISABLED` means `AI_DECISION_ENABLED=false` (or the Operations toggle is off): trades run on V8-D + risk controls only.
+
+
+## Why is there no signal? (read this before assuming a bug)
+1. Overview → *Decision pipeline* → "V8-D conditions" shows, for the scanned symbol, EMA20/EMA50/separation/RSI and which of
+   trend · pullback · RSI · reversal failed on the CE and PE side. "Symbols scanned" lists the latest result of every underlying.
+2. States: `NO_SIGNAL` (setup did not exist — nothing was rejected, AI/risk not reached) · `SIGNAL_REJECTED` (V8-D found a setup and refused it)
+   · `AI_REJECTED` · `RISK_REJECTED` · `EXECUTION_REJECTED` · `FILLED`. Execution is `NOT ATTEMPTED` unless an order was actually built.
+3. On real 2024 data V8-D yields ~1–2 setups per symbol per day, mostly blocked by the trend filter; with a single symbol roughly half
+   of the days have none. By default all six underlyings are scanned (`PAPER_UNDERLYINGS`).
+4. V8-D is evaluated on COMPLETED 5-minute candles only; a signal appears within seconds after a bar closes.

@@ -38,8 +38,9 @@ from backend.config.runtime_config import get_effective_settings
 from backend.database.db_manager import DatabaseManager
 from backend.paper.paper_runtime import PaperStartupError, PaperTradingRuntime
 from backend.paper.scan_state import (
-    MARKET_SCAN_KEY, SCAN_INFLIGHT_KEY, SCAN_SEQ_KEY,
-    build_scan_record, describe_exception, persist_scan_record, scan_interval_seconds,
+    MARKET_SCAN_KEY, SCAN_INFLIGHT_KEY, SCAN_SEQ_KEY, SCAN_TS_KEY, SYMBOL_LIST_KEY,
+    build_scan_record, describe_exception, parse_underlyings, persist_scan_record,
+    persist_symbol_record, pick_primary, scan_interval_seconds, symbol_scan_interval_seconds,
 )
 from backend.paper.worker_lock import WorkerLock, WorkerLockError
 from backend.strategy.trading_engine import BotState
@@ -73,7 +74,10 @@ class PaperWorker:
         self._stop = False
         self._loop = 0
         # ── scan scheduling / diagnostics (see backend/paper/scan_state.py) ──
-        self.scanner = None
+        self.scanner = None                       # primary (first) scanner — kept for single-symbol paths/tests
+        self.scanners: Dict[str, Any] = {}        # one scanner per underlying (multi-symbol)
+        self._sym_next: Dict[str, float] = {}     # per-underlying next-due (monotonic)
+        self._latest_full: Dict[str, Dict[str, Any]] = {}   # newest FULL record per underlying
         self._suppress_market_scan = False
         self._scan_interval = scan_interval_seconds()
         self._next_scan_mono = 0.0
@@ -236,20 +240,42 @@ class PaperWorker:
     # ── scan iteration ──────────────────────────────────────────────────────
     def _persist(self, *, scanned: bool, traded: bool, reason: str, signal: Any = None,
                  details: Optional[Dict[str, Any]] = None, started: float,
-                 error: Optional[str] = None) -> None:
+                 error: Optional[str] = None, underlying: Optional[str] = None) -> None:
         self._scan_seq += 1
         now = datetime.now(timezone.utc)
+        sym = (underlying or getattr(self.scanner, "underlying", None)
+               or os.environ.get("PAPER_UNDERLYING", "NIFTY50"))
         rec = build_scan_record(
             seq=self._scan_seq, scanned=scanned, traded=traded, reason=reason,
             signal=signal, details=details,
             strategy=os.environ.get("TRADING_STRATEGY", "V8_D_PULLBACK_ATM"),
-            underlying=(getattr(self.scanner, "underlying", None)
-                        or os.environ.get("PAPER_UNDERLYING", "NIFTY50")),
+            underlying=sym,
             duration_ms=(time.monotonic() - started) * 1000.0,
             next_scan_at=now + timedelta(seconds=self._scan_interval),
             error=error, now=now,
         )
-        persist_scan_record(self.db, rec)
+        if underlying is not None:
+            # latest result for THIS underlying → coverage table + primary pick
+            persist_symbol_record(self.db, rec)
+            self._latest_full[str(sym).upper()] = rec
+            fresh = [r for r in self._latest_full.values()
+                     if (now - datetime.fromisoformat(str(r["recorded_at"]))).total_seconds() < 300]
+            primary = pick_primary(fresh) or rec
+        else:
+            primary = rec
+        persist_scan_record(self.db, primary, history_record=rec)
+        try:   # monotonic counter + newest activity, independent of which record is "primary"
+            self.db.save_setting(SCAN_SEQ_KEY, str(self._scan_seq))
+            self.db.save_setting(SCAN_TS_KEY, str(rec.get("recorded_at") or ""))
+        except Exception:
+            pass
+
+    def _active_scanners(self) -> Dict[str, Any]:
+        if self.scanners:
+            return self.scanners
+        if self.scanner is not None:
+            return {str(getattr(self.scanner, "underlying", "NIFTY50")).upper(): self.scanner}
+        return {}
 
     def _maybe_scan(self) -> None:
         assert self.runtime is not None
@@ -259,34 +285,44 @@ class PaperWorker:
         if mono < self._next_scan_mono:
             return
         self._next_scan_mono = mono + self._scan_interval
-        started = mono
 
         # Scanner not armed (no token at startup / init failure): retry the
         # arming periodically — a token can appear AFTER the worker started
         # (OAuth completed later, daily token rotation) — and record the
         # state every iteration instead of staying silent forever.
-        if self.scanner is None:
+        if self.scanner is None and not self.scanners:
             if mono - self._last_scanner_init_mono >= 30.0:
                 self._last_scanner_init_mono = mono
                 self._init_market_scanner()
-            if self.scanner is None:
+            if self.scanner is None and not self.scanners:
                 why = self.db.get_setting(MARKET_SCAN_KEY, "") or "disabled_no_token"
                 self._persist(
                     scanned=False, traded=False, reason=f"scanner_disabled:{why}",
                     details={"data_status": "NO_MARKET_DATA_SOURCE",
                              "note": "No Upstox token / market-data source — V8-D cannot be evaluated"},
-                    started=started,
+                    started=mono,
                     error=f"market scanner not armed ({why})",
                 )
                 return
 
+        scanners = self._active_scanners()
+        n = len(scanners)
+        sym_interval = symbol_scan_interval_seconds(n)
+        for sym, sc in scanners.items():
+            if n > 1 and mono < self._sym_next.get(sym, 0.0):
+                continue                       # not due yet — each underlying has its own cadence
+            self._sym_next[sym] = time.monotonic() + sym_interval
+            self._scan_symbol(sym, sc, started=time.monotonic(), explicit=(n > 1 or bool(self.scanners)))
+
+    def _scan_symbol(self, sym: str, scanner: Any, *, started: float, explicit: bool) -> None:
+        """One V8-D scan of ONE underlying. Fully isolated: an exception here is
+        persisted for THIS symbol and never stops the other symbols."""
+        und = sym if explicit else None
         try:
             st = BotState.status()
             # Authoritative, day-scoped counter (rolls at the IST/paper day
-            # boundary). The previous persisted `paper_trades_today` setting
-            # was a LIFETIME counter that never reset, so after
-            # MAX_TRADES_PER_DAY cumulative trades every scan on every future
-            # day would be rejected with "Daily trade limit reached".
+            # boundary), re-read per symbol so a fill on one underlying is
+            # visible to the next one in the same cycle.
             try:
                 self.runtime._roll_day_if_needed()
             except Exception:
@@ -295,7 +331,7 @@ class PaperWorker:
             self._scan_inflight_since = time.monotonic()
             self.db.save_setting(SCAN_INFLIGHT_KEY, datetime.now(timezone.utc).isoformat())
             try:
-                scan = self.scanner.scan_once(
+                scan = scanner.scan_once(
                     self.runtime,
                     trades_today=trades_today,
                     kill_switch_active=bool(st.get("kill_switch_active")),
@@ -309,7 +345,7 @@ class PaperWorker:
             self._persist(
                 scanned=scan.scanned, traded=scan.traded, reason=scan.reason,
                 signal=scan.signal, details=scan.details, started=started,
-                error=(scan.details or {}).get("error"),
+                error=(scan.details or {}).get("error"), underlying=und,
             )
             if not (scan.details or {}).get("error"):
                 # An iteration completed without error → any earlier worker
@@ -325,16 +361,16 @@ class PaperWorker:
             except Exception:
                 pass
             if scan.traded:
-                logger.info("Paper trade taken via market scan: %s", scan.details)
+                logger.info("Paper trade taken via market scan (%s): %s", sym, scan.details)
         except Exception as exc:
             # NEVER swallow silently: log with traceback, persist a full scan
             # record carrying the (redacted) error, and expose it as
             # paper_worker_last_error so the UI shows RUNNING_SCANNER_ERROR.
-            logger.exception("Market scan tick failed")
+            logger.exception("Market scan tick failed (%s)", sym)
             msg = describe_exception(exc)
             self._persist(scanned=False, traded=False,
                           reason=f"scan_error:{type(exc).__name__}",
-                          details={"error": msg}, started=started, error=msg)
+                          details={"error": msg}, started=started, error=msg, underlying=und)
             try:
                 self.db.save_setting(ERR_KEY, msg[:500])
             except Exception:
@@ -531,20 +567,28 @@ class PaperWorker:
                 ai_note = f"init_failed:{type(exc).__name__}"
                 ai_engine = None
             self.db.save_setting("ai_decision_layer", ai_note)
-            self.scanner = PaperMarketScanner(
-                data=data,
-                strategy=self.runtime.strategy,
-                underlying=os.environ.get("PAPER_UNDERLYING", "NIFTY50"),
-                account_equity=self._current_account_equity(self.db),
-                max_candle_age_seconds=float(os.environ.get("PAPER_MAX_CANDLE_AGE_SEC", "900")),
-                min_bars=int(os.environ.get("PAPER_MIN_CANDLE_BARS", "60")),
-                ai_engine=ai_engine,
-                ai_decision_pipeline_strategy=os.environ.get("TRADING_STRATEGY", "V8_D_PULLBACK_ATM"),
-            )
+            symbols = parse_underlyings()
+            self.scanners = {}
+            for sym in symbols:
+                self.scanners[sym] = PaperMarketScanner(
+                    data=data,
+                    strategy=self.runtime.strategy,          # ONE strategy object: identical V8-D for every symbol
+                    underlying=sym,
+                    account_equity=self._current_account_equity(self.db),
+                    max_candle_age_seconds=float(os.environ.get("PAPER_MAX_CANDLE_AGE_SEC", "900")),
+                    min_bars=int(os.environ.get("PAPER_MIN_CANDLE_BARS", "60")),
+                    ai_engine=ai_engine,                      # ONE AI gate shared by all symbols
+                    ai_decision_pipeline_strategy=os.environ.get("TRADING_STRATEGY", "V8_D_PULLBACK_ATM"),
+                )
+            self.scanner = next(iter(self.scanners.values()))
+            try:
+                self.db.save_setting(SYMBOL_LIST_KEY, json.dumps(symbols))
+            except Exception:
+                pass
             self.db.save_setting("paper_worker_market_scan", "enabled")
             logger.info(
                 "Market-driven V8-D scanner enabled for %s (AI decision layer: %s)",
-                self.scanner.underlying, ai_note,
+                ",".join(symbols), ai_note,
             )
         except Exception as exc:
             logger.warning("Could not init market scanner: %s", type(exc).__name__)

@@ -100,7 +100,7 @@ def test_ai_reject_and_wait_block_the_order(worker, outputs, status, label):
     assert pipe["latest_signal"] == "BUY CE"
     assert pipe["ai_decision"].startswith(("REJECTED", "WAIT"))
     assert pipe["ai_reason"]                                   # the actual reason is shown
-    assert pipe["risk_check"] == "NOT EVALUATED" and pipe["execution"] == "NO TRADE"
+    assert pipe["risk_check"] == "NOT EVALUATED" and pipe["execution"] == "NOT ATTEMPTED"
     assert "AI" in pipe["summary"] and "No trade" in pipe["summary"]
 
 
@@ -119,7 +119,7 @@ def test_ai_failure_fails_safe_and_is_reported_as_unavailable_not_as_a_verdict(w
     assert not worker.db.list_trades() and not worker.db.get_open_positions()
     pipe, st = _pipeline(worker)
     assert pipe["ai_decision"] == "UNAVAILABLE — FAILED SAFE (NO TRADE)"
-    assert pipe["execution"] == "NO TRADE"
+    assert pipe["execution"] == "NOT ATTEMPTED"
 
 
 def test_slow_ai_is_bounded_then_replays_without_a_second_inference(worker, monkeypatch):
@@ -219,7 +219,7 @@ def test_duplicate_signal_does_not_reconsult_ai_or_open_a_second_position(worker
     assert len(eng.provider.calls) == 1                           # guard sits BEFORE the AI: no 2nd inference
     assert len(worker.db.list_trades()) == 1 and len(worker.db.get_open_positions()) == 1
     pipe, _ = _pipeline(worker)
-    assert pipe["execution"] == "NO TRADE" and pipe["latest_signal"] == "BUY CE"
+    assert pipe["execution"] == "NOT ATTEMPTED" and pipe["latest_signal"] == "BUY CE"
 
 
 def test_stale_market_data_never_reaches_the_ai_or_the_broker(worker):
@@ -273,7 +273,7 @@ def test_no_signal_shows_the_actual_reason_and_ai_not_evaluated(worker):
     pipe, _ = _pipeline(worker)
     assert pipe["latest_signal"] == "NO SIGNAL" and pipe["signal_detail"]
     assert pipe["ai_decision"] == "NOT EVALUATED" and "no V8-D BUY" in pipe["ai_reason"]
-    assert pipe["risk_check"] == "NOT EVALUATED" and pipe["execution"] == "NO TRADE"
+    assert pipe["risk_check"] == "NOT EVALUATED" and pipe["execution"] == "NOT ATTEMPTED"
     assert eng.provider.calls == []
 
 
@@ -286,7 +286,7 @@ def test_market_closed_is_shown_as_market_closed_not_as_a_strategy_outcome(worke
     pipe, st = _pipeline(worker)
     assert pipe["market"] == "MARKET CLOSED"
     assert pipe["latest_signal"] == "NOT EVALUATED — MARKET CLOSED"
-    assert pipe["ai_decision"] == "NOT EVALUATED" and pipe["execution"] == "NO TRADE"
+    assert pipe["ai_decision"] == "NOT EVALUATED" and pipe["execution"] == "NOT ATTEMPTED"
     assert st["state"] == ss.RUNNING_WAITING_FOR_MARKET
     assert eng.provider.calls == []
 
@@ -303,7 +303,7 @@ def test_data_failure_is_shown_as_data_problem(worker):
 
 def test_pipeline_before_any_scan_is_honest(worker):
     pipe, _ = _pipeline(worker)
-    assert pipe["latest_signal"] == "NO SCAN YET" and pipe["execution"] == "NO TRADE"
+    assert pipe["latest_signal"] == "NO SCAN YET" and pipe["execution"] == "NOT ATTEMPTED"
     assert pipe["ai_decision"] in ("DISABLED", "NOT EVALUATED")
 
 
