@@ -12,6 +12,7 @@ import {
 import type { Settings, UniverseConfigResponse } from '../types'
 import toast from 'react-hot-toast'
 import api from '../api/client'
+import ControlTokenCard from '../components/ControlTokenCard'
 
 interface BrokerStatus {
   overall: 'CONNECTED' | 'DISCONNECTED'
@@ -361,6 +362,8 @@ export default function Settings() {
            : <><Save size={13} /> Save Settings</>}
         </button>
       </div>
+
+      <ControlTokenCard />
 
       {/* Broker Connection Status */}
       <Section title="Broker Connection Status">

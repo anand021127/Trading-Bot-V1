@@ -19,7 +19,7 @@ const CTX = {
   scanner: { available: true, state_label: 'Running — no signal', scan_seq: 42, candle_count: 70, option_chain_count: 120, expiry: '2026-10-06' },
   latest_rejection: { gate_chain: { available: true, stage: 'NO_SIGNAL', human_summary: 'V8-D evaluated; no pullback.', traded: false, gates: { v8d_signal: { status: 'REJECTED' } } } },
   today: { available: true, trades_today: 0, configured_max_trades: 20, wins: 0, losses: 0, realized_pnl: 0 },
-  risk: { available: true, trades_used: 0, max_trades: 20, daily_pnl: 0 },
+  risk: { available: true, trades_used: 0, max_trades: 20, strategy_daily_cap: 3, effective_max_trades: 3, daily_pnl: 0 },
   positions: { available: true, count: 0, positions: [] },
   recent_trades: { available: true, count: 0, trades: [] },
   backtest: { available: true, config: { start_date: '2025-09-28', end_date: '2026-09-29' },
@@ -27,6 +27,7 @@ const CTX = {
   ai: { available: true, enabled: true, provider: 'ollama', model: 'llama3', latest: { available: true, decision: 'WAIT', confidence: 61, reason_codes: ['LOW_VOL'], latency_ms: 812 } },
   pipeline: { scanner: 'RUNNING', market: 'LIVE', strategy: 'V8_D_PULLBACK_ATM', latest_signal: 'NO SIGNAL',
     ai_decision: 'NOT EVALUATED', ai_reason: 'Not consulted: no V8-D BUY signal.', risk_check: 'NOT EVALUATED', execution: 'NOT ATTEMPTED', final: 'NO TRADE', outcome: 'NO_SIGNAL' },
+  errors: { available: true, note: null as string | null, recent_error_lines: [] as string[], recent_health_events: [] as unknown[] },
   configuration_mismatches: [] as { message: string }[],
 }
 
@@ -297,6 +298,41 @@ describe('Live Context', () => {
     // the decision pipeline (scanner → signal → AI → risk → execution) is shown compactly at the top
     expect(within(aside).getByTestId('decision-pipeline')).toHaveTextContent('NO SIGNAL')
     expect(within(aside).getByTestId('pipe-ai-decision')).toHaveTextContent('NOT EVALUATED')
+  })
+
+  it('uses the REAL backend field names: errors.recent_error_lines and websocket.connection_status', async () => {
+    wireGet({ '/api/copilot/context': () => ({ ...CTX,
+      websocket: { available: true, connection_status: 'unknown', is_connected: false },
+      errors: { available: true, note: null, recent_error_lines: ['2026-10-03 ERROR boom'], recent_health_events: [{ event: 'ws_down' }] } }) })
+    render(<Copilot />)
+    const errs = await screen.findByTestId('ctx-errors')
+    expect(errs).toHaveTextContent('2')                       // count badge
+    expect(errs).toHaveTextContent('ERROR boom')
+    expect(errs).toHaveTextContent('ws_down')
+    expect(screen.getByTestId('ctx-market')).toHaveTextContent('unknown')   // fallback connection_status
+    expect(screen.queryByTestId('ctx-problems')).not.toBeInTheDocument()    // stale log lines never pin the banner
+  })
+
+  it('shows the EFFECTIVE daily trade limit (V8-D cap 3), not the misleading risk limit 20', async () => {
+    render(<Copilot />)
+    const risk = await screen.findByTestId('ctx-risk')
+    expect(risk).toHaveTextContent('0/3 trades')
+    expect(risk).toHaveTextContent('0 / 3')
+    expect(screen.getByTestId('trade-cap-breakdown')).toHaveTextContent('V8-D allows 3/day, risk limit 20/day')
+    expect(risk).not.toHaveTextContent('0 / 20')
+  })
+
+  it('flags a statistically NEGATIVE backtest instead of showing P&L alone', async () => {
+    wireGet({ '/api/copilot/context': () => ({ ...CTX, backtest: { ...CTX.backtest, summary: { ...CTX.backtest.summary,
+      edge: { verdict: 'NEGATIVE_EXPECTANCY', n_trades: 171, mean_r: -0.1568, ci95_low: -0.2766, ci95_high: -0.0301,
+        message: 'The average trade LOSES money and the 95 % interval excludes zero: this is not bad luck. Do not trade this with real money.' } } } }) })
+    render(<Copilot />)
+    const e = await screen.findByTestId('backtest-edge')
+    expect(e).toHaveTextContent('Edge: NEGATIVE EXPECTANCY')
+    expect(e).toHaveTextContent('-0.157 R/trade')
+    expect(e).toHaveTextContent('-0.277 … -0.030')
+    expect(e).toHaveTextContent('Do not trade this with real money')
+    expect(e).toHaveAttribute('role', 'alert')
   })
 
   it('surfaces mismatches/errors prominently ONLY when present', async () => {

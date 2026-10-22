@@ -9,7 +9,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from backend.api.control_auth import require_control_token
 
 router = APIRouter()
 
@@ -39,7 +40,7 @@ async def get_scanner_symbol(symbol: str) -> Dict[str, Any]:
     return result.to_dict()
 
 
-@router.post("/scan-now")
+@router.post("/scan-now", dependencies=[Depends(require_control_token)])
 async def trigger_scan_now() -> Dict[str, Any]:
     """Force one synchronous full pass right now (useful right after
     changing the universe, instead of waiting for the background loop)."""

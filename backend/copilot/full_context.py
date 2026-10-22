@@ -384,7 +384,8 @@ def _today(db: Any) -> Dict[str, Any]:
             "date": today,
             "trades_today": wins + losses,
             "configured_max_trades": max_trades,
-            "trades_remaining": max(0, max_trades - (wins + losses)) if max_trades else None,
+            **_caps_extra(max_trades),
+            "trades_remaining": (max(0, _eff_cap(max_trades) - (wins + losses)) if _eff_cap(max_trades) else None),
             "wins": wins,
             "losses": losses,
             "realized_pnl": round(pnl, 2),
@@ -492,6 +493,7 @@ def _risk(app_state: Any) -> Dict[str, Any]:
                     "from the effective configuration + the paper worker's durable "
                     "daily counters.",
             "max_trades": s.risk.max_trades_per_day,
+            **_caps_extra(s.risk.max_trades_per_day),
             "trades_used": int(counters.get("trades_taken") or 0),
             "daily_pnl": round(float(counters.get("realized_pnl") or 0), 2),
             "max_daily_loss_pct": s.risk.max_daily_loss_pct,
@@ -727,6 +729,13 @@ def _backtest_summary() -> Dict[str, Any]:
                 "total_charges": result.get("total_charges"),
             },
         }
+        try:   # honest verdict on whether the result is distinguishable from luck (fixed rules)
+            from backend.backtest.edge_assessment import edge_assessment
+            tl = result.get("trade_log") or []
+            if tl:
+                summary["edge"] = edge_assessment(tl)
+        except Exception:
+            pass
         for key in ("rejection_reason_counts", "rejection_breakdown", "exit_reason_counts",
                     "dte_breakdown", "symbol_breakdown", "option_type_breakdown"):
             if isinstance(result, dict) and result.get(key):
@@ -740,12 +749,60 @@ def _backtest_summary() -> Dict[str, Any]:
 
 
 # ── MISMATCHES / SYSTEM_ERRORS ──────────────────────────────────────────
-def _mismatches() -> List[Dict[str, Any]]:
+def _caps_extra(configured: Any) -> Dict[str, Any]:
+    """strategy_daily_cap + effective_max_trades (the smaller of the risk limit and V8-D's cap)."""
     try:
-        from backend.config.runtime_config import detect_config_mismatches
-        return detect_config_mismatches()
+        from backend.strategy.v8d_diagnostics import daily_trade_caps
+        c = daily_trade_caps(int(configured or 0) or None)
+        return {"strategy_daily_cap": c["strategy_daily_cap"], "effective_max_trades": c["effective_max_trades"]}
+    except Exception:
+        return {}
+
+
+def _eff_cap(configured: Any) -> Optional[int]:
+    return _caps_extra(configured).get("effective_max_trades")
+
+
+def _funding_mismatch(db: Any) -> List[Dict[str, Any]]:
+    """The paper capital must be able to fund ONE lot, otherwise V8-D rejects every valid setup
+    with "0 lots" and the bot can never trade. Evidence = the real chain of each scanned symbol."""
+    try:
+        from backend.paper.scan_state import read_symbol_records
+        rows = [r for r in read_symbol_records(db) if r.get("min_equity_one_lot")]
     except Exception:
         return []
+    short = [r for r in rows if r.get("can_fund_one_lot") is False]
+    if not short:
+        return []
+    eq = float(short[0].get("equity") or 0)
+    cheapest = min(float(r["min_equity_one_lot"]) for r in rows)
+    names = ", ".join(f"{r['symbol']} ≥ ₹{float(r['min_equity_one_lot']):,.0f}"
+                      for r in sorted(short, key=lambda r: r["min_equity_one_lot"]))
+    return [{"key": "capital_cannot_fund_one_lot", "saved_value": eq, "runtime_value": cheapest, "source": "funding",
+             "severity": "error",
+             "message": (f"Account equity ₹{eq:,.0f} cannot fund one lot for {len(short)}/{len(rows)} scanned symbols under V8-D's "
+                         f"risk caps (2.5 % risk, 18 % allocation): {names}. Every valid setup there is rejected with "
+                         f"'0 lots'. Raise TRADING_CAPITAL (paper) to at least ₹{cheapest:,.0f}.")}]
+
+
+def _mismatches(db: Any = None) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    try:
+        from backend.config.runtime_config import detect_config_mismatches
+        out = list(detect_config_mismatches())
+    except Exception:
+        out = []
+    try:   # holiday table about to run out / already missing → the bot would fail closed
+        from backend.market.calendar import exchange_calendar
+        cal = exchange_calendar.coverage_info()
+        if cal.get("warning"):
+            out.append({"key": "exchange_holidays", "saved_value": None, "runtime_value": cal.get("verified_through_year"),
+                        "source": "calendar", "severity": cal.get("severity"), "message": cal["warning"]})
+    except Exception:
+        pass
+    if db is not None:
+        out += _funding_mismatch(db)
+    return out
 
 
 def _system_errors(db: Any) -> Dict[str, Any]:
@@ -821,7 +878,7 @@ def build_full_context(app_state: Any = None, *, include_errors: bool = True) ->
               _section("DATABASE", {"available": False, "reason": "database unavailable"}),
         "copilot": _copilot_self(),
         "backtest": _backtest_summary(),
-        "configuration_mismatches": _mismatches(),
+        "configuration_mismatches": _mismatches(db),
     }
     if include_errors:
         ctx["errors"] = _system_errors(db) if db is not None else \

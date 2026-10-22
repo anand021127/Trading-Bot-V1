@@ -1,4 +1,4 @@
-import type { PipelineView, SymbolCoverage, V8dCondition, V8dDiagnostics, V8dSide } from '../types/pipeline'
+import type { Funding, PipelineView, SymbolCoverage, V8dCondition, V8dDiagnostics, V8dSide } from '../types/pipeline'
 
 /**
  * Scanner → Market → Strategy → Latest Signal → AI Decision → Risk Check → Execution → Final,
@@ -103,7 +103,7 @@ function Coverage({ rows, primary }: { rows: SymbolCoverage[]; primary?: string 
   return (
     <div className="overflow-x-auto" data-testid="symbol-coverage">
       <table className="w-full text-[11px] text-left">
-        <thead><tr className="text-slate-500"><th className="font-normal pr-3">Symbol</th><th className="font-normal pr-3">Outcome</th><th className="font-normal pr-3">Failed</th><th className="font-normal pr-3">RSI</th><th className="font-normal">Sep %</th></tr></thead>
+        <thead><tr className="text-slate-500"><th className="font-normal pr-3">Symbol</th><th className="font-normal pr-3">Outcome</th><th className="font-normal pr-3">Failed</th><th className="font-normal pr-3">RSI</th><th className="font-normal pr-3">Sep %</th><th className="font-normal" title="Minimum account equity to size ONE lot under V8-D's risk caps">Min equity</th></tr></thead>
         <tbody>
           {rows.map(r => (
             <tr key={r.symbol} data-testid={`cov-${r.symbol}`} className={r.symbol === primary ? 'text-slate-100' : 'text-slate-300'}>
@@ -111,11 +111,30 @@ function Coverage({ rows, primary }: { rows: SymbolCoverage[]; primary?: string 
               <td className="pr-3">{r.outcome ?? '—'}{r.error ? ' ⚠' : ''}</td>
               <td className="pr-3">{r.binding ?? '—'}</td>
               <td className="pr-3">{num(r.rsi, 1)}</td>
-              <td>{r.sep_pct != null ? r.sep_pct.toFixed(3) : '—'}</td>
+              <td className="pr-3">{r.sep_pct != null ? r.sep_pct.toFixed(3) : '—'}</td>
+              <td className={r.can_fund_one_lot === false ? 'text-red-300' : ''}>
+                {r.min_equity_one_lot != null ? `₹${Math.round(r.min_equity_one_lot).toLocaleString('en-IN')}` : '—'}{r.can_fund_one_lot === false ? ' ✗' : ''}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+function FundingWarning({ funding, rows }: { funding?: Funding | null; rows: SymbolCoverage[] }) {
+  const short = rows.filter(r => r.can_fund_one_lot === false)
+  if (!(funding?.can_fund_one_lot === false) && short.length === 0) return null
+  const eq = funding?.equity ?? short[0]?.equity ?? null
+  const need = Math.min(...[funding?.min_equity_one_lot, ...rows.map(r => r.min_equity_one_lot)].filter((x): x is number => typeof x === 'number'))
+  return (
+    <div role="alert" data-testid="funding-warning" className="mb-2 rounded-lg border border-red-800/60 bg-red-950/30 p-2.5 text-[11px] text-red-200">
+      <b>Capital too small for the strategy's lot sizes.</b>{' '}
+      {eq != null ? `Equity ₹${Math.round(eq).toLocaleString('en-IN')}` : 'Current equity'} cannot fund even one lot
+      {short.length > 0 ? ` for ${short.length}/${rows.length} scanned symbols` : ''} under V8-D's risk caps (2.5 % risk, 18 % allocation)
+      {Number.isFinite(need) ? `; at least ₹${Math.round(need).toLocaleString('en-IN')} is needed` : ''}. Valid setups are rejected with “0 lots”.
+      Raise the paper capital (<code className="font-mono">TRADING_CAPITAL</code>) — the risk percentages stay unchanged.
     </div>
   )
 }
@@ -148,6 +167,7 @@ export default function DecisionPipeline({ pipeline, compact = false }: { pipeli
           </span>
         </div>
       )}
+      <FundingWarning funding={pipeline.funding} rows={rows} />
       <dl>
         <Row label="Scanner" value={pipeline.scanner} />
         <Row label="Market" value={pipeline.market} />

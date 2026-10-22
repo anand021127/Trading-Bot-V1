@@ -39,6 +39,12 @@ export interface V8dDiagnostics {
   pe?: V8dSide
 }
 
+export interface Funding {
+  equity?: number | null
+  min_equity_one_lot?: number | null     // lower bound for ONE lot under V8-D's risk/allocation caps
+  can_fund_one_lot?: boolean | null
+}
+
 export interface SymbolCoverage {
   symbol: string
   outcome?: Outcome | null
@@ -56,6 +62,9 @@ export interface SymbolCoverage {
   rsi?: number | null
   ai_status?: string | null
   error?: string | null
+  min_equity_one_lot?: number | null
+  can_fund_one_lot?: boolean | null
+  equity?: number | null
 }
 
 export interface PipelineView {
@@ -64,6 +73,7 @@ export interface PipelineView {
   v8d?: V8dDiagnostics | null
   primary_symbol?: string | null
   symbols?: SymbolCoverage[]
+  funding?: Funding | null
   scanner: string            // RUNNING | STOPPED | STARTING | NOT RESPONDING | RUNNING — DATA ERROR …
   market: string             // LIVE | MARKET CLOSED | LIVE — ENTRY WINDOW CLOSED | UNKNOWN
   strategy: string

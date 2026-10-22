@@ -23,6 +23,12 @@ from backend.copilot.trade_plan import TradePlan, validate_trade_plan
 from backend.database.db_manager import DatabaseManager
 from backend.strategy.trading_engine import TradingEngine
 
+# Relative to today: a hard-coded date turned into "expiry today", then "expired contract" (which the
+# engine correctly refuses), silently breaking these tests as the calendar moved.
+from datetime import date as _date, timedelta as _td  # noqa: E402
+_TEST_EXPIRY = (_date.today() + _td(days=7)).isoformat()
+
+
 
 def _synthetic_candles(n=400, start=100.0, drift=0.03, seed=7, end_now=False):
     import random
@@ -211,7 +217,7 @@ def _mock_client_with_realistic_chain(spot=22000.0, atm_strike=22000.0):
     OptionPremiumStrategy.select_contract/evaluate against it is
     representative of the real pipeline."""
     client = MagicMock()
-    client.get_nearest_expiry.return_value = "2026-10-06"
+    client.get_nearest_expiry.return_value = _TEST_EXPIRY
     client.get_multiple_quotes.return_value = {"NIFTY50": {"symbol": "NIFTY50", "ltp": spot}}
     client.get_option_chain.return_value = [
         {"strike": atm_strike, "option_type": "CE", "instrument_key": "NSE_FO|CE_ATM",
@@ -402,7 +408,7 @@ class TestRealOptionPipeline:
         tools = CopilotTools(engine=engine, db_manager=db)
         result = tools.get_option_chain("NIFTY50")
         assert result["available"] is True
-        assert result["expiry"] == "2026-10-06"
+        assert result["expiry"] == _TEST_EXPIRY
         assert result["contract_count"] == 3
         assert result["summary"] is not None  # summarize_chain() ran successfully
 
@@ -411,7 +417,7 @@ class TestRealOptionPipeline:
         tools = CopilotTools(engine=engine, db_manager=db)
         result = tools.get_nearest_expiry("NIFTY50")
         assert result["available"] is True
-        assert result["expiry"] == "2026-10-06"
+        assert result["expiry"] == _TEST_EXPIRY
 
     def test_trade_plan_uses_real_evaluate_option_premium(self):
         engine, db, client = self._engine_with_mock_chain()
@@ -535,7 +541,7 @@ class TestSpotPriceFallback:
         engine, db = self._engine()
         client = _mock_client_with_realistic_chain(spot=22000.0)
         engine.client = client
-        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-10-06", underlying_trend="BULLISH")
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date=_TEST_EXPIRY, underlying_trend="BULLISH")
         contract = (sig.indicators or {}).get("selected_contract")
         assert contract is not None  # ATM resolution succeeded via the normal quote path
 
@@ -544,7 +550,7 @@ class TestSpotPriceFallback:
         client = _mock_client_with_realistic_chain(spot=22000.0)
         client.get_multiple_quotes.return_value = {"NIFTY50": {"symbol": "NIFTY50", "ltp": 0.0, "has_data": False}}
         engine.client = client
-        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-10-06", underlying_trend="BULLISH")
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date=_TEST_EXPIRY, underlying_trend="BULLISH")
         contract = (sig.indicators or {}).get("selected_contract")
         assert contract is not None  # resolved via option-chain underlying_spot_price fallback
 
@@ -553,7 +559,7 @@ class TestSpotPriceFallback:
         client = _mock_client_with_realistic_chain(spot=22000.0)
         client.get_multiple_quotes.side_effect = Exception("quote endpoint down")
         engine.client = client
-        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-10-06", underlying_trend="BULLISH")
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date=_TEST_EXPIRY, underlying_trend="BULLISH")
         contract = (sig.indicators or {}).get("selected_contract")
         assert contract is not None
 
@@ -563,7 +569,7 @@ class TestSpotPriceFallback:
         client.get_multiple_quotes.return_value = {"NIFTY50": {"symbol": "NIFTY50", "ltp": 0.0, "has_data": False}}
         client.get_option_chain_with_spot.return_value = (client.get_option_chain.return_value, None)  # chain has no spot either
         engine.client = client
-        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-10-06", underlying_trend="BULLISH")
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date=_TEST_EXPIRY, underlying_trend="BULLISH")
         assert sig.signal == "NONE"
         assert "no valid underlying spot price" in sig.rejected_reasons[0].lower()
 
@@ -571,7 +577,7 @@ class TestSpotPriceFallback:
         engine, db = self._engine()
         client = _mock_client_with_realistic_chain(spot=22000.0, atm_strike=22000.0)
         engine.client = client
-        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-10-06", underlying_trend="BULLISH")
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date=_TEST_EXPIRY, underlying_trend="BULLISH")
         contract = (sig.indicators or {}).get("selected_contract")
         if contract is not None:
             assert contract["option_type"] == "CE"
@@ -580,7 +586,7 @@ class TestSpotPriceFallback:
         engine, db = self._engine()
         client = _mock_client_with_realistic_chain(spot=22000.0, atm_strike=22000.0)
         engine.client = client
-        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-10-06", underlying_trend="BEARISH")
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date=_TEST_EXPIRY, underlying_trend="BEARISH")
         contract = (sig.indicators or {}).get("selected_contract")
         if contract is not None:
             assert contract["option_type"] == "PE"
@@ -590,7 +596,7 @@ class TestSpotPriceFallback:
         client = _mock_client_with_realistic_chain(spot=22000.0)
         client.get_option_chain_with_spot.return_value = ([], 22000.0)  # spot fine, but no contracts at all
         engine.client = client
-        sig = engine.evaluate_option_premium("NIFTY50", expiry_date="2026-10-06", underlying_trend="BULLISH")
+        sig = engine.evaluate_option_premium("NIFTY50", expiry_date=_TEST_EXPIRY, underlying_trend="BULLISH")
         assert sig.signal == "NONE"
 
     def test_paper_execution_still_cannot_call_live_broker_order_path(self):
@@ -1096,7 +1102,7 @@ class TestLotSizeAndRiskGating:
     def test_lot_risk_check_runs_when_lot_size_present(self):
         from backend.copilot.trade_plan import TradePlan, validate_trade_plan
         plan = TradePlan(
-            symbol="NIFTY50", underlying="NIFTY50", option_type="CE", strike=22000, expiry="2026-10-06",
+            symbol="NIFTY50", underlying="NIFTY50", option_type="CE", strike=22000, expiry=_TEST_EXPIRY,
             entry_price_low=99.9, entry_price_high=100.1, stop_loss=1.0, target_1=104.0,  # huge per-unit risk
             lot_size=75, quote_timestamp=datetime.now(timezone.utc).isoformat(),
         )

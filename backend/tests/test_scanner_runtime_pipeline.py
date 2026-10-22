@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from backend.tests._dates import FUTURE_EXPIRY
 from backend.database.db_manager import DatabaseManager
 from backend.paper import scan_state as ss
 from backend.paper.market_scan_loop import PaperMarketScanner
@@ -63,7 +64,7 @@ def _chain():
 
 
 class FakeData:
-    def __init__(self, candles=None, chain=None, spot=24050.0, expiry="2027-01-07",
+    def __init__(self, candles=None, chain=None, spot=24050.0, expiry=FUTURE_EXPIRY,
                  candle_exc=None, chain_exc=None):
         self.candles = _candles() if candles is None else candles
         self.chain = _chain() if chain is None else chain
@@ -203,7 +204,7 @@ def test_real_v8d_no_signal_is_persisted_with_full_diagnostics(worker):
     assert rec["reason"].startswith("no_trade:"), rec["reason"]
     assert rec["strategy"] == "V8_D_PULLBACK_ATM" and rec["underlying"] == "NIFTY50"
     assert rec["candle_count"] == 70
-    assert rec["expiry"] == "2027-01-07"
+    assert rec["expiry"] == FUTURE_EXPIRY
     assert rec["option_chain_count"] == 2
     assert rec["details"]["v8d_evaluated"] is True
     assert rec["data_status"] == "OK"
@@ -269,7 +270,7 @@ def test_option_chain_failure_is_surfaced(worker):
     rec = _scan(worker, FixedNowScanner(
         data=FakeData(chain_exc=ConnectionError("chain down")), strategy=V8DStrategy()))
     assert rec["reason"] == "chain_fetch_error:ConnectionError"
-    assert rec["category"] == "DATA_ERROR" and rec["expiry"] == "2027-01-07"
+    assert rec["category"] == "DATA_ERROR" and rec["expiry"] == FUTURE_EXPIRY
 
 
 def test_stale_candles_rejected_safely(worker):

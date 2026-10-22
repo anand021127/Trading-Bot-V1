@@ -223,8 +223,16 @@ class TestFailClosed(unittest.TestCase):
             exchange_calendar.is_trading_day("2030-06-12")
 
     def test_next_trading_day_past_table_raises(self):
+        # The BUILT-IN table must fail closed past 2026. A fresh calendar with no operator-supplied
+        # EXCHANGE_HOLIDAYS_<year> is used because the test process carries a stand-in table for later
+        # years (backend/tests/conftest.py) so the rest of the suite is independent of the wall clock.
+        import os
+        from unittest import mock
+        env = {k: v for k, v in os.environ.items() if not k.startswith("EXCHANGE_HOLIDAYS_")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            builtin_only = SessionCalendar()
         with self.assertRaises(CalendarDataError):
-            exchange_calendar.next_trading_day("2026-12-31")
+            builtin_only.next_trading_day("2026-12-31")
 
     def test_injected_table_works_for_new_years(self):
         cal = SessionCalendar(holidays={2030: ["2030-06-12"]})

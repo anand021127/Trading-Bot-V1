@@ -62,12 +62,6 @@ export const fetchLivePrices = () =>
     TTL.PRICES,
   )
 
-export const fetchNifty50Prices = () =>
-  cachedFetch('prices:nifty50',
-    () => api.get('/api/prices/nifty50').then(r => r.data),
-    TTL.PRICES,
-  )
-
 // Performance — cached 1m
 export const fetchPerformance = (params?: { date_from?: string; date_to?: string }) => {
   const key = `performance:${JSON.stringify(params ?? {})}`

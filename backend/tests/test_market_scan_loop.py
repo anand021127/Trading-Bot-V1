@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 from unittest import mock
 
+from backend.tests._dates import FUTURE_EXPIRY
 from backend.paper.market_scan_loop import (
     PaperMarketScanner,
     candles_are_fresh,
@@ -64,7 +65,7 @@ def _bars_for_ce_signal(n: int = 80) -> List[Dict[str, Any]]:
 
 
 class FakeMarketData:
-    def __init__(self, candles, chain, spot, expiry="2027-01-07"):
+    def __init__(self, candles, chain, spot, expiry=FUTURE_EXPIRY):
         self.candles = candles
         self.chain = chain
         self.spot = spot
@@ -157,12 +158,12 @@ def test_signal_to_paper_payload_maps_v8d_fields():
         "sizing": {"quantity": 75},
         "underlying_spot": 24010,
     }
-    payload = signal_to_paper_payload(sig, expiry="2027-01-07")
+    payload = signal_to_paper_payload(sig, expiry=FUTURE_EXPIRY)
     assert payload is not None
     assert payload["instrument_key"] == "NSE_FO|X"
     assert payload["quantity"] == 75
     assert payload["premium"] == 85.0
-    assert payload["expiry"] == "2027-01-07"
+    assert payload["expiry"] == FUTURE_EXPIRY
 
 
 def test_scan_no_trade_when_stale_data():

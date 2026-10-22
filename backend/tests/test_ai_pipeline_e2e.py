@@ -23,6 +23,7 @@ from unittest import mock
 
 import pytest
 
+from backend.tests._dates import FUTURE_EXPIRY
 from backend.ai_decision.decision_engine import AITradingDecisionEngine
 from backend.copilot.provider_errors import (
     AIModelUnavailableError, AIProviderTimeoutError, AIProviderUnavailableError,
@@ -146,7 +147,7 @@ def test_slow_ai_is_bounded_then_replays_without_a_second_inference(worker, monk
             __import__("backend.ai_decision.setup_identity", fromlist=["x"]).build_setup_id(
                 signal=BuyStrategy().evaluate_v8d_signal(underlying_symbol="NIFTY50", spot_price=24050.0)[0],
                 contract=BuyStrategy().evaluate_v8d_signal(underlying_symbol="NIFTY50", spot_price=24050.0)[0].indicators["selected_contract"],
-                expiry="2027-01-07", candles=FakeData().candles)):
+                expiry=FUTURE_EXPIRY, candles=FakeData().candles)):
         time.sleep(0.05)
     rec2 = _scan(worker, _scanner(eng))
     assert rec2["traded"] is True, rec2["reason"]                # later scan: stored verdict replayed

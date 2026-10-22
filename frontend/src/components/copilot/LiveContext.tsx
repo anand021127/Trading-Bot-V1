@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { HTMLAttributes, ReactNode } from 'react'
 import { AlertTriangle, RefreshCw } from 'lucide-react'
 import type { CopilotContext, CtxLoad } from './contextTypes'
 import DecisionPipeline from '../DecisionPipeline'
@@ -56,7 +56,8 @@ function KV({ k, v }: { k: string; v: ReactNode }) {
   )
 }
 
-const Muted = ({ children }: { children: ReactNode }) => <div className="text-slate-500">{children}</div>
+const Muted = ({ children, ...rest }: { children: ReactNode } & HTMLAttributes<HTMLDivElement>) =>
+  <div className="text-slate-500" {...rest}>{children}</div>
 
 export default function LiveContext({ ctx, load, onRefresh }: {
   ctx: CopilotContext | null
@@ -91,8 +92,10 @@ export default function LiveContext({ ctx, load, onRefresh }: {
   const bt = ctx.backtest ?? {}
   const ai = ctx.ai ?? {}
   const mism = (ctx.configuration_mismatches ?? []).filter(m => m?.message)
-  const errNote = ctx.errors?.available ? ctx.errors?.note : undefined
-  const recentErrors = (ctx.errors?.recent ?? []).map(String)
+  const errLines = (ctx.errors?.recent_error_lines ?? []).map(String).filter(Boolean)
+  const healthEvents = (ctx.errors?.recent_health_events ?? []).map(e => (typeof e === 'string' ? e : JSON.stringify(e)))
+  const errCount = errLines.length + healthEvents.length
+  const wsState = ws.state ?? ws.connection_status ?? 'unknown'
 
   const scanBad = !!scan.error ||
     scan.state_label?.toLowerCase().includes('error') === true ||
@@ -100,7 +103,6 @@ export default function LiveContext({ ctx, load, onRefresh }: {
   const problems: string[] = [
     ...mism.map(m => m.message as string),
     ...(scanBad ? [scan.error || scan.summary || 'Scanner needs attention'] : []),
-    ...recentErrors.slice(0, 3),
   ]
 
   const runtimeLabel = bot.kill_switch_active
@@ -126,7 +128,6 @@ export default function LiveContext({ ctx, load, onRefresh }: {
           className="rounded-lg border border-amber-800/60 bg-amber-950/30 p-2.5 text-[11px] text-amber-200 space-y-1">
           <div className="flex items-center gap-1.5 font-semibold"><AlertTriangle size={12} /> Needs attention ({problems.length})</div>
           {problems.slice(0, 5).map((p, i) => <div key={i} className="[overflow-wrap:anywhere]">• {p}</div>)}
-          {errNote && <div className="text-amber-300/70">{errNote}</div>}
         </div>
       )}
 
@@ -146,10 +147,10 @@ export default function LiveContext({ ctx, load, onRefresh }: {
         {bot.runtime_summary && bot.running && <Muted>{bot.runtime_summary}</Muted>}
       </Section>
 
-      <Section id="market" title="Market" badge={`${marketOpen} · ${ws.state ?? 'unknown'}`}>
+      <Section id="market" title="Market" badge={`${marketOpen} · ${wsState}`}>
         <KV k="Session" v={ctx.market?.session_status ?? marketOpen} />
-        <KV k="WebSocket" v={ws.state ?? '—'} />
-        <KV k="Streaming ticks" v={ws.streaming ? 'YES (real ticks)' : 'NO'} />
+        <KV k="WebSocket" v={wsState} />
+        <KV k="Streaming ticks" v={ws.streaming == null ? '—' : ws.streaming ? 'YES (real ticks)' : 'NO'} />
         <KV k="Last tick" v={ws.last_tick_age_seconds != null ? `${Math.round(ws.last_tick_age_seconds)}s ago` : '—'} />
         <KV k="Market data" v={ws.market_data_status ?? '—'} />
         {ws.health_interpretation && <Muted>{ws.health_interpretation}</Muted>}
@@ -184,10 +185,15 @@ export default function LiveContext({ ctx, load, onRefresh }: {
             </>}
       </Section>
 
-      <Section id="risk" title="Risk" badge={risk.available ? `${risk.trades_used ?? 0}/${risk.max_trades ?? '—'} trades · ${fmtINR(risk.daily_pnl ?? today.realized_pnl)}` : '—'}>
+      <Section id="risk" title="Risk" badge={risk.available ? `${risk.trades_used ?? 0}/${risk.effective_max_trades ?? risk.max_trades ?? '—'} trades · ${fmtINR(risk.daily_pnl ?? today.realized_pnl)}` : '—'}>
         {risk.available
           ? <>
-              <KV k="Trades used" v={`${risk.trades_used ?? 0} / ${risk.max_trades ?? '—'}`} />
+              <KV k="Trades used" v={`${risk.trades_used ?? 0} / ${risk.effective_max_trades ?? risk.max_trades ?? '—'}`} />
+              {risk.effective_max_trades != null && risk.strategy_daily_cap != null && risk.max_trades != null && (
+                <Muted data-testid="trade-cap-breakdown">
+                  Binding limit {risk.effective_max_trades}: V8-D allows {risk.strategy_daily_cap}/day, risk limit {risk.max_trades}/day.
+                </Muted>
+              )}
               <KV k="Daily P&L" v={<span className={tone(risk.daily_pnl ?? 0)}>{fmtINR(risk.daily_pnl)}</span>} />
               {risk.daily_loss_used_pct != null && <KV k="Daily loss used" v={`${risk.daily_loss_used_pct}%`} />}
               {risk.consecutive_losses != null && <KV k="Consecutive losses" v={risk.consecutive_losses} />}
@@ -228,6 +234,18 @@ export default function LiveContext({ ctx, load, onRefresh }: {
               <KV k="Win rate" v={bt.summary?.win_rate_pct != null ? `${bt.summary.win_rate_pct}%` : '—'} />
               <KV k="Profit factor" v={bt.summary?.profit_factor ?? '—'} />
               <KV k="Max drawdown" v={bt.summary?.max_drawdown_pct != null ? `${bt.summary.max_drawdown_pct}%` : '—'} />
+              {bt.summary?.edge && (
+                <div data-testid="backtest-edge" role={bt.summary.edge.verdict === 'NEGATIVE_EXPECTANCY' ? 'alert' : undefined}
+                  className={`rounded border px-2 py-1.5 mt-1 ${
+                    bt.summary.edge.verdict === 'NEGATIVE_EXPECTANCY' ? 'border-red-800/60 bg-red-950/30 text-red-200'
+                    : bt.summary.edge.verdict === 'POSITIVE_EXPECTANCY' ? 'border-emerald-800/50 bg-emerald-950/20 text-emerald-200'
+                    : 'border-[#243044] text-slate-300'}`}>
+                  <b>Edge: {String(bt.summary.edge.verdict ?? '').replace(/_/g, ' ')}</b>
+                  {bt.summary.edge.mean_r != null && bt.summary.edge.ci95_low != null && bt.summary.edge.ci95_high != null &&
+                    <> — {bt.summary.edge.mean_r.toFixed(3)} R/trade (95% CI {bt.summary.edge.ci95_low.toFixed(3)} … {bt.summary.edge.ci95_high.toFixed(3)}, n={bt.summary.edge.n_trades})</>}
+                  {bt.summary.edge.message && <div>{bt.summary.edge.message}</div>}
+                </div>
+              )}
               <Muted>Latest stored result — never hard-coded.</Muted>
             </>
           : <Muted>{bt.reason || 'No completed backtest result is stored.'}</Muted>}
@@ -238,8 +256,19 @@ export default function LiveContext({ ctx, load, onRefresh }: {
         <KV k="Equity" v={fmtINR(cfg.capital?.current_equity)} />
         <KV k="Risk / trade" v={pct(cfg.risk?.max_risk_per_trade_pct)} />
         <KV k="Daily loss limit" v={pct(cfg.risk?.max_daily_loss_pct)} />
-        <KV k="Max trades / day" v={<>{cfg.risk?.max_trades_per_day ?? '—'} <span className="text-slate-500">({cfg.risk?.max_trades_source ?? '—'})</span></>} />
+        <KV k="Risk limit / day" v={<>{cfg.risk?.max_trades_per_day ?? '—'} <span className="text-slate-500">({cfg.risk?.max_trades_source ?? '—'})</span></>} />
         <KV k="Strategy" v={cfg.strategy ?? bot.strategy ?? '—'} />
+      </Section>
+
+      <Section id="errors" title="Recent errors" badge={errCount > 0 ? `${errCount}` : 'none'}
+        badgeClass={errCount > 0 ? 'text-amber-300' : 'text-slate-500'}>
+        {errCount === 0
+          ? <Muted>{ctx.errors?.note || 'No recent errors recorded.'}</Muted>
+          : <>
+              {errLines.slice(-5).map((l, i) => <div key={`l${i}`} className="font-mono text-[10px] text-slate-400">{l}</div>)}
+              {healthEvents.slice(-5).map((l, i) => <div key={`h${i}`} className="font-mono text-[10px] text-slate-400">{l}</div>)}
+              <Muted>From the bot's error log / health monitor (history, not necessarily current).</Muted>
+            </>}
       </Section>
 
       <Section id="ai" title="AI Trading Decision engine"

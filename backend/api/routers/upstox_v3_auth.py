@@ -19,8 +19,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 try:
-    from fastapi import APIRouter, HTTPException, Request, Response
+    from fastapi import APIRouter, Depends, HTTPException, Request, Response
 except ImportError:
+    def Depends(*args, **kwargs):  # type: ignore
+        return None
+
     class APIRouter:  # type: ignore
         def __init__(self, *args, **kwargs):
             self.routes = []
@@ -43,6 +46,7 @@ except ImportError:
     class Response:  # type: ignore
         pass
 
+from backend.api.control_auth import require_control_token
 from backend.database.db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -112,8 +116,8 @@ def _is_token_present() -> bool:
     return False
 
 
-@router.post("/api/upstox/auth/request")
-@router.post("/upstox/auth/request")
+@router.post("/api/upstox/auth/request", dependencies=[Depends(require_control_token)])
+@router.post("/upstox/auth/request", dependencies=[Depends(require_control_token)])
 async def request_upstox_approval() -> Dict[str, Any]:
     """Dispatch an Upstox API v3 token approval push notification.
     
@@ -243,11 +247,31 @@ async def request_upstox_approval() -> Dict[str, Any]:
         )
 
 
+def _webhook_secret_ok(request: Request) -> bool:
+    """True when no secret is configured, or the supplied secret matches (timing-safe)."""
+    import hmac
+    expected = (os.getenv("UPSTOX_WEBHOOK_SECRET") or "").strip()
+    if not expected:
+        return True
+    supplied = (request.headers.get("x-webhook-secret") or request.query_params.get("secret") or "").strip()
+    return bool(supplied) and hmac.compare_digest(supplied, expected)
+
+
 @router.post("/api/webhooks/upstox-token-notifier")
 @router.post("/webhooks/upstox-token-notifier")
 async def upstox_token_notifier(request: Request) -> Dict[str, Any]:
     """Inbound webhook receiver for Upstox API v3 access token push notifications."""
     global _auth_state
+
+    # SECURITY: this endpoint stores an access token received from the network. Unlike the
+    # control endpoints it cannot use CONTROL_TOKEN (Upstox, not the operator, calls it), so:
+    #   * optional shared secret  UPSTOX_WEBHOOK_SECRET  (append ?secret=... to the notifier URL
+    #     registered in the Upstox app, or send header X-Webhook-Secret) — checked first;
+    #   * client_id is REQUIRED to match when one is configured (it used to be skipped
+    #     entirely when the payload merely omitted it, so anyone could overwrite the token).
+    if not _webhook_secret_ok(request):
+        logger.warning("[Webhook Security] rejected: missing/invalid webhook secret")
+        raise HTTPException(status_code=401, detail="Missing or invalid webhook secret")
 
     try:
         payload = await request.json()
@@ -270,14 +294,14 @@ async def upstox_token_notifier(request: Request) -> Dict[str, Any]:
     req_client_id = payload.get("client_id", "")
     conf_client_id, _ = _get_client_credentials()
 
-    if req_client_id and conf_client_id and not conf_client_id.startswith("your_"):
-        if req_client_id.strip() != conf_client_id.strip():
+    if conf_client_id and not conf_client_id.startswith("your_"):
+        if not req_client_id or req_client_id.strip() != conf_client_id.strip():
             logger.warning(
                 "[Webhook Security] Client ID mismatch: received %s, expected %s",
                 req_client_id,
                 conf_client_id,
             )
-            raise HTTPException(status_code=403, detail="client_id mismatch with configured application")
+            raise HTTPException(status_code=403, detail="client_id missing or mismatched with configured application")
 
     # 3. Validate access_token exists and is non-empty
     access_token = (payload.get("access_token") or "").strip()

@@ -5,8 +5,8 @@ import {
   AlertTriangle, KeyRound, Moon, RefreshCw, Download, Sparkles, Smartphone, Zap, Bot,
   SlidersHorizontal,
 } from 'lucide-react'
-import { useState } from 'react'
-import { Toaster } from 'react-hot-toast'
+import { useEffect, useState } from 'react'
+import toast, { Toaster } from 'react-hot-toast'
 import { useConnection, type ConnectionState } from '../context/ConnectionContext'
 import { usePWA } from '../hooks/usePWA'
 
@@ -102,6 +102,16 @@ export default function Layout() {
   const { isInstallable, isInstalled, isUpdateAvailable, isIOS, installApp, applyUpdate } = usePWA()
   const location = useLocation()
   const navigate = useNavigate()
+
+  // A rejected/missing CONTROL_TOKEN must not look like an expired Upstox token.
+  useEffect(() => {
+    const onControl = () => toast.error(
+      'Control token missing or invalid — enter it under Settings → Control token.',
+      { id: 'control-token-required' },        // fixed id: one toast, not one per failed request
+    )
+    window.addEventListener('control:token_required', onControl)
+    return () => window.removeEventListener('control:token_required', onControl)
+  }, [])
 
   const currentPage = navItems.find((n) =>
     n.to === '/' ? location.pathname === '/' : location.pathname.startsWith(n.to)

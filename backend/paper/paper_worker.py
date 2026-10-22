@@ -312,7 +312,7 @@ class PaperWorker:
             if n > 1 and mono < self._sym_next.get(sym, 0.0):
                 continue                       # not due yet — each underlying has its own cadence
             self._sym_next[sym] = time.monotonic() + sym_interval
-            self._scan_symbol(sym, sc, started=time.monotonic(), explicit=(n > 1 or bool(self.scanners)))
+            self._scan_symbol(sym, sc, started=time.monotonic(), explicit=True)     # ONE code path: always a per-symbol record
 
     def _scan_symbol(self, sym: str, scanner: Any, *, started: float, explicit: bool) -> None:
         """One V8-D scan of ONE underlying. Fully isolated: an exception here is

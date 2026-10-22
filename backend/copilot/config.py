@@ -61,7 +61,7 @@ def load_copilot_settings() -> CopilotSettings:
         llm_backend=backend,
         llm_base_url=os.getenv("COPILOT_LLM_BASE_URL", "http://localhost:11434/v1"),
         llm_model=os.getenv("COPILOT_LLM_MODEL", "llama3.1:8b"),
-        llm_timeout_seconds=float(os.getenv("COPILOT_LLM_TIMEOUT_SECONDS", "8")),
+        llm_timeout_seconds=float(os.getenv("COPILOT_LLM_TIMEOUT_SECONDS", "45")),
         ai_api_key_env=ai_key_env,
         ai_api_key=ai_key,
         max_candle_age_seconds=float(os.getenv("COPILOT_MAX_CANDLE_AGE_SECONDS", "120")),

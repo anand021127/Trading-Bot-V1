@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from backend.api.control_auth import require_control_token
 
 import os
 
@@ -22,7 +23,7 @@ async def get_alert_status() -> dict:
     }
 
 
-@router.post("/test")
+@router.post("/test", dependencies=[Depends(require_control_token)])
 async def send_test_alert(channel: str) -> dict:
     settings = load_settings()
     channel = channel.lower()

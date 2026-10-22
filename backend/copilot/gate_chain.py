@@ -253,7 +253,7 @@ def _human_summary(
         return (f"The scan iteration failed ({inner.get('error') or reason}); V8-D was not evaluated. "
                 "This is a SCANNER problem, not a strategy outcome.")
     if stage == "NO_SIGNAL":
-        v8 = inner.get("v8d") or detail.get("v8d") or {}
+        v8 = inner.get("v8d") or {}      # the caller merges the record-level v8d into `inner`
         why = v8.get("reason") if v8.get("evaluated") and v8.get("reason") else None
         reasons = inner.get("rejection") or []
         return ("V8-D was evaluated successfully and found NO SIGNAL (the technical setup did not exist). "

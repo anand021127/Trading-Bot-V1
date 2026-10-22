@@ -116,7 +116,9 @@ def test_context_risk_reconciliation_backtest_sections(ctx_db):
     assert ctx["reconciliation"]["state"] in ("OK", "FAILED", "NEVER_CHECKED")
     assert ctx["backtest"]["available"] is False        # honest empty state
     assert "stored" in ctx["backtest"]["reason"].lower()
-    assert ctx["configuration_mismatches"] == []
+    # Only CONFIG mismatches are asserted here: the holiday-table coverage warning is clock-dependent
+    # (it correctly appears from October) and has its own tests.
+    assert [m for m in ctx["configuration_mismatches"] if m.get("source") != "calendar"] == []
     assert ctx["errors"]["available"] is True
 
 

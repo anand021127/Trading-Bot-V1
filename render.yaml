@@ -1,13 +1,13 @@
 services:
-  # Consolidated to a single service. The trading loop used to run in a
-  # SEPARATE "worker" service (backend/worker.py) as its own OS process.
-  # That was the root cause of a real bug: bot status (BotState) lived
-  # independently in each process's memory, so Start/Stop/Kill on the
-  # dashboard (this service) had no effect on whether the OTHER process
-  # actually traded. The trading loop now runs as an in-process background
-  # task inside this same web service (backend/api/main.py's lifespan) —
-  # one process, one BotState, no cross-process sync needed. This also
-  # means you now only pay for one service instead of two.
+  # ONE Render service. How trading runs (paper mode):
+  #   * the API (this web service) serves the dashboard and the control endpoints;
+  #   * the V8-D paper scan runs in a SEPARATE worker PROCESS that the API spawns itself
+  #     (backend/paper/worker_manager.py, started by the Start button and respawned by a
+  #     watchdog). Both processes MUST therefore share the same database file — hence
+  #     DATABASE_PATH below points at the persistent disk (/data), not the app directory
+  #     (which is wiped on every deploy). Bot status (BotState) is DB-backed so the two agree.
+  #   * the worker's single-instance lock lives on the same disk (PAPER_WORKER_LOCK).
+  #   * the API-process scanner is DISPLAY-ONLY; the paper worker is the only executor.
   #
   # IMPORTANT — plan must be a PAID tier, not "free":
   #   1. Free web services spin down after ~15 min of no HTTP traffic,
@@ -37,6 +37,24 @@ services:
       mountPath: /data
       sizeGB: 1
     envVars:
+      # ── core runtime (explicit so a deploy can never silently fall back to defaults) ──
+      - key: TRADING_MODE
+        value: paper
+      - key: TRADING_STRATEGY
+        value: V8_D_PULLBACK_ATM
+      - key: UPSTOX_ORDER_PRODUCT
+        value: I
+      - key: DATABASE_PATH
+        value: /data/trading_bot.db
+      - key: PAPER_WORKER_LOCK
+        value: /data/paper_worker.lock
+      - key: PAPER_WORKER_AUTOSPAWN
+        value: "1"
+      # ── secrets (set in the Render dashboard; never commit values) ──
+      - key: CONTROL_TOKEN
+        sync: false
+      - key: UPSTOX_WEBHOOK_SECRET
+        sync: false
       - key: UPSTOX_CLIENT_ID
         sync: false
       - key: UPSTOX_CLIENT_SECRET
@@ -54,11 +72,6 @@ services:
       - key: SECRET_KEY
         sync: false
 
-# backend/worker.py is still present and still works standalone if you
-# ever want to split load back out into a separate service (e.g. running
-# heavy backtests on their own compute so they can't affect the live
-# trading loop's responsiveness) — it is simply no longer REQUIRED for
-# the bot to function correctly. If you do reintroduce it as a second
-# service, remember: BotState is DB-backed specifically so two processes
-# can agree, but that only works if they share the SAME persistent disk,
-# which again requires both services to be on a paid plan.
+# backend/worker.py is the legacy standalone trading loop and is NOT used by this blueprint
+# (the paper worker in backend/paper/ is). If you ever split services, both must share the SAME
+# persistent disk and DATABASE_PATH, which requires a paid plan.

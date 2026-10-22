@@ -137,4 +137,25 @@ describe('DecisionPipeline', () => {
     render(<DecisionPipeline pipeline={{ ...base, v8d: { evaluated: false, reason: 'insufficient_candles:12<50' } }} />)
     expect(screen.getByTestId('v8d-detail')).toHaveTextContent('V8-D not evaluated: insufficient_candles:12<50')
   })
+
+  it('warns prominently when the equity cannot fund even one lot (the "0 lots" trap)', () => {
+    render(<DecisionPipeline pipeline={{ ...base, outcome: 'SIGNAL_REJECTED', latest_signal: 'SIGNAL REJECTED (BY V8-D)',
+      funding: { equity: 20000, min_equity_one_lot: 49000, can_fund_one_lot: false },
+      symbols: [
+        { symbol: 'NIFTY50', outcome: 'SIGNAL_REJECTED', min_equity_one_lot: 49000, can_fund_one_lot: false, equity: 20000 },
+        { symbol: 'SENSEX', outcome: 'NO_SIGNAL', min_equity_one_lot: 52000, can_fund_one_lot: false, equity: 20000 },
+      ] }} />)
+    const w = screen.getByTestId('funding-warning')
+    expect(w).toHaveTextContent('cannot fund even one lot')
+    expect(w).toHaveTextContent('₹20,000')
+    expect(w).toHaveTextContent('2/2 scanned symbols')
+    expect(w).toHaveTextContent('at least ₹49,000')
+    expect(w).toHaveTextContent('TRADING_CAPITAL')
+    expect(screen.getByTestId('cov-NIFTY50')).toHaveTextContent('₹49,000')
+  })
+
+  it('shows no funding warning when the equity can fund a lot', () => {
+    render(<DecisionPipeline pipeline={{ ...base, funding: { equity: 100000, min_equity_one_lot: 49000, can_fund_one_lot: true } }} />)
+    expect(screen.queryByTestId('funding-warning')).not.toBeInTheDocument()
+  })
 })

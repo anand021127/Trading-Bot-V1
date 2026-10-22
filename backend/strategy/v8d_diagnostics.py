@@ -171,6 +171,57 @@ def explain_pullback(candles: List[Dict[str, Any]], strategy: Any = None) -> Dic
     return out
 
 
+def daily_trade_caps(configured: Optional[int]) -> Dict[str, Optional[int]]:
+    """The daily-entry limit the operator actually experiences.
+
+    Two independent limits apply and the SMALLER one binds: the risk manager's configured
+    ``MAX_TRADES_PER_DAY`` and V8-D's own ``max_daily_trades`` (the strategy refuses new
+    entries once reached, in backtest, paper and live alike). Showing only the configured
+    number ("0/20") while the strategy stops at 3 is misleading, so every API/UI that shows a
+    daily trade limit reports all three numbers."""
+    try:
+        cap = int(_v8d.V8DStrategy().max_daily_trades)
+    except Exception:
+        cap = None
+    cfg = int(configured) if configured else None
+    eff = min(x for x in (cfg, cap) if x) if (cfg or cap) else None
+    return {"configured_max_trades": cfg, "strategy_daily_cap": cap, "effective_max_trades": eff}
+
+
+def min_equity_for_one_lot(premium: Optional[float], lot_size: Optional[float], strategy: Any = None) -> Optional[float]:
+    """A guaranteed LOWER BOUND on the account equity at which V8-D can size ONE lot of this contract.
+
+    V8-D sizes all-or-nothing: 1 lot must satisfy BOTH the risk cap (``max_account_risk_pct`` of equity
+    >= lot x per-unit stop distance) and the allocation cap (``max_capital_alloc_pct`` of equity >=
+    lot x premium). The stop distance is at least ``stop_loss_pct`` of the premium (the ATR stop is
+    wider), so the value returned here is the MINIMUM — below it the signal is certain to be rejected
+    with "Position size calculated to 0 lots"; above it the real stop may still need slightly more."""
+    try:
+        prem, lot = float(premium or 0), float(lot_size or 0)
+    except (TypeError, ValueError):
+        return None
+    if prem <= 0 or lot <= 0:
+        return None
+    s = strategy if strategy is not None else _v8d.V8DStrategy()
+    per_unit = max(1.0, prem * float(s.stop_loss_pct))
+    return round(max(per_unit * lot / float(s.max_account_risk_pct),
+                     prem * lot / float(s.max_capital_alloc_pct)), 2)
+
+
+def funding_check(chain_diag: Dict[str, Any], equity: Optional[float], strategy: Any = None) -> Dict[str, Any]:
+    """Can the CURRENT equity fund one lot of the ATM contract the strategy would pick? (real chain data)"""
+    need = []
+    for side in ("ce", "pe"):
+        c = (chain_diag or {}).get(side)
+        if c:
+            v = min_equity_for_one_lot(c.get("premium_ltp"), c.get("lot_size"), strategy)
+            if v:
+                need.append(v)
+    out: Dict[str, Any] = {"equity": equity, "min_equity_one_lot": min(need) if need else None}
+    out["can_fund_one_lot"] = (None if not need or equity is None else float(equity) >= min(need))
+    return out
+
+
 def explain_chain(option_chain: Optional[List[Dict[str, Any]]], spot: float, underlying: str,
                   strategy: Any = None) -> Dict[str, Any]:
     """Option-chain / ATM-contract availability for BOTH sides (informational).

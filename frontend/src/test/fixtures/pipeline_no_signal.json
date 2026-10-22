@@ -7,6 +7,11 @@
   "execution": "NOT ATTEMPTED",
   "execution_detail": null,
   "final": "NO TRADE",
+  "funding": {
+    "can_fund_one_lot": true,
+    "equity": 100000.0,
+    "min_equity_one_lot": 67200.0
+  },
   "latest_signal": "NO SIGNAL",
   "market": "LIVE",
   "outcome": "NO_SIGNAL",
@@ -23,6 +28,7 @@
     {
       "ai_status": "NOT_EVALUATED",
       "binding": "trend",
+      "can_fund_one_lot": true,
       "candle_complete": true,
       "candle_count": 120,
       "category": "NO_SIGNAL",
@@ -30,12 +36,14 @@
       "closest_side": "PE",
       "ema20": 21624.690413,
       "ema50": 21645.902949,
+      "equity": 100000.0,
       "error": null,
       "expiry": "2027-01-07",
       "failed": [
         "trend"
       ],
       "last_candle_ts": "2024-01-02T13:00:00+05:30",
+      "min_equity_one_lot": 67200.0,
       "option_chain_count": 2,
       "outcome": "NO_SIGNAL",
       "reason": "no_trade:NO_SIGNAL",

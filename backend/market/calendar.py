@@ -34,7 +34,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import Enum
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -156,7 +156,7 @@ class SessionCalendar:
         self.exchange = exchange
         self.source = source
         if holidays is None:
-            self._holidays = self.BUILTIN_HOLIDAYS
+            self._holidays = self._with_operator_holidays(self.BUILTIN_HOLIDAYS)
         else:
             self._holidays = {
                 y: frozenset(str(x) for x in days) for y, days in holidays.items()
@@ -168,6 +168,58 @@ class SessionCalendar:
                 y: dict(m) for y, m in special_sessions.items()
             }
 
+    # ── Operator-supplied official holiday dates ──────────────────────
+    @staticmethod
+    def _with_operator_holidays(builtin: Mapping[int, Iterable[str]]) -> Dict[int, frozenset]:
+        """Merge ``EXCHANGE_HOLIDAYS_<YYYY>=YYYY-MM-DD,YYYY-MM-DD,…`` from the environment.
+
+        The built-in verified tables end at ``MAX_VERIFIED_YEAR``; from the next 1 January the
+        calendar fails CLOSED (refuses to guess). This lets the operator supply the exchange's
+        OFFICIAL list for a new year without a code change. ADDITIVE only: dates can create a
+        missing year or add holidays to an existing one — a built-in holiday can never be removed.
+        Malformed input raises ``CalendarDataError`` (never silently ignored)."""
+        import os
+        import re as _re
+        out: Dict[int, frozenset] = {y: frozenset(str(x) for x in days) for y, days in builtin.items()}
+        for key, raw in os.environ.items():
+            m = _re.fullmatch(r"EXCHANGE_HOLIDAYS_(\d{4})", key)
+            if not m or not (raw or "").strip():
+                continue
+            year = int(m.group(1))
+            dates = set()
+            for part in _re.split(r"[;,\s]+", raw.strip()):
+                if not part:
+                    continue
+                try:
+                    d = date.fromisoformat(part)
+                except ValueError:
+                    raise CalendarDataError(f"{key}: '{part}' is not an ISO date (YYYY-MM-DD)")
+                if d.year != year:
+                    raise CalendarDataError(f"{key}: {part} is not in {year}")
+                dates.add(part)
+            out[year] = frozenset(out.get(year, frozenset()) | dates)
+        return out
+
+    def verified_through_year(self) -> int:
+        return max(self._holidays) if self._holidays else 0
+
+    def coverage_info(self, today: Optional[date] = None) -> Dict[str, Any]:
+        """Is the holiday table about to run out? (surfaced in /health, startup log, Copilot)."""
+        t = today or datetime.now(IST).date()
+        through = self.verified_through_year()
+        warning = None
+        severity = "ok"
+        if t.year not in self._holidays:
+            severity = "error"
+            warning = (f"No verified holiday table for {t.year}: the calendar fails closed and the bot "
+                       f"will not trade. Set EXCHANGE_HOLIDAYS_{t.year}=<official ISO dates, comma separated>.")
+        elif (t.year + 1) not in self._holidays and t >= date(t.year, 10, 1):
+            severity = "warning"
+            warning = (f"The holiday table ends in {through}. From 1 Jan {t.year + 1} the bot fails closed "
+                       f"(will not trade) unless EXCHANGE_HOLIDAYS_{t.year + 1} is set from the exchange's "
+                       "official circular (NSE/BSE publish it in December).")
+        return {"verified_through_year": through, "severity": severity, "warning": warning}
+
     # ── Fail-closed year access ───────────────────────────────────────
     def _holiday_set(self, year: int) -> frozenset:
         try:
@@ -175,8 +227,8 @@ class SessionCalendar:
         except KeyError:
             raise CalendarDataError(
                 f"No verified exchange holiday table for {year}. "
-                "Refusing to guess trading days — extend the calendar's "
-                "BUILTIN_HOLIDAYS from the official exchange circular first."
+                "Refusing to guess trading days — set EXCHANGE_HOLIDAYS_" f"{year}" "=<official ISO dates> "
+                "(or extend BUILTIN_HOLIDAYS) from the official exchange circular first."
             )
 
     # ── Special sessions ──────────────────────────────────────────────
@@ -370,6 +422,26 @@ exchange_calendar = SessionCalendar()
 
 def is_market_open_now() -> bool:
     return exchange_calendar.market_is_open()
+
+
+_calendar_warned_on: Optional[date] = None
+
+
+def is_market_open_now_safe() -> bool:
+    """DISPLAY-path variant of :func:`is_market_open_now` for dashboards, price feeds and the
+    WebSocket. If the holiday table for the current year is missing (see
+    ``EXCHANGE_HOLIDAYS_<YYYY>``) it reports the market as CLOSED instead of raising — a missing
+    table must degrade the UI to "closed + calendar warning", never turn the dashboard and the
+    price endpoints into HTTP 500s. Order/scan paths keep using the strict function (fail closed)."""
+    global _calendar_warned_on
+    try:
+        return exchange_calendar.market_is_open()
+    except CalendarDataError as exc:
+        today = datetime.now(IST).date()
+        if _calendar_warned_on != today:                 # once per day, not once per request
+            _calendar_warned_on = today
+            logging.getLogger(__name__).error("[CALENDAR] treating the market as CLOSED: %s", exc)
+        return False
 
 
 def current_trading_day() -> str:

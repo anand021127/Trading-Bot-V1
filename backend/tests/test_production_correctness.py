@@ -26,6 +26,12 @@ from backend.risk.risk_manager import RiskManager
 from backend.strategy.signal import StrategySignal, SignalType
 from backend.strategy.trading_engine import TradingEngine
 
+# Relative to today: a fixed expiry date eventually becomes an EXPIRED contract, which the engine
+# correctly refuses — that silently broke these tests as the calendar moved.
+from datetime import date as _date, timedelta as _td  # noqa: E402
+_FUTURE_EXPIRY = (_date.today() + _td(days=7)).isoformat()
+
+
 
 def _isolated_engine() -> TradingEngine:
     path = f"{tempfile.gettempdir()}/test_prod_correctness_{uuid.uuid4().hex}.db"
@@ -59,7 +65,7 @@ def _buy_signal_with_contract(symbol: str = "NIFTY50") -> StrategySignal:
             "instrument_key": "NSE_FO|12345",
             "lot_size": 75, "freeze_quantity": 1800,
         },
-        "expiry_date": "2026-10-06",
+        "expiry_date": _FUTURE_EXPIRY,
         "spot_price": 22000.0,
     }
     return sig

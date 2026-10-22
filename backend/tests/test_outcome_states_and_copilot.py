@@ -11,6 +11,7 @@ from unittest import mock
 
 import pytest
 
+from backend.tests._dates import FUTURE_EXPIRY
 from backend.copilot.gate_chain import _stage_from_reason, build_gate_chain_from_db
 from backend.copilot.why_no_trade import format_why_no_trade, is_why_no_trade_question
 from backend.paper import scan_state as ss
@@ -251,7 +252,7 @@ def test_display_evaluator_attaches_real_diagnostics_and_excludes_the_forming_ba
     series = w[:-1] + [forming]
     client = mock.MagicMock()
     client.get_current_candles.return_value = series
-    client.get_nearest_expiry.return_value = "2027-01-07"
+    client.get_nearest_expiry.return_value = FUTURE_EXPIRY
     client.get_option_chain_with_spot.return_value = (_chain_for(strat, series[-1]["close"], "NIFTY50"), series[-1]["close"])
     with mock.patch.dict(os.environ, {"TRADING_MODE": "paper", "TRADING_STRATEGY": "V8_D_PULLBACK_ATM"}):
         import backend.config.settings as sm

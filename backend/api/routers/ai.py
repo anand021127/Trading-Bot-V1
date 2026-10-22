@@ -39,8 +39,6 @@ def get_ai_status() -> Dict[str, Any]:
     return {
         "ai_enabled": settings.enabled,
         "ai_mode": settings.mode,
-        "min_confidence": settings.min_confidence,
-        "min_trade_probability": settings.min_trade_probability,
         "fail_open": settings.fail_open,
         "model": {
             "loaded": loaded is not None,

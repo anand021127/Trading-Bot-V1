@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from backend.api.control_auth import require_control_token
 
 from backend.config.settings import load_settings
 from backend.config.universe_config import (
@@ -36,7 +37,7 @@ async def get_universe() -> Dict[str, Any]:
     }
 
 
-@router.put("/")
+@router.put("/", dependencies=[Depends(require_control_token)])
 async def update_universe(body: Dict[str, Any]) -> Dict[str, Any]:
     current = load_universe_config(_db)
     merged = UniverseConfig(

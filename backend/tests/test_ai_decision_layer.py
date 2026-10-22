@@ -19,6 +19,7 @@ from unittest import mock
 
 import pytest
 
+from backend.tests._dates import FUTURE_EXPIRY
 from backend.ai_decision.contract import (
     APPROVE,
     R_APPROVED,
@@ -172,10 +173,10 @@ def test_contract_approve_with_risk_pass_permits_execution(clean_env, tmp_path):
     )
     assert decision.decision == APPROVE
     assert decision.allows_execution is True
-    gate = apply_ai_decision_gate({"expiry": "2026-09-24"}, decision,
+    gate = apply_ai_decision_gate({"expiry": FUTURE_EXPIRY}, decision,
                                   pipeline_strategy="V8_D_PULLBACK_ATM")
     assert gate is None  # pipeline may continue
-    payload_gate = {"expiry": "2026-09-24"}
+    payload_gate = {"expiry": FUTURE_EXPIRY}
     apply_ai_decision_gate(payload_gate, decision, pipeline_strategy="V8_D_PULLBACK_ATM")
     assert payload_gate["ai_decision"]["decision_id"] == decision.decision_id
     assert payload_gate["ai_decision"]["input_snapshot_hash"] == "h"
@@ -209,7 +210,7 @@ def test_context_builder_uses_verified_values_and_flags_gaps(clean_env):
     sig = _buy_signal()
     ctx = build_market_context(
         symbol="NIFTY50", candles=_candles(), signal=sig, contract=_contract(),
-        expiry="2026-09-24", risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
+        expiry=FUTURE_EXPIRY, risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
         candles_fresh=True, candle_age_seconds=2.0,
     )
     assert ctx["underlying_price"] == 24050.0
@@ -248,7 +249,7 @@ def test_snapshot_hash_is_canonical_and_secret_free(clean_env):
     snap = build_ai_snapshot(
         build_market_context(
             symbol="NIFTY50", candles=_candles(), signal=_buy_signal(),
-            contract=_contract(), expiry="2026-09-24", risk=_risk(),
+            contract=_contract(), expiry=FUTURE_EXPIRY, risk=_risk(),
             session=MarketSession(open=True, is_trading_day=True),
             candles_fresh=True, candle_age_seconds=2.0,
         ),
@@ -269,7 +270,7 @@ def test_engine_approve_happy_path(clean_env, tmp_path):
     engine.settings["enabled"] = True
     decision = engine.decide(
         signal_id="sig1", signal=_buy_signal(), contract=_contract(),
-        expiry="2026-09-24", candles=_candles(), candles_fresh=True,
+        expiry=FUTURE_EXPIRY, candles=_candles(), candles_fresh=True,
         candle_age_seconds=2.0, risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
         pipeline_strategy="V8_D_PULLBACK_ATM",
     )
@@ -286,7 +287,7 @@ def test_engine_stale_data_waits(clean_env, tmp_path):
     engine = AITradingDecisionEngine(db=None, provider=provider)
     decision = engine.decide(
         signal_id="sig2", signal=_buy_signal(), contract=_contract(),
-        expiry="2026-09-24", candles=_candles(fresh=False), candles_fresh=False,
+        expiry=FUTURE_EXPIRY, candles=_candles(fresh=False), candles_fresh=False,
         candle_age_seconds=9999.0, risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
         pipeline_strategy="V8_D_PULLBACK_ATM",
     )
@@ -300,7 +301,7 @@ def test_engine_timeout_fails_closed(clean_env):
     engine = AITradingDecisionEngine(db=None, provider=provider)
     decision = engine.decide(
         signal_id="sig3", signal=_buy_signal(), contract=_contract(),
-        expiry="2026-09-24", candles=_candles(), candles_fresh=True,
+        expiry=FUTURE_EXPIRY, candles=_candles(), candles_fresh=True,
         candle_age_seconds=2.0, risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
         pipeline_strategy="V8_D_PULLBACK_ATM",
     )
@@ -315,7 +316,7 @@ def test_engine_provider_unavailable_fails_closed(clean_env):
     engine = AITradingDecisionEngine(db=None, provider=provider)
     decision = engine.decide(
         signal_id="sig4", signal=_buy_signal(), contract=_contract(),
-        expiry="2026-09-24", candles=_candles(), candles_fresh=True,
+        expiry=FUTURE_EXPIRY, candles=_candles(), candles_fresh=True,
         candle_age_seconds=2.0, risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
         pipeline_strategy="V8_D_PULLBACK_ATM",
     )
@@ -330,7 +331,7 @@ def test_engine_malformed_json_fails_closed(clean_env):
     engine = AITradingDecisionEngine(db=None, provider=provider)
     decision = engine.decide(
         signal_id="sig5", signal=_buy_signal(), contract=_contract(),
-        expiry="2026-09-24", candles=_candles(), candles_fresh=True,
+        expiry=FUTURE_EXPIRY, candles=_candles(), candles_fresh=True,
         candle_age_seconds=2.0, risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
         pipeline_strategy="V8_D_PULLBACK_ATM",
     )
@@ -343,7 +344,7 @@ def test_engine_wrong_strategy_rejected(clean_env):
     engine = AITradingDecisionEngine(db=None, provider=ScriptedProvider([APPROVE_JSON]))
     decision = engine.decide(
         signal_id="sig6", signal=_buy_signal(), contract=_contract(),
-        expiry="2026-09-24", candles=_candles(), candles_fresh=True,
+        expiry=FUTURE_EXPIRY, candles=_candles(), candles_fresh=True,
         candle_age_seconds=2.0, risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
         pipeline_strategy="OPTION_PREMIUM",  # wrong pipeline strategy
     )
@@ -359,7 +360,7 @@ def test_engine_option_premium_decision_rejected_under_v8d(clean_env):
     engine = AITradingDecisionEngine(db=None, provider=ScriptedProvider([APPROVE_JSON]))
     decision = engine.decide(
         signal_id="sig7", signal=sig, contract=_contract(),
-        expiry="2026-09-24", candles=_candles(), candles_fresh=True,
+        expiry=FUTURE_EXPIRY, candles=_candles(), candles_fresh=True,
         candle_age_seconds=2.0, risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
         pipeline_strategy="V8_D_PULLBACK_ATM",
     )
@@ -375,7 +376,7 @@ def test_engine_duplicate_decision_idempotent(clean_env, tmp_path):
     engine = AITradingDecisionEngine(db=db, provider=provider)
     engine.settings["enabled"] = True
     kwargs = dict(
-        signal=_buy_signal(), contract=_contract(), expiry="2026-09-24",
+        signal=_buy_signal(), contract=_contract(), expiry=FUTURE_EXPIRY,
         candles=_candles(), candles_fresh=True, candle_age_seconds=2.0,
         risk=_risk(), session=MarketSession(open=True, is_trading_day=True),
         pipeline_strategy="V8_D_PULLBACK_ATM",
@@ -397,7 +398,7 @@ def test_engine_restart_recovery_replays_stored(clean_env, tmp_path):
     engine1 = AITradingDecisionEngine(db=db, provider=provider)
     engine1.settings["enabled"] = True
     d1 = engine1.decide(signal_id="sig9", signal=_buy_signal(), contract=_contract(),
-                        expiry="2026-09-24", candles=_candles(), candles_fresh=True,
+                        expiry=FUTURE_EXPIRY, candles=_candles(), candles_fresh=True,
                         candle_age_seconds=2.0, risk=_risk(),
                         session=MarketSession(open=True, is_trading_day=True),
                         pipeline_strategy="V8_D_PULLBACK_ATM")
@@ -405,7 +406,7 @@ def test_engine_restart_recovery_replays_stored(clean_env, tmp_path):
     # "restart": new engine over the same DB, provider never called again
     engine2 = AITradingDecisionEngine(db=db, provider=ScriptedProvider([]))
     d2 = engine2.decide(signal_id="sig9", signal=_buy_signal(), contract=_contract(),
-                        expiry="2026-09-24", candles=_candles(), candles_fresh=True,
+                        expiry=FUTURE_EXPIRY, candles=_candles(), candles_fresh=True,
                         candle_age_seconds=2.0, risk=_risk(),
                         session=MarketSession(open=True, is_trading_day=True),
                         pipeline_strategy="V8_D_PULLBACK_ATM")
@@ -419,7 +420,7 @@ def test_scan_id_matches_pipeline_scheme(clean_env):
     AI decisions join to trades by signal_id."""
     from backend.orders.idempotency import make_signal_id
     sig = _buy_signal()
-    scan_id = build_scan_signal_id(sig, "2026-09-24")
+    scan_id = build_scan_signal_id(sig, FUTURE_EXPIRY)
     expected = make_signal_id(
         strategy=sig.strategy_name,
         timestamp=sig.generated_at,
@@ -472,7 +473,7 @@ def _scanner_with_ai(runtime, strategy_obj, provider_outputs, tmp_dir: str) -> P
 class _FakeMarketData:
     """Minimal MarketDataSource over injected candles/chain (test only)."""
 
-    def __init__(self, candles, chain, spot, expiry="2026-09-24") -> None:
+    def __init__(self, candles, chain, spot, expiry=FUTURE_EXPIRY) -> None:
         self.candles = candles
         self.chain = chain
         self.spot = spot
@@ -793,7 +794,7 @@ def test_snapshot_carries_no_secrets(clean_env):
     snap = build_ai_snapshot(
         build_market_context(
             symbol="NIFTY50", candles=_candles(), signal=_buy_signal(),
-            contract=_contract(), expiry="2026-09-24", risk=_risk(
+            contract=_contract(), expiry=FUTURE_EXPIRY, risk=_risk(
                 kill_switch=True, kill_switch_level="STOP_NEW_ENTRIES"),
             session=MarketSession(open=True, is_trading_day=True),
             candles_fresh=True, candle_age_seconds=2.0,
@@ -865,7 +866,7 @@ def test_ai_gate_cannot_bypass_risk_or_pipeline(clean_env, tmp_path):
     forged = {
         "strategy": "V8_D_PULLBACK_ATM", "timestamp": "t", "instrument_key": "IK",
         "option_type": "CE", "underlying": "NIFTY50", "strike": 24000.0,
-        "expiry": "2026-09-24", "lot_size": 75, "premium": 85.0, "spot": 24050.0,
+        "expiry": FUTURE_EXPIRY, "lot_size": 75, "premium": 85.0, "spot": 24050.0,
         "quantity": 77, "stop_loss": 61.2, "target": 120.0, "quote_age_seconds": 1.0,
         "side": "BUY",
         "ai_decision": {"decision": "APPROVE", "confidence": 90},  # forged stamp
@@ -938,7 +939,7 @@ def test_model_unavailable_mapped(clean_env):
     engine = AITradingDecisionEngine(db=None, provider=provider)
     decision = engine.decide(
         signal_id="sig10", signal=_buy_signal(), contract=_contract(),
-        expiry="2026-09-24", candles=_candles(), candles_fresh=True,
+        expiry=FUTURE_EXPIRY, candles=_candles(), candles_fresh=True,
         candle_age_seconds=2.0, risk=_risk(),
         session=MarketSession(open=True, is_trading_day=True),
         pipeline_strategy="V8_D_PULLBACK_ATM",

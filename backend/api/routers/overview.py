@@ -40,8 +40,8 @@ IST = ZoneInfo("Asia/Kolkata")
 def _is_market_open() -> bool:
     """Delegates to the ONE authoritative exchange calendar (weekends,
     official NSE/BSE holidays, special sessions) — no local weekday math."""
-    from backend.market.calendar import is_market_open_now
-    return is_market_open_now()
+    from backend.market.calendar import is_market_open_now_safe
+    return is_market_open_now_safe()      # never raises: a missing holiday table => "closed", not HTTP 500
 
 
 def _serialize_position(row: Any) -> Dict[str, Any]:
@@ -120,6 +120,11 @@ async def get_overview(request: Request) -> Dict[str, Any]:
     engine = getattr(request.app.state, "engine", None)
     active_risk_manager = getattr(engine, "risk_manager", None) or _risk_manager
     risk_status = active_risk_manager.get_status()
+    try:   # the limit that actually binds is min(risk limit, V8-D's own daily cap)
+        from backend.strategy.v8d_diagnostics import daily_trade_caps
+        risk_status = {**risk_status, **daily_trade_caps(risk_status.get("max_trades"))}
+    except Exception:
+        pass
 
     positions: List[Dict[str, Any]] = []
     try:

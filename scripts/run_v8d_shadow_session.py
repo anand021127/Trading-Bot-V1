@@ -568,8 +568,8 @@ All 12 hard production safety rules were verified in the live pipeline:
 3. **Lot Size Conformity**: Validated against exchange specifications (25 for NIFTY, 15 for BANKNIFTY).
 4. **Spot vs. Option Corruption Check**: Verified option LTP is not equal to underlying spot index.
 5. **Quote Freshness Enforcement**: Stale ticks (>30s) rejected.
-6. **Max 3.0% Account Risk Cap**: Risk bounds enforced per trade ($\le ₹{account_equity * 0.03:,.2f}$).
-7. **Max 20.0% Capital Allocation Cap**: Margin ceiling enforced ($\le ₹{account_equity * 0.20:,.2f}$).
+6. **Max 3.0% Account Risk Cap**: Risk bounds enforced per trade ($\\le ₹{account_equity * 0.03:,.2f}$).
+7. **Max 20.0% Capital Allocation Cap**: Margin ceiling enforced ($\\le ₹{account_equity * 0.20:,.2f}$).
 8. **Max 3 Trades / Day**: Daily frequency limiter active.
 9. **Emergency Kill Switch**: Tested and verified.
 10. **Startup Broker Position Reconciliation**: Local SQLite positions matched against Upstox live positions (0 discrepancies).

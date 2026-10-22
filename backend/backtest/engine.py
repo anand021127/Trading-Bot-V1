@@ -431,7 +431,6 @@ class BacktestResult:
             "pe_intents": self.pe_intents,
             "contract_resolution_attempts": self.contract_resolution_attempts,
             "contracts_resolved": self.contracts_resolved,
-            "contract_resolution_failures": self.contract_resolution_failures,
             "contract_resolution_failures_breakdown": self.contract_resolution_failures_breakdown,
             "option_premium_lookup_attempts": self.option_premium_lookup_attempts,
             "option_premiums_found": self.option_premiums_found,

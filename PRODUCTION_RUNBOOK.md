@@ -239,3 +239,17 @@ do not trade on it.
 3. On real 2024 data V8-D yields ~1–2 setups per symbol per day, mostly blocked by the trend filter; with a single symbol roughly half
    of the days have none. By default all six underlyings are scanned (`PAPER_UNDERLYINGS`).
 4. V8-D is evaluated on COMPLETED 5-minute candles only; a signal appears within seconds after a bar closes.
+
+
+## Hardening checklist for a public host
+1. Set `CONTROL_TOKEN` and enter it once in the UI (Settings → Control token). All state-changing endpoints then require it.
+2. Set `UPSTOX_WEBHOOK_SECRET` and register the notifier URL as `https://<host>/api/webhooks/upstox-token-notifier?secret=<value>`.
+3. Set `EXCHANGE_HOLIDAYS_2027` from the official NSE/BSE circular before 1 Jan 2027 (the dashboard warns from October).
+4. Set `VITE_BACKEND_URL` on the frontend host so the WebSocket connects straight to the backend.
+5. Raise `COPILOT_LLM_TIMEOUT_SECONDS` if your local model is slow (default 45).
+
+## Paper capital must fund one lot
+V8-D sizes all-or-nothing (2.5 % risk, 18 % allocation per trade). One index-option lot needs ≈ ₹49,000–₹63,000 of equity; below that
+every valid setup is rejected with "0 lots". The Decision pipeline shows the minimum per symbol (from the live chain) and a red warning
+when the current equity cannot fund a lot. Raise `TRADING_CAPITAL` (paper money) — the risk percentages stay unchanged.
+See `STRATEGY_EVIDENCE_REPORT.md` for why V8-D should not be run live.

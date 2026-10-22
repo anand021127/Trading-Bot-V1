@@ -28,6 +28,7 @@ def _backend_pipeline(worker):
     w, _e = _find("NIFTY50", lambda x: x["decision"] is None and x["binding_condition"] == "trend" and x["evaluated"])
     worker.db.save_setting("paper_reconcile_ok", "1")
     sc = _scanner(worker, "NIFTY50", w, _engine(worker, [APPROVE_JSON]))
+    sc.data.expiry = "2027-01-07"          # pinned: the committed fixture must be byte-stable (NO_SIGNAL never needs a live expiry)
     res = sc.scan_once(worker.runtime, trades_today=0, kill_switch_active=False)
     rec = ss.build_scan_record(seq=1, scanned=res.scanned, traded=res.traded, reason=res.reason, signal=res.signal,
                                details=res.details, strategy="V8_D_PULLBACK_ATM", underlying="NIFTY50", now=FIXED_NOW)

@@ -670,32 +670,7 @@ async def token_status_endpoint() -> Dict[str, Any]:
     """Safe token status diagnostic."""
     from backend.broker.token_resolver import get_token_metadata
     return get_token_metadata()
-    from backend.broker.upstox_client import UpstoxClient
 
-    token = resolve_upstox_token()
-    meta = get_token_metadata()
-
-    result = {
-        "token_present": meta["present"],
-        "token_source": meta["source"],
-        "fingerprint": meta["fingerprint"],
-        "length": meta["length"],
-        "persisted": meta["source"] in ("database", "runtime"),
-        "broker_verified": False,
-        "profile_status": None,
-    }
-
-    if token:
-        try:
-            client = UpstoxClient(access_token=token)
-            valid = client.is_token_valid()
-            result["broker_verified"] = valid
-            result["profile_status"] = 200 if valid else 401
-        except Exception:
-            result["broker_verified"] = False
-            result["profile_status"] = None
-
-    return result
 
 
 @router.post("/request-token-push")

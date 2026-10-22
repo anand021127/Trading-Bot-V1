@@ -23,6 +23,14 @@ os.environ.setdefault("TRADING_BOT_OFFLINE_TESTS", "1")
 os.environ.setdefault("TRADING_MODE", "paper")
 os.environ.setdefault("TRADING_STRATEGY", "V8_D_PULLBACK_ATM")
 os.environ.setdefault("UPSTOX_ORDER_PRODUCT", "I")
+
+# The suite must not depend on the wall-clock date. The built-in exchange holiday tables end in 2026
+# and the calendar (correctly) FAILS CLOSED afterwards, which would turn every clock-using test red
+# on 1 Jan 2027. Give the TEST process a stand-in table for the following years (Republic Day, 26 Jan,
+# a fixed gazetted holiday). This says nothing about the real calendar: production must supply the
+# exchange's official list via EXCHANGE_HOLIDAYS_<YYYY> (see .env.example / the dashboard warning).
+for _year in (2027, 2028, 2029):
+    os.environ.setdefault(f"EXCHANGE_HOLIDAYS_{_year}", f"{_year}-01-26")
 # Unique DB per process to avoid SQLite disk I/O collisions across tests
 _db = os.path.join(tempfile.gettempdir(), f"pytest_trading_bot_{uuid.uuid4().hex}.db")
 os.environ["DATABASE_PATH"] = _db

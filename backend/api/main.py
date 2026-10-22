@@ -54,6 +54,11 @@ async def lifespan(app: FastAPI):
     db = DatabaseManager(db_path=s.database.path)
     db.init_db()
 
+    _cal = _calendar_info()
+    if _cal.get("warning"):
+        logging.getLogger(__name__).warning("[CALENDAR] %s", _cal["warning"])
+        print(f"[WARN] [CALENDAR] {_cal['warning']}")
+
     # ── Backtest job restart recovery ─────────────────────────────────
     # Any job the durable store still lists as active died with the previous
     # process. Mark it INTERRUPTED_BY_RESTART (never COMPLETED) before the
@@ -397,6 +402,15 @@ app.include_router(ai_decision_router,    prefix="/api/ai-decision")
 
 
 # ─── Core endpoints ────────────────────────────────────────────────────────────
+def _calendar_info() -> dict:
+    """Holiday-table coverage (warns from October that the table ends this year)."""
+    try:
+        from backend.market.calendar import exchange_calendar
+        return exchange_calendar.coverage_info()
+    except Exception as exc:  # never let a diagnostic break /health
+        return {"severity": "error", "warning": f"calendar unavailable: {type(exc).__name__}"}
+
+
 @app.get("/health")
 async def health():
     """Lightweight health endpoint — reads in-memory state only, never
@@ -414,6 +428,7 @@ async def health():
             "started_at": snapshot.get("started_at"),
             "process_id": snapshot.get("process_id"),
             "last_heartbeat_seconds_ago": snapshot.get("last_heartbeat_seconds_ago"),
+            "calendar": _calendar_info(),
         }
     except Exception:
         return {
@@ -421,6 +436,7 @@ async def health():
             "mode": settings.mode,
             "timestamp": datetime.now().isoformat(),
             "version": "2.0.0",
+            "calendar": _calendar_info(),
         }
 
 

@@ -148,8 +148,8 @@ def unsubscribe_option_contract(instrument_key: str) -> None:
 def _is_market_open() -> bool:
     """Delegates to the ONE authoritative exchange calendar (weekends,
     official NSE/BSE holidays, special sessions) — no local weekday math."""
-    from backend.market.calendar import is_market_open_now
-    return is_market_open_now()
+    from backend.market.calendar import is_market_open_now_safe
+    return is_market_open_now_safe()      # never raises: a missing holiday table => "closed", not HTTP 500
 
 
 def _get_bot_state() -> Dict[str, Any]:

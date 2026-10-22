@@ -45,7 +45,11 @@ export interface CtxConfig {
 }
 
 export interface CtxWebsocket {
-  state?: string
+  available?: boolean
+  reason?: string
+  state?: string                 // present when a WebSocket client is attached to the API process
+  connection_status?: string     // fallback shape when no client is attached
+  is_connected?: boolean
   streaming?: boolean
   last_tick_age_seconds?: number | null
   market_data_status?: string
@@ -76,6 +80,8 @@ export interface CtxToday {
   reason?: string
   trades_today?: number
   configured_max_trades?: number | null
+  strategy_daily_cap?: number | null
+  effective_max_trades?: number | null
   trades_remaining?: number | null
   wins?: number
   losses?: number
@@ -87,6 +93,8 @@ export interface CtxRisk {
   reason?: string
   trades_used?: number
   max_trades?: number | null
+  strategy_daily_cap?: number | null
+  effective_max_trades?: number | null
   daily_loss_used_pct?: number | null
   daily_pnl?: number | null
   consecutive_losses?: number | null
@@ -123,6 +131,14 @@ export interface CtxBacktest {
     win_rate_pct?: number
     profit_factor?: number
     max_drawdown_pct?: number
+    edge?: {
+      verdict?: 'INSUFFICIENT_DATA' | 'POSITIVE_EXPECTANCY' | 'NEGATIVE_EXPECTANCY' | 'NO_DEMONSTRATED_EDGE'
+      n_trades?: number
+      mean_r?: number
+      ci95_low?: number
+      ci95_high?: number
+      message?: string
+    }
   }
 }
 
@@ -164,7 +180,7 @@ export interface CopilotContext {
   pipeline?: PipelineView & { available?: boolean; reason?: string }
   backtest?: CtxBacktest
   configuration_mismatches?: CtxMismatch[]
-  errors?: { available?: boolean; note?: string; recent?: unknown[] }
+  errors?: { available?: boolean; note?: string; recent_error_lines?: string[]; recent_health_events?: unknown[] }
 }
 
 export type CtxLoad = 'loading' | 'ok' | 'error'

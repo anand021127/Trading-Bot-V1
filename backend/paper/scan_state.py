@@ -295,6 +295,7 @@ def build_scan_record(
         "outcome": derive_outcome(reason, signal, traded),
         "v8d": v8d_full,
         "chain": chain_full,
+        "funding": det.pop("funding", None),
         "candle_complete": det.get("last_candle_complete"),
         "rejection": rejection,
         "risk_decision": dec["risk_decision"],
@@ -380,6 +381,9 @@ def symbol_summary(record: Dict[str, Any]) -> Dict[str, Any]:
         "ema20": v.get("ema20"), "ema50": v.get("ema50"), "sep_pct": v.get("ema_separation_pct"),
         "rsi": v.get("rsi"), "close": px.get("close"),
         "ai_status": (record.get("ai") or {}).get("status"), "error": record.get("error"),
+        "min_equity_one_lot": (record.get("funding") or {}).get("min_equity_one_lot"),
+        "can_fund_one_lot": (record.get("funding") or {}).get("can_fund_one_lot"),
+        "equity": (record.get("funding") or {}).get("equity"),
     }
 
 
@@ -599,6 +603,7 @@ def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Op
         "v8d": None,                # per-condition V8-D diagnostics for the primary symbol
         "primary_symbol": None,
         "symbols": list(symbols or []),   # latest scan of EVERY scanned underlying
+        "funding": None,                  # can the CURRENT equity fund one lot? (real chain, V8-D caps)
         "scan_seq": None,
         "scan_time_ist": None,
         "summary": "No scan has been recorded yet.",
@@ -622,6 +627,7 @@ def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Op
     outcome = rec.get("outcome") or derive_outcome(reason, rec.get("signal"), rec.get("traded"))
     base["outcome"] = outcome
     base["v8d"] = rec.get("v8d") or det.get("v8d")
+    base["funding"] = rec.get("funding")
     base["primary_symbol"] = rec.get("underlying")
     base["scan_seq"] = rec.get("seq")
     base["scan_time_ist"] = rec.get("recorded_at_ist")
@@ -643,6 +649,12 @@ def build_pipeline(rec: Optional[Dict[str, Any]], state: str, *, ai_fallback: Op
         base["latest_signal"] = "SIGNAL REJECTED (BY V8-D)"
         rej = [str(x) for x in (rec.get("rejection") or det.get("rejection") or [])]
         base["signal_detail"] = "; ".join(rej[:3]) if rej else reason
+        fund = rec.get("funding") or {}
+        if any("0 lots" in r for r in rej) and fund.get("min_equity_one_lot"):
+            base["signal_detail"] += (
+                f". The setup was valid but account equity ₹{float(fund.get('equity') or 0):,.0f} cannot fund ONE lot "
+                f"under V8-D's own caps (risk ≤ 2.5 %, allocation ≤ 18 %): at least ₹{float(fund['min_equity_one_lot']):,.0f} is needed. "
+                "Raise the paper capital (TRADING_CAPITAL) — the risk percentages stay the same.")
     elif cat == "NO_SIGNAL":
         base["latest_signal"] = "NO SIGNAL"
         v8 = base["v8d"] or {}

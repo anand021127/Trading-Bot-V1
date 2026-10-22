@@ -13,6 +13,14 @@ from __future__ import annotations
 
 import os
 
+# The suite must not depend on the wall-clock date. The built-in exchange holiday tables end in 2026
+# and the calendar (correctly) FAILS CLOSED afterwards, which would turn every clock-using test red
+# on 1 Jan 2027. Give the TEST process a stand-in table for the following years (Republic Day, 26 Jan,
+# a fixed gazetted holiday). This says nothing about the real calendar: production must supply the
+# exchange's official list via EXCHANGE_HOLIDAYS_<YYYY> (see .env.example / the dashboard warning).
+for _year in (2027, 2028, 2029):
+    os.environ.setdefault(f"EXCHANGE_HOLIDAYS_{_year}", f"{_year}-01-26")
+
 # Bound native BLAS thread pools before numpy is imported anywhere in the
 # test process — see backend/tests/conftest.py for the memory-pressure
 # rationale (OpenBLAS per-thread buffers OOM subprocess spawns on

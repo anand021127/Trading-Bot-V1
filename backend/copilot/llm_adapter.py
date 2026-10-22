@@ -1,4 +1,4 @@
-﻿"""Pluggable reasoning/explanation backend for the Copilot.
+"""Pluggable reasoning/explanation backend for the Copilot.
 
 Two backends:
   - RuleBasedFallbackAdapter: template-based, zero dependencies, zero

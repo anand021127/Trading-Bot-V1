@@ -8,7 +8,8 @@ from datetime import datetime
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from backend.api.control_auth import require_control_token
 
 from backend.config.settings import load_settings
 
@@ -412,7 +413,7 @@ async def upstox_auth_diagnostic() -> Dict[str, Any]:
         }
 
 
-@router.post("/run-all")
+@router.post("/run-all", dependencies=[Depends(require_control_token)])
 async def run_all_tests() -> Dict[str, Any]:
     results = []
     for name, fn in TEST_MAP.items():
@@ -425,7 +426,7 @@ async def run_all_tests() -> Dict[str, Any]:
     return {"results": results, "passed": passed, "failed": len(results) - passed}
 
 
-@router.post("/test/{test_name}")
+@router.post("/test/{test_name}", dependencies=[Depends(require_control_token)])
 async def run_single_test(test_name: str) -> Dict[str, Any]:
     fn = TEST_MAP.get(test_name)
     if fn is None:
@@ -453,7 +454,7 @@ async def instrument_master_status() -> Dict[str, Any]:
     return get_master_status()
 
 
-@router.post("/instrument-master/refresh")
+@router.post("/instrument-master/refresh", dependencies=[Depends(require_control_token)])
 async def instrument_master_refresh() -> Dict[str, Any]:
     """Force an immediate re-fetch, bypassing the 24h TTL — use this right
     after seeing an 'Invalid Instrument key' error instead of waiting for

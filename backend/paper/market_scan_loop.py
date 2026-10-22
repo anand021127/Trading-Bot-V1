@@ -481,6 +481,8 @@ class PaperMarketScanner:
         try:
             from backend.strategy.v8d_diagnostics import explain_chain
             diag["chain"] = explain_chain(chain, spot, self.underlying, self.strategy)
+            from backend.strategy.v8d_diagnostics import funding_check
+            diag["funding"] = funding_check(diag["chain"], current_equity, self.strategy)
         except Exception as exc:
             diag["chain_diag_error"] = type(exc).__name__
 
