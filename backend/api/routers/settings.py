@@ -145,6 +145,26 @@ async def update_settings(body: Dict[str, Any]) -> Dict[str, Any]:
                 else:
                     current[key] = body[key]
 
+        # If starting capital changes, keep the persisted paper equity aligned
+        # with the new baseline while preserving already-realized P&L. Without
+        # this adjustment, an old paper_equity_snapshot (e.g. ₹20,000) overrides
+        # the newly saved capital (e.g. ₹30,000) in the worker and scan diagnostics.
+        try:
+            old_capital = float(((_config_db().load_settings_blob() or _yaml_defaults()).get("capital") or {}).get("total", settings.capital.total))
+            new_capital = float((current.get("capital") or {}).get("total", old_capital))
+            if new_capital > 0 and old_capital > 0 and abs(new_capital - old_capital) > 1e-9:
+                snapshot_raw = _config_db().get_setting("paper_equity_snapshot", "") or ""
+                if snapshot_raw:
+                    snapshot = json.loads(snapshot_raw)
+                    old_equity = float(snapshot.get("realized_equity") or 0)
+                    if old_equity > 0:
+                        # Preserve P&L accumulated against the old baseline.
+                        snapshot["realized_equity"] = round(old_equity + (new_capital - old_capital), 2)
+                        snapshot["starting_capital"] = new_capital
+                        _config_db().save_setting("paper_equity_snapshot", json.dumps(snapshot))
+        except Exception as exc:
+            logger.warning("Could not rebase paper equity after capital update: %s", type(exc).__name__)
+
         # Save to SQLite (primary persistent storage)
         _config_db().save_settings_blob(current)
 

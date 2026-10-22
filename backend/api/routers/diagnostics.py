@@ -17,6 +17,17 @@ router = APIRouter()
 settings = load_settings()
 
 
+def _token_source_is_persisted(source: Any) -> bool:
+    """Return whether token resolution used durable or verified runtime storage.
+
+    Token resolver source labels are descriptive (for example,
+    ``database (SQLite verified)``), so exact string matching incorrectly
+    reported persisted=False for valid database-backed tokens.
+    """
+    normalized = str(source or "").strip().lower()
+    return any(marker in normalized for marker in ("database", "sqlite", "persisted", "runtime"))
+
+
 def _result(name: str, status: str, ms: float, details: str = "", error: str = "") -> Dict[str, Any]:
     return {
         "test_name": name,
@@ -503,7 +514,7 @@ async def get_token_diagnostics() -> Dict[str, Any]:
             "token_source": source,
             "fingerprint": fingerprint,
             "length": meta.get("length", 0),
-            "persisted": source in ["database", "runtime"],
+            "persisted": _token_source_is_persisted(source),
             "broker_verified": broker_verified,
             "profile_status": profile_status,
             "timestamp": datetime.utcnow().isoformat(),

@@ -43,6 +43,14 @@ def _make_dummy_jwt(payload: dict) -> str:
 
 class TestTokenLifecycleRegression(unittest.TestCase):
 
+    def test_token_status_recognizes_descriptive_sqlite_source_as_persisted(self):
+        """Regression: the actual resolver label must not produce persisted=False."""
+        from backend.api.routers.diagnostics import _token_source_is_persisted
+        self.assertTrue(_token_source_is_persisted("database (SQLite verified)"))
+        self.assertTrue(_token_source_is_persisted("runtime"))
+        self.assertFalse(_token_source_is_persisted("environment (os.environ)"))
+        self.assertFalse(_token_source_is_persisted("none"))
+
     def setUp(self):
         from backend.broker.token_resolver import clear_verified_runtime_token
         self.original_env_token = os.environ.get("UPSTOX_ACCESS_TOKEN")
