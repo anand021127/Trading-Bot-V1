@@ -72,6 +72,21 @@ def test_valid_setup_at_20k_is_rejected_with_a_clear_explanation_and_fills_when_
     assert _funding_mismatch(worker.db) == []                # warning clears once funded
 
 
+def test_5000_equity_is_not_allowed_to_bypass_whole_lot_risk_caps():
+    """Small-capital paper profile must report unaffordable whole lots, not force fills."""
+    strat = V8DStrategy()
+    chain = {
+        "ce": {"premium_ltp": 66.0, "lot_size": 65},
+        "pe": {"premium_ltp": 70.0, "lot_size": 65},
+    }
+    result = funding_check(chain, 5_000, strat)
+    assert result["can_fund_one_lot"] is False
+    assert result["min_equity_one_lot"] > 5_000
+    quantity, sizing = strat.calculate_position_size(5_000, 66.0, 65, 66.0 * (1 - strat.stop_loss_pct))
+    assert quantity == 0
+    assert sizing["allowed_lots"] == 0
+
+
 def test_risk_percentages_are_unchanged():
     s = V8DStrategy()
     assert (s.max_account_risk_pct, s.max_capital_alloc_pct, s.stop_loss_pct) == (0.025, 0.18, 0.28)
