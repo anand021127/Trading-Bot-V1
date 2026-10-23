@@ -130,48 +130,98 @@ class PaperTradingRuntime:
 
     # ── durable in-memory trading-state recovery (restart safety) ───────────
     def _restore_persistent_day_state(self) -> None:
-        """Restore realized equity and today's risk counters from SQLite.
-
-        Restart-safety: without this, a worker restart after a loss would
-        silently reset realized_equity back to starting capital and zero
-        trades_today — letting the bot trade past MAX_TRADES_PER_DAY and
-        MAX_DAILY_LOSS purely by restarting.
-        """
+        """Restore equity and risk counters without guessing legacy baselines."""
+        migrated_legacy = False
         try:
             snap = self.db.get_setting("paper_equity_snapshot", "")
             if snap:
                 data = json.loads(snap)
-                self.realized_equity = float(data.get("realized_equity", self.starting_capital))
-                self.realized_pnl_total = float(data.get("realized_pnl_total", 0.0))
-                self.charges_total = float(data.get("charges_total", 0.0))
+                saved_equity = float(
+                    data.get("realized_equity", self.starting_capital)
+                )
+                saved_pnl = float(data.get("realized_pnl_total", 0.0))
+                saved_charges = float(data.get("charges_total", 0.0))
+                saved_start = data.get("starting_capital")
+
+                if saved_start is not None:
+                    saved_start = float(saved_start)
+                    if saved_start > 0 and abs(saved_start - self.starting_capital) > 0.01:
+                        # Preserve the equity change relative to its known baseline.
+                        saved_equity += self.starting_capital - saved_start
+                        logger.warning(
+                            "Paper capital baseline changed: old=%.2f new=%.2f; "
+                            "equity adjusted by baseline difference",
+                            saved_start, self.starting_capital,
+                        )
+                else:
+                    # Legacy snapshot: don't assume a lower equity is a bug.
+                    # Only migrate to configured capital when there is no evidence
+                    # of prior trading activity or realized gains/losses/charges.
+                    trades = self.db._connect().execute(
+                        "SELECT COUNT(*) FROM trades"
+                    ).fetchone()[0]
+                    positions = self.db._connect().execute(
+                        "SELECT COUNT(*) FROM positions WHERE COALESCE(quantity, 0) != 0"
+                    ).fetchone()[0]
+                    has_activity = (
+                        int(trades) > 0
+                        or int(positions) > 0
+                        or abs(saved_pnl) > 0.01
+                        or abs(saved_charges) > 0.01
+                    )
+                    if not has_activity:
+                        logger.warning(
+                            "Migrating legacy paper equity snapshot with no baseline: "
+                            "equity %.2f -> configured capital %.2f",
+                            saved_equity, self.starting_capital,
+                        )
+                        saved_equity = self.starting_capital
+                        migrated_legacy = True
+                    else:
+                        logger.error(
+                            "Legacy paper equity snapshot has no starting_capital "
+                            "and trading activity exists; preserving equity %.2f",
+                            saved_equity,
+                        )
+
+                self.realized_equity = saved_equity
+                self.realized_pnl_total = saved_pnl
+                self.charges_total = saved_charges
                 self._trade_day = data.get("trade_day") or None
                 self.trades_today = int(data.get("trades_today", 0))
                 self.daily_realized_pnl = float(data.get("daily_realized_pnl", 0.0))
         except Exception as exc:
             logger.warning("Could not restore persistent equity state: %s", exc)
-        # daily_counters is the authoritative durable source for the day's
-        # risk counters; reconcile in-memory state against it.
+
         day = self.now_fn().date().isoformat()
         counters = self.db.get_daily_counters(day)
         if self._trade_day != day:
-            # New calendar day: counters restart from the new day's durable row
-            # (which begins at zero). Equity / realized totals carry over.
             self._trade_day = day
             self.trades_today = counters["trades_taken"]
             self.daily_realized_pnl = counters["realized_pnl"]
         else:
-            if counters["trades_taken"] > self.trades_today:
-                self.trades_today = counters["trades_taken"]
+            self.trades_today = max(self.trades_today, counters["trades_taken"])
             self.daily_realized_pnl = counters["realized_pnl"]
+
         logger.info(
             "Paper state restored: equity=%.2f trades_today=%d day=%s",
             self.realized_equity, self.trades_today, day,
         )
 
+        # Persist a verified legacy migration only after state restoration.
+        if migrated_legacy:
+            self._persist_day_state()
+            logger.info(
+                "Persisted migrated paper equity snapshot: "
+                "starting_capital=%.2f realized_equity=%.2f",
+                self.starting_capital, self.realized_equity,
+            )
+
     def _persist_day_state(self) -> None:
-        """Persist equity + day counters so a crash cannot reset risk state."""
+        """Persist equity, baseline, and day counters across worker restarts."""
         try:
             self.db.save_setting("paper_equity_snapshot", json.dumps({
+                "starting_capital": self.starting_capital,
                 "realized_equity": self.realized_equity,
                 "realized_pnl_total": self.realized_pnl_total,
                 "charges_total": self.charges_total,
