@@ -40,6 +40,9 @@ if "fastapi" not in sys.modules:
 
     fastapi_mock.APIRouter = MockAPIRouter
     fastapi_mock.HTTPException = MockHTTPException
+    fastapi_mock.status = types.SimpleNamespace(
+        HTTP_401_UNAUTHORIZED=401
+    )
     fastapi_mock.Request = MagicMock
     fastapi_mock.Response = MagicMock
     fastapi_mock.BackgroundTasks = MagicMock
